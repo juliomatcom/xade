@@ -640,6 +640,33 @@ flowchart TD
 
 ---
 
+## 10d. Phase 9 — Keyboard shortcuts and keymaps modal (Sonnet)
+- One static table, `apps/desktop/src/keymap.rs`, is the single source of truth: the shortcut handler and the keymaps modal both read it. There's no user remapping yet.
+- The modal opens with `Cmd+K Cmd+S` (VS Code's "Keyboard Shortcuts"), a "Shortcuts" button in the top bar, or `?` when no text field has focus. It lists the shortcuts grouped by Sessions, Chat, Layout and General.
+- Shortcuts follow VS Code where an equivalent exists:
+
+| Action | Keys | VS Code analogue |
+|---|---|---|
+| New session in the selected workspace | Cmd+N | New file |
+| Focus search | Cmd+P | Quick Open |
+| Send prompt | Cmd+Enter | Chat submit |
+| Stop the current turn | Cmd+. | Cancel |
+| Close the focused session window | Cmd+W | Close editor |
+| Focus session window 1–9 | Cmd+1 … Cmd+9 | Focus editor group N |
+| Next / previous session window | Ctrl+Tab / Ctrl+Shift+Tab | Cycle editors |
+| Maximize / restore the focused window | Cmd+K Cmd+M | Maximize editor group |
+| Toggle the sidebar | Cmd+B | Toggle primary side bar |
+| Re-tile windows | Cmd+K Cmd+T | — |
+| Home ↔ Workspace | Cmd+Shift+H | — |
+| Toggle Auto mode (focused session) | Cmd+Shift+A | — |
+| Keyboard shortcuts | Cmd+K Cmd+S | Keyboard Shortcuts |
+| Close a modal | Esc | — |
+
+- Chords: after `Cmd+K`, wait up to 1.5 s for the second key, and show a muted "Cmd+K …" hint in the status bar meanwhile. Plain shortcuts are consumed with `ctx.input_mut(|i| i.consume_shortcut(..))` so text fields don't also receive them.
+- Tests cover the table having no duplicate bindings, chord state transitions, and the modal rendering headless.
+
+---
+
 ## 11. Wiki (`wiki-llm/`): structure and initial content
 
 Principles, from `AGENTS.md`: it orients, the code is the detail. One line per fact, each page under ~40 lines. No field lists, styling or history.
