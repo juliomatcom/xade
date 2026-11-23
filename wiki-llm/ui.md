@@ -1,5 +1,5 @@
 # UI
-- Home and Workspace views share the top bar, status bar and sidebar panels; only the central panel differs (`apps/desktop/src/app.rs`). Design reference: `design/workspace-mock.png`.
+- Home and Workspace views share the top bar, status bar and sidebar panels; only the central panel differs (`apps/desktop/src/app.rs`). Design reference: `design/workspace-mock.png`. The sidebar file tree (`file_tree.rs`) reads folders lazily on expand, shows dotfiles, never follows symlinks, and opens a clicked file in Xade's editor.
 - All UI state lives in `App` (per-session `SessionVm`, home state, git map), never in a view, so background sessions keep updating.
 - Manager events, query results and git results reach the UI through one std mpsc channel; every sender calls `request_repaint()`, and `App::logic` drains it each frame. Never block or `.await` in a frame.
 - Reads (home list, search, workspaces) run as tasks on the tokio runtime and return tagged with a generation; stale results are dropped.

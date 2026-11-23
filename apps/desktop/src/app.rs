@@ -22,6 +22,7 @@ use xade_store::{Page, SessionCard, StoreReader, WriteOp, WriterHandle};
 use crate::config::{self, Config};
 use crate::diff::{is_code_change, DiffData};
 use crate::editor::{self, CloseChoice, EditorId, Editors, SaveOutcome};
+use crate::file_tree::{self, FileTree, Listing, TreeAction};
 use crate::home::HomeState;
 use crate::keymap::{self, Action, Chord};
 use crate::running::{self, PendingOpen};
@@ -65,6 +66,11 @@ pub enum UiMsg {
     FileOpened {
         path: PathBuf,
         text: Result<String, String>,
+    },
+    /// A folder read for the file tree finished.
+    DirListed {
+        path: PathBuf,
+        result: Result<Listing, String>,
     },
     /// A save finished; `revision` is the text version that was written.
     Saved {
@@ -159,6 +165,7 @@ pub struct App {
     pub open_windows: Vec<WindowKind>,
     pub focused: Option<WindowKind>,
     pub editors: Editors,
+    pub tree: FileTree,
     pub quota: Vec<QuotaWindow>,
     pub cmd_tx: UnboundedSender<ManagerCmd>,
     pub rt: Handle,
@@ -239,6 +246,7 @@ impl App {
             open_windows: Vec::new(),
             focused: None,
             editors: Editors::default(),
+            tree: FileTree::default(),
             quota: Vec::new(),
             cmd_tx,
             rt,
@@ -298,6 +306,7 @@ impl App {
             open_windows: Vec::new(),
             focused: None,
             editors: Editors::default(),
+            tree: FileTree::default(),
             quota: Vec::new(),
             cmd_tx: tokio::sync::mpsc::unbounded_channel().0,
             rt,
@@ -385,9 +394,14 @@ impl App {
 
     /// Opens `settings.json` in Xade's own editor, focusing the window when it is already open.
     pub fn open_settings(&mut self) {
-        let Some(path) = self.config_watch.as_ref().map(|w| w.path().to_path_buf()) else {
-            return;
-        };
+        if let Some(path) = self.config_watch.as_ref().map(|w| w.path().to_path_buf()) {
+            self.open_path(path);
+        }
+    }
+
+    /// Opens a file in Xade's editor: focuses the window when it is already open, else reads it
+    /// off the UI thread.
+    pub fn open_path(&mut self, path: PathBuf) {
         if let Some(id) = self.editors.find_path(&path) {
             self.focus(WindowKind::Editor(id));
             return;
@@ -397,6 +411,25 @@ impl App {
             let text = editor::read_file(&path);
             bridge.send(UiMsg::FileOpened { path, text });
         });
+    }
+
+    /// Expands a tree folder (reading it in the background) or collapses it.
+    pub fn toggle_dir(&mut self, path: &std::path::Path) {
+        if !self.tree.toggle(path) {
+            return;
+        }
+        let (path, bridge) = (path.to_path_buf(), self.bridge.clone());
+        self.rt.spawn_blocking(move || {
+            let result = file_tree::read_listing(&path);
+            bridge.send(UiMsg::DirListed { path, result });
+        });
+    }
+
+    pub fn tree_action(&mut self, action: TreeAction) {
+        match action {
+            TreeAction::Toggle(path) => self.toggle_dir(&path),
+            TreeAction::Open(path) => self.open_path(path),
+        }
     }
 
     // ----- background work -----
@@ -1152,6 +1185,7 @@ impl App {
             }
             UiMsg::Running { list, transcripts } => self.on_running(list, transcripts),
             UiMsg::FileOpened { path, text } => self.on_file_opened(path, text),
+            UiMsg::DirListed { path, result } => self.tree.loaded(&path, result),
             UiMsg::Saved {
                 id,
                 revision,

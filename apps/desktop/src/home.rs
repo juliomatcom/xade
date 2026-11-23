@@ -1,5 +1,6 @@
 //! Home view and the shell panels it shares with the workspace view (top bar, sidebar).
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use egui::{Align, Layout, RichText};
@@ -8,6 +9,7 @@ use xade_core::{QuotaKind, QuotaWindow, SessionOrigin, SessionStatus, Workspace,
 use xade_store::SessionCard;
 
 use crate::app::{App, View};
+use crate::file_tree::{self, TreeAction};
 use crate::keymap::{self, Action};
 use crate::{icons, running, theme};
 
@@ -285,31 +287,47 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                     {
                         set_scope(app, None);
                     }
-                    let rows: Vec<(WorkspaceId, String, usize)> = app
+                    let rows: Vec<(WorkspaceId, PathBuf, String, usize)> = app
                         .home
                         .workspaces
                         .iter()
-                        .map(|w| (w.id, w.display_name.clone(), app.live_count(w.id)))
+                        .map(|w| {
+                            let name = w.display_name.clone();
+                            (w.id, w.root_path.clone(), name, app.live_count(w.id))
+                        })
                         .collect();
-                    let row_h = ui.spacing().interact_size.y;
+                    // Only expanded folders are walked and off-screen rows are not painted, so
+                    // uneven row heights rule out `show_rows`.
+                    let mut actions = Vec::new();
                     egui::ScrollArea::vertical()
                         .id_salt("workspaces")
                         .auto_shrink([false, false])
-                        .show_rows(ui, row_h, rows.len(), |ui, range| {
-                            for (id, name, live) in &rows[range] {
-                                let text = if *live > 0 {
+                        .show(ui, |ui| {
+                            for (id, root, name, live) in &rows {
+                                let chevron = if app.tree.is_expanded(root) {
+                                    icons::EXPANDED
+                                } else {
+                                    icons::COLLAPSED
+                                };
+                                let name = if *live > 0 {
                                     format!("{name}  ({live})")
                                 } else {
                                     name.clone()
                                 };
                                 let selected = app.home.scope == Some(*id);
+                                let text = icons::with(chevron, &name);
                                 let resp =
                                     ui.add(egui::Button::selectable(selected, text).truncate());
                                 if resp.clicked() {
                                     set_scope(app, Some(*id));
+                                    actions.push(TreeAction::Toggle(root.clone()));
                                 }
+                                file_tree::show(ui, &app.tree, root, 1, &mut actions);
                             }
                         });
+                    for action in actions {
+                        app.tree_action(action);
+                    }
                 });
             });
         });
@@ -902,5 +920,42 @@ mod tests {
                 .all(|t| (t.width() - tiles[0].width()).abs() < 0.01));
             assert!(tiles.windows(2).all(|p| !p[0].intersects(p[1])));
         }
+    }
+
+    #[test]
+    fn sidebar_renders_an_expanded_tree() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-side-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("proj/sub/deep")).unwrap();
+        std::fs::write(dir.join("proj/.env"), "").unwrap();
+        std::fs::write(dir.join("proj/sub/a.rs"), "").unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let root = dir.join("proj");
+        app.home.workspaces = vec![Workspace {
+            id: WorkspaceId::new(),
+            root_path: root.clone(),
+            display_name: "proj".into(),
+            last_opened_at: OffsetDateTime::now_utc(),
+            is_pinned: false,
+        }];
+        for p in [root.clone(), root.join("sub"), root.join("missing")] {
+            app.tree.toggle(&p);
+            app.tree.loaded(&p, file_tree::read_listing(&p));
+        }
+        for width in [160.0, 220.0, 400.0] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(width + 400.0, 600.0),
+                )),
+                ..Default::default()
+            };
+            let mut full = ctx.run_ui(input, |ui| sidebar(&mut app, ui));
+            full.textures_delta.clear();
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

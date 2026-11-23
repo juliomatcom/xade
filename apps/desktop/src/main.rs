@@ -5,6 +5,7 @@ mod config;
 mod conversation;
 mod diff;
 mod editor;
+mod file_tree;
 mod home;
 mod icons;
 mod keymap;
