@@ -6,7 +6,7 @@ Verified against Claude Code 2.1.330 with fixtures in `crates/claude/fixtures/` 
 - `--setting-sources project` is used by the recorder only, for isolation; the app keeps the user's settings.
 - Models: aliases `fable`, `opus`, `sonnet`, `haiku`. No thinking on/off flag exists.
 - Auth preflight: `claude auth status --json`; exit 0 + `loggedIn: true` when logged in, exit 1 when not. Read only `loggedIn`.
-- GUI apps on macOS lack the shell PATH; the default install is `~/.local/bin/claude`.
+- GUI apps on macOS lack the shell PATH: look up `claude` in `$PATH`, then `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` (the default install).
 
 ## Stdin (we send)
 - Prompt: `{"type":"user","session_id":"<id or empty>","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"text","text":…}]}}`.
@@ -25,5 +25,17 @@ Verified against Claude Code 2.1.330 with fixtures in `crates/claude/fixtures/` 
 - `result`: `subtype`, `is_error`, `total_cost_usd`, `usage`, `modelUsage[model].contextWindow`, `permission_denials`. After an interrupt: `subtype:"error_during_execution"`, `is_error:true`, preceded by a `user` text frame `[Request interrupted by user]` — treat as interrupted, not an error.
 - Context used = last `assistant.message.usage` input + cache_read + cache_creation tokens.
 
+## Frame → event (`crates/claude/src/translate.rs`)
+- `system/init` → `Started` (every turn; consumers dedupe). `system/thinking_tokens` → `ThinkingProgress`.
+- `stream_event` `text_delta` → `TextDelta`; other deltas ignored.
+- `assistant` block `text` → `AssistantText`, `tool_use` → `ToolUse`; `thinking` skipped.
+- `user` `tool_result` → `ToolResult` (`tool_use_result` → `structured_json`); `user` text frames ignored.
+- `rate_limit_event` → one `Quota` per `unifiedWindows` entry (utilization × 100).
+- `result` → `TurnComplete`; `interrupted` comes from the command loop's flag, not the frame, and `is_error` is cleared when interrupted.
+- `control_request/can_use_tool` → `PermissionRequest`; in auto mode the reader allows it itself and emits nothing.
+- A manual allow echoes the stored original `input` as `updatedInput`; deny sends "Denied by user".
+- Unknown or unparsable frames are skipped.
+
 ## Lifecycle
-- Closing stdin ends the process with exit 0 after the current turn.
+- Closing stdin ends the process after the current turn (exit 0; exit 1 if the last turn was interrupted).
+- Shutdown: close stdin, wait 3 s, SIGTERM the process group, wait 2 s, SIGKILL; `Exited` is always the last event.
