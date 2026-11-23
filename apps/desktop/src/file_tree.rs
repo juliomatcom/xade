@@ -1,6 +1,6 @@
 //! Sidebar file tree: lazy `read_dir` per expanded folder, cached until it is collapsed.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use egui::text::{LayoutJob, TextWrapping};
@@ -132,6 +132,7 @@ pub fn show(
     tree: &FileTree,
     dir: &Path,
     depth: usize,
+    changed: Option<&HashSet<PathBuf>>,
     out: &mut Vec<TreeAction>,
 ) {
     match tree.nodes.get(dir) {
@@ -141,11 +142,12 @@ pub fn show(
         Some(Node::Loaded(l)) => {
             for e in &l.entries {
                 let open = e.kind == Kind::Dir && tree.is_expanded(&e.path);
-                if row(ui, depth, e, open) {
+                let dirty = changed.is_some_and(|c| c.contains(&e.path));
+                if row(ui, depth, e, open, dirty) {
                     out.push(click_action(e));
                 }
                 if open {
-                    show(ui, tree, &e.path, depth + 1, out);
+                    show(ui, tree, &e.path, depth + 1, changed, out);
                 }
             }
             if l.more > 0 {
@@ -178,7 +180,8 @@ fn note(ui: &mut egui::Ui, depth: usize, text: &str) {
 }
 
 /// One entry row; `true` when clicked. Rows scrolled out of view are allocated, not painted.
-fn row(ui: &mut egui::Ui, depth: usize, e: &Entry, open: bool) -> bool {
+/// `dirty`: the entry (or a file inside it) has uncommitted changes.
+fn row(ui: &mut egui::Ui, depth: usize, e: &Entry, open: bool, dirty: bool) -> bool {
     let (rect, resp) = row_rect(ui, Sense::click());
     if ui.is_rect_visible(rect) {
         if resp.hovered() {
@@ -203,7 +206,7 @@ fn row(ui: &mut egui::Ui, depth: usize, e: &Entry, open: bool) -> bool {
             rect,
             x + CHEVRON_W,
             &icons::with(icon, &e.name),
-            theme::TEXT,
+            if dirty { theme::WARN } else { theme::TEXT },
         );
     }
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -342,7 +345,7 @@ mod tests {
                 ..Default::default()
             };
             let mut out = Vec::new();
-            let mut full = ctx.run_ui(input, |ui| show(ui, &tree, &root, 0, &mut out));
+            let mut full = ctx.run_ui(input, |ui| show(ui, &tree, &root, 0, None, &mut out));
             full.textures_delta.clear();
             out
         };

@@ -17,6 +17,8 @@ pub enum Action {
     SaveAs,
     OpenPicker,
     Send,
+    /// While a turn runs: queue instead of steer, or the reverse.
+    SendOther,
     Stop,
     CloseWindow,
     FocusWindow(u8),
@@ -41,7 +43,7 @@ pub enum Action {
 impl Action {
     /// Handled where the key is read (composer, modals), so the dispatcher leaves it alone.
     fn is_local(self) -> bool {
-        matches!(self, Action::Send | Action::CloseModal)
+        matches!(self, Action::Send | Action::SendOther | Action::CloseModal)
     }
 }
 
@@ -142,7 +144,7 @@ pub static BINDINGS: &[Binding] = &[
         Action::NewSession,
         Group::Sessions,
         "New session in the selected workspace",
-        &[k(CMD_SHIFT, Key::N)],
+        &[k(CMD, Key::T)],
     ),
     row(Action::NewFile, Group::Files, "New file", &[k(CMD, Key::N)]),
     row(
@@ -180,6 +182,12 @@ pub static BINDINGS: &[Binding] = &[
         Group::Chat,
         "Send prompt",
         &[k(CMD, Key::Enter)],
+    ),
+    row(
+        Action::SendOther,
+        Group::Chat,
+        "Send the other way while running (queue / steer)",
+        &[k(CMD_SHIFT, Key::Enter)],
     ),
     row(
         Action::Stop,
@@ -479,7 +487,7 @@ mod tests {
             Feed::Fired(Action::NewFile)
         );
         assert_eq!(
-            press(&mut c, now, CMD_SHIFT, Key::N),
+            press(&mut c, now, CMD, Key::T),
             Feed::Fired(Action::NewSession)
         );
         assert_eq!(press(&mut c, now, CMD, Key::S), Feed::Fired(Action::Save));
@@ -567,10 +575,7 @@ mod tests {
     fn labels_read_naturally() {
         let find = |a| BINDINGS.iter().find(|b| b.action == a).expect("binding");
         assert_eq!(binding_label(find(Action::NewFile), true), "\u{2318}N");
-        assert_eq!(
-            binding_label(find(Action::NewSession), true),
-            "Shift+\u{2318}N"
-        );
+        assert_eq!(binding_label(find(Action::NewSession), true), "\u{2318}T");
         assert_eq!(
             binding_label(find(Action::Shortcuts), true),
             "\u{2318}K \u{2318}S"

@@ -46,6 +46,7 @@ fn every_fixture_parses_without_error() {
         "interrupt",
         "resume",
         "simple_turn",
+        "steer",
         "thinking_summaries",
         "thinking",
         "tool_allow",
@@ -104,6 +105,24 @@ fn two_turns() {
         .filter(|e| matches!(e, ProviderEvent::Started { .. }))
         .count();
     assert_eq!(starts, 2);
+}
+
+/// A prompt written mid-turn is folded into that turn: two prompts in, one turn out.
+#[test]
+fn steer_mid_turn_prompt_ends_with_one_turn() {
+    let path = format!("{}/fixtures/steer.ndjson", env!("CARGO_MANIFEST_DIR"));
+    let prompts = std::fs::read_to_string(path)
+        .expect("fixture")
+        .lines()
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|v| v["dir"] == "in" && v["frame"]["type"] == "user")
+        .count();
+    assert_eq!(prompts, 2);
+    let ev = run("steer");
+    assert_eq!(turns(&ev).len(), 1);
+    assert!(ev
+        .iter()
+        .any(|e| matches!(e, ProviderEvent::AssistantText { text } if text.contains("BANANA"))));
 }
 
 #[test]

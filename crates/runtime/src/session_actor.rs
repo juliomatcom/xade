@@ -153,7 +153,9 @@ impl Actor {
     async fn on_cmd(&mut self, cmd: ActorCmd) -> bool {
         match cmd {
             ActorCmd::Send(text) => {
-                if self.status != SessionStatus::Idle {
+                // A prompt sent mid-turn steers the running turn: the CLI folds it in at the
+                // next tool boundary and ends both with one result.
+                if !matches!(self.status, SessionStatus::Idle | SessionStatus::Streaming) {
                     self.emit(AppEventKind::Error("session is busy".into()));
                     return true;
                 }
@@ -170,7 +172,9 @@ impl Actor {
                 }
                 let msg = self.insert_message(Role::User, text.clone());
                 self.write(WriteOp::InsertMessage(msg));
-                self.set_status(SessionStatus::Streaming);
+                if self.status != SessionStatus::Streaming {
+                    self.set_status(SessionStatus::Streaming);
+                }
                 self.command(SessionCommand::SendPrompt(text));
             }
             ActorCmd::Interrupt => self.command(SessionCommand::Interrupt),

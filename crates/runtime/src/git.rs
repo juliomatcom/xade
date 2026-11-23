@@ -1,6 +1,7 @@
 //! Git status of a directory via the user's `git`; read-only, no library.
 
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -19,6 +20,9 @@ pub enum GitState {
         staged: u32,
         modified: u32,
         untracked: u32,
+        /// Files with changes (untracked included) and their parent folders, as absolute
+        /// paths once `git_status` has rebased them onto the repo root.
+        changed: HashSet<PathBuf>,
     },
     NotARepo,
     GitMissing,
@@ -29,14 +33,27 @@ pub async fn git_status(dir: &Path) -> GitState {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(dir)
-        .args(["status", "--porcelain=v2", "--branch"])
+        .args([
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "--untracked-files=all",
+        ])
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .kill_on_drop(true);
     match timeout(Duration::from_secs(2), cmd.output()).await {
         Ok(Ok(out)) if out.status.success() => {
-            parse_porcelain_v2(&String::from_utf8_lossy(&out.stdout))
+            let mut state = parse_porcelain_v2(&String::from_utf8_lossy(&out.stdout));
+            if let GitState::Repo { changed, .. } = &mut state {
+                if !changed.is_empty() {
+                    if let Some(top) = toplevel(dir).await {
+                        *changed = changed.iter().map(|p| top.join(p)).collect();
+                    }
+                }
+            }
+            state
         }
         Ok(Ok(_)) => GitState::NotARepo,
         Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => GitState::GitMissing,
@@ -51,11 +68,48 @@ pub async fn git_status(dir: &Path) -> GitState {
     }
 }
 
+async fn toplevel(dir: &Path) -> Option<PathBuf> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let out = timeout(Duration::from_secs(2), cmd.output())
+        .await
+        .ok()?
+        .ok()?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.trim_end_matches('\n');
+    (out.status.success() && !line.is_empty()).then(|| PathBuf::from(line))
+}
+
+/// The path of a porcelain v2 entry line; renames keep the new path.
+fn entry_path(line: &str) -> Option<&str> {
+    let (fields, tab) = match line.as_bytes().first()? {
+        b'1' => (9, false),
+        b'2' => (10, true),
+        b'u' => (11, false),
+        _ => return None,
+    };
+    let path = line.splitn(fields, ' ').nth(fields - 1)?;
+    Some(if tab { path.split('\t').next()? } else { path })
+}
+
+fn mark_changed(set: &mut HashSet<PathBuf>, rel: &str) {
+    let mut p = PathBuf::from(rel.trim_end_matches('/'));
+    while !p.as_os_str().is_empty() && set.insert(p.clone()) {
+        p.pop();
+    }
+}
+
 pub fn parse_porcelain_v2(out: &str) -> GitState {
     let mut oid = None;
     let mut head = None;
     let (mut has_upstream, mut ahead, mut behind) = (false, 0, 0);
     let (mut staged, mut modified, mut untracked) = (0, 0, 0);
+    let mut changed = HashSet::new();
     for line in out.lines() {
         if let Some(h) = line.strip_prefix("# branch.oid ") {
             oid = Some(h.to_string());
@@ -76,6 +130,9 @@ pub fn parse_porcelain_v2(out: &str) -> GitState {
         } else if line.starts_with("? ") {
             untracked += 1;
         }
+        if let Some(path) = entry_path(line).or_else(|| line.strip_prefix("? ")) {
+            mark_changed(&mut changed, path);
+        }
     }
     let detached = head.as_deref() == Some("(detached)");
     GitState::Repo {
@@ -89,6 +146,7 @@ pub fn parse_porcelain_v2(out: &str) -> GitState {
         staged,
         modified,
         untracked,
+        changed,
     }
 }
 
@@ -120,7 +178,15 @@ mod tests {
             staged: counts.0,
             modified: counts.1,
             untracked: counts.2,
+            changed: HashSet::new(),
         }
+    }
+
+    fn with_changed(mut state: GitState, files: &[&str]) -> GitState {
+        if let GitState::Repo { changed, .. } = &mut state {
+            *changed = files.iter().map(PathBuf::from).collect();
+        }
+        state
     }
 
     #[test]
@@ -146,7 +212,30 @@ mod tests {
         );
         assert_eq!(
             parse_porcelain_v2(&out),
-            repo(Some("main"), None, false, (0, 0), (3, 3, 2))
+            with_changed(
+                repo(Some("main"), None, false, (0, 0), (3, 3, 2)),
+                &[
+                    "staged.rs",
+                    "modified.rs",
+                    "both.rs",
+                    "new.rs",
+                    "conflict.rs",
+                    "new.txt",
+                    "other.txt"
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn nested_paths_mark_their_parent_folders() {
+        let out = format!("{OID}# branch.head main\n1 .M N... 100644 100644 100644 a b src/ui/a b.rs\n? docs/x.md\n");
+        assert_eq!(
+            parse_porcelain_v2(&out),
+            with_changed(
+                repo(Some("main"), None, false, (0, 0), (0, 1, 1)),
+                &["src", "src/ui", "src/ui/a b.rs", "docs", "docs/x.md"]
+            )
         );
     }
 
@@ -164,7 +253,10 @@ mod tests {
         let out = format!("{OID}# branch.head feature\n? a\n");
         assert_eq!(
             parse_porcelain_v2(&out),
-            repo(Some("feature"), None, false, (0, 0), (0, 0, 1))
+            with_changed(
+                repo(Some("feature"), None, false, (0, 0), (0, 0, 1)),
+                &["a"]
+            )
         );
     }
 

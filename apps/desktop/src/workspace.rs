@@ -10,6 +10,7 @@ use xade_core::{AgentProvider, SessionId};
 use xade_runtime::ManagerCmd;
 
 use crate::app::{App, SessionVm};
+use crate::config::SendMode;
 use crate::editor::{self, EditorId, EditorVm};
 use crate::session_view;
 use crate::theme;
@@ -81,6 +82,7 @@ pub struct Env<'a> {
     pub providers: &'a [Arc<dyn AgentProvider>],
     pub vscode: Option<&'a Path>,
     pub maximized: Option<SessionId>,
+    pub send_mode: SendMode,
 }
 
 /// Auto-tiling state: windows are re-tiled while `auto` and the set of windows or the area changes.
@@ -280,6 +282,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             providers: &app.providers,
             vscode: app.vscode.as_deref(),
             maximized: app.maximized.and_then(WindowKind::session),
+            send_mode: app.config.send_while_running,
         };
         let editor_maximized = app.maximized == Some(*kind);
         let collapsed = *taken.geom().0;
@@ -548,6 +551,7 @@ mod tests {
             session,
             cwd: "/tmp/nope".into(),
             status: SessionStatus::NeedsApproval,
+            queued: Default::default(),
             messages: vec![
                 msg(
                     Role::User,
@@ -704,6 +708,7 @@ mod tests {
             providers: &[],
             vscode: None,
             maximized: None,
+            send_mode: SendMode::Queue,
         };
         let area = Rect::from_min_size(egui::pos2(20.0, 50.0), egui::vec2(1200.0, 700.0));
         let tiles = tile_rects(area, 3);
@@ -745,6 +750,7 @@ mod tests {
             providers: &[],
             vscode: None,
             maximized: None,
+            send_mode: SendMode::Queue,
         };
         let mut v = vm();
         let area = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 700.0));

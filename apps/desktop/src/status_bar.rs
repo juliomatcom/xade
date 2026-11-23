@@ -90,6 +90,7 @@ fn left(app: &App, ui: &mut egui::Ui) {
             staged,
             modified,
             untracked,
+            ..
         }) => {
             let head = match (branch, detached_sha) {
                 (Some(b), _) => b.clone(),

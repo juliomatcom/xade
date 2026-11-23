@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use egui::{Align, Layout, RichText};
 use time::OffsetDateTime;
 use xade_core::{QuotaKind, QuotaWindow, SessionOrigin, SessionStatus, Workspace, WorkspaceId};
+use xade_runtime::git::GitState;
 use xade_store::SessionCard;
 
 use crate::app::{App, View};
@@ -320,7 +321,11 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                                     set_scope(app, Some(*id));
                                     actions.push(TreeAction::Toggle(root.clone()));
                                 }
-                                file_tree::show(ui, &app.tree, root, 1, &mut actions);
+                                let changed = match app.git.get(root) {
+                                    Some(GitState::Repo { changed, .. }) => Some(changed),
+                                    _ => None,
+                                };
+                                file_tree::show(ui, &app.tree, root, 1, changed, &mut actions);
                             }
                         });
                     for action in actions {

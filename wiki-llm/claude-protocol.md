@@ -11,6 +11,7 @@ Verified against Claude Code 2.1.330 with fixtures in `crates/claude/fixtures/` 
 ## Stdin (we send)
 - Prompt: `{"type":"user","session_id":"<id or empty>","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"text","text":…}]}}`.
 - Allow: `{"type":"control_response","response":{"subtype":"success","request_id":R,"response":{"behavior":"allow","updatedInput":<input>}}}`; deny: `…"response":{"behavior":"deny","message":"…"}`.
+- A prompt written while a turn runs is folded into it at the next tool boundary; one `result` ends both (fixture `steer`).
 - Interrupt: `{"type":"control_request","request_id":<ours>,"request":{"subtype":"interrupt"}}`; acked by `control_response`. Process stays alive.
 - No `initialize` request is needed (fixture `init_first` shows it is accepted but optional).
 

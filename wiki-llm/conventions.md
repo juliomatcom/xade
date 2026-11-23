@@ -1,5 +1,11 @@
 # Conventions
 
+## Product principles
+- Xade is simple, opinionated and really fast. These lead every decision, for people and agents alike.
+- Simple: do one thing well; no setting, mode or screen where a sensible default works.
+- Opinionated: choose for the user; add an option only when no single choice is right.
+- Really fast: never block a frame, never add startup or interaction latency; a feature that slows the app does not ship.
+
 ## Hard invariants
 - Never read, copy, log or transmit CLI credentials or `claude auth status` output beyond `loggedIn` and `email`; `email` is for on-screen display only: never log (not at debug), persist, or put it in error reports, Copy text or issue bodies.
 - Spawn the vendor binary unmodified; never patch, wrap or proxy it, never expose it over the network.

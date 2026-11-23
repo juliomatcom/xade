@@ -22,6 +22,7 @@ BASE_ARGS = ["-p", "--input-format", "stream-json", "--output-format", "stream-j
 # Scenario = (extra CLI args, steps). Step kinds:
 #   ("init",)                       send initialize control_request, wait for its control_response
 #   ("send", text, policy)          send user message, run turn until `result`; policy in allow|deny
+#   ("send_during", text, text2)    send user message, send text2 right after its first tool_use, one `result` ends both
 #   ("send_interrupt", text)        send user message, interrupt after first text delta, wait `result`
 SCENARIOS = {
     "simple_turn": (["--model", "haiku"], [("send", "Reply with exactly: hello fixture", "allow")]),
@@ -41,6 +42,9 @@ SCENARIOS = {
                  "unless required. Then reply DONE.", "allow")]),
     "thinking_summaries": (["--model", "haiku", "--settings", '{"showThinkingSummaries": true}'], [
         ("send", "Think step by step about whether 221 is prime, then answer yes or no.", "allow")]),
+    "steer": (["--model", "haiku"], [
+        ("send_during", "Use the Bash tool to run `sleep 4`, then write one sentence about a lighthouse.",
+         "Also, end your answer with the word BANANA.")]),
     "interrupt": (["--model", "haiku"], [
         ("send_interrupt", "Write a 600-word story about a lighthouse keeper."),
         ("send", "Reply with exactly: still alive", "allow")]),
@@ -154,7 +158,7 @@ class Rec:
         self.send({"type": "control_response",
                    "response": {"subtype": "success", "request_id": f.get("request_id"), "response": resp}})
 
-    def run_turn(self, policy, interrupt_after_delta=False):
+    def run_turn(self, policy, interrupt_after_delta=False, steer=None):
         interrupted = False
         for f in self.frames():
             t = f.get("type")
@@ -165,6 +169,9 @@ class Rec:
                 self.send({"type": "control_request", "request_id": "req_" + uuid.uuid4().hex[:8],
                            "request": {"subtype": "interrupt"}})
                 interrupted = True
+            elif steer and t == "assistant":
+                self.user(steer)
+                steer = None
             elif t == "result":
                 return
 
@@ -212,6 +219,8 @@ def main():
             rec.init()
         elif step[0] == "send":
             rec.user(step[1]); rec.run_turn(step[2])
+        elif step[0] == "send_during":
+            rec.user(step[1]); rec.run_turn("allow", steer=step[2])
         elif step[0] == "send_interrupt":
             rec.user(step[1]); rec.run_turn("allow", interrupt_after_delta=True)
     code = rec.close()

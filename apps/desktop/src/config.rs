@@ -12,11 +12,31 @@ const MAX_FONT_SIZE: f32 = 28.0;
 /// How often the file's mtime is checked.
 pub const POLL: Duration = Duration::from_secs(2);
 
+/// What sending while a turn runs does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SendMode {
+    /// Hold the message and send it when the turn ends.
+    #[default]
+    Queue,
+    /// Send it now; the CLI folds it into the running turn at the next tool boundary.
+    Steer,
+}
+
+impl SendMode {
+    pub fn other(self) -> SendMode {
+        match self {
+            SendMode::Queue => SendMode::Steer,
+            SendMode::Steer => SendMode::Queue,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
     /// An installed family; `None` keeps egui's default font.
     pub font_family: Option<String>,
     pub font_size: f32,
+    pub send_while_running: SendMode,
 }
 
 impl Default for Config {
@@ -24,6 +44,7 @@ impl Default for Config {
         Config {
             font_family: None,
             font_size: DEFAULT_FONT_SIZE,
+            send_while_running: SendMode::default(),
         }
     }
 }
@@ -50,6 +71,12 @@ impl Config {
             }
             Some(_) => return Err("font_size must be a number".into()),
         }
+        match obj.get("send_while_running").and_then(Value::as_str) {
+            None if !obj.contains_key("send_while_running") => {}
+            Some("queue") => cfg.send_while_running = SendMode::Queue,
+            Some("steer") => cfg.send_while_running = SendMode::Steer,
+            _ => return Err("send_while_running must be \"queue\" or \"steer\"".into()),
+        }
         Ok(cfg)
     }
 }
@@ -74,6 +101,7 @@ pub fn load(path: &Path) -> (Config, Option<String>) {
         let defaults = serde_json::to_string_pretty(&json!({
             "font_family": null,
             "font_size": DEFAULT_FONT_SIZE,
+            "send_while_running": "queue",
         }))
         .unwrap_or_default();
         if let Err(e) = std::fs::write(path, defaults + "\n") {
@@ -183,6 +211,16 @@ mod tests {
         assert_eq!(partial.font_size, 15.0);
         let null = Config::parse(r#"{"font_family":null}"#).unwrap();
         assert_eq!(null, Config::default());
+    }
+
+    #[test]
+    fn send_while_running_defaults_to_queue_and_rejects_unknown_values() {
+        assert_eq!(Config::default().send_while_running, SendMode::Queue);
+        let steer = Config::parse(r#"{"send_while_running":"steer"}"#).unwrap();
+        assert_eq!(steer.send_while_running, SendMode::Steer);
+        assert_eq!(steer.send_while_running.other(), SendMode::Queue);
+        assert!(Config::parse(r#"{"send_while_running":"now"}"#).is_err());
+        assert!(Config::parse(r#"{"send_while_running":null}"#).is_err());
     }
 
     #[test]

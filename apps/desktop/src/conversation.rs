@@ -317,6 +317,7 @@ mod tests {
             session: session(),
             cwd: "/tmp".into(),
             status: SessionStatus::Idle,
+            queued: Default::default(),
             messages,
             live_text: String::new(),
             thinking_tokens: None,

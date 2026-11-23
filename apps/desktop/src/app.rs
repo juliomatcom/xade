@@ -107,6 +107,8 @@ pub struct SessionVm {
     pub session: Session,
     pub cwd: PathBuf,
     pub status: SessionStatus,
+    /// Messages held while a turn runs; the oldest goes out when the session turns idle.
+    pub queued: std::collections::VecDeque<String>,
     pub messages: Vec<Message>,
     /// Streaming text of the block in flight; replaced by the finalized block.
     pub live_text: String,
@@ -194,7 +196,7 @@ pub struct App {
     /// Window to bring to the front on the next frame.
     pub raise: Option<WindowKind>,
     pub vscode: Option<PathBuf>,
-    config: Config,
+    pub config: Config,
     /// Live-reload watcher of `settings.json`; absent in headless tests.
     config_watch: Option<config::Watch>,
     pub chord: Chord,
@@ -1263,7 +1265,7 @@ impl App {
             }
             Action::OpenSettings => self.open_settings(),
             // Handled by the composer and the modals themselves.
-            Action::Send | Action::CloseModal => {}
+            Action::Send | Action::SendOther | Action::CloseModal => {}
         }
     }
 
@@ -1362,6 +1364,7 @@ impl App {
                 cwd,
                 session,
                 status: SessionStatus::Starting,
+                queued: Default::default(),
                 messages,
                 live_text: String::new(),
                 thinking_tokens: None,
@@ -1441,6 +1444,16 @@ impl App {
                         vm.pending_permission = None;
                     }
                     vm.status = status;
+                    if vm.status == SessionStatus::Idle {
+                        if let Some(text) = vm.queued.pop_front() {
+                            push_user_message(vm, text.clone());
+                            vm.error = None;
+                            let _ = self.cmd_tx.send(ManagerCmd::Send {
+                                session_id: id,
+                                text,
+                            });
+                        }
+                    }
                 }
             }
             (Some(id), AppEventKind::Provider(p)) => self.on_provider_event(id, p),

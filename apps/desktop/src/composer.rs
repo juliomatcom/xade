@@ -5,21 +5,30 @@ use xade_core::{Effort, ModelOption, SessionStatus, UsageTotals};
 use xade_runtime::ManagerCmd;
 
 use crate::app::{push_user_message, SessionVm};
+use crate::config::SendMode;
+use crate::running::{self, CacheKind};
 use crate::workspace::Env;
 use crate::{icons, theme};
 
 /// The input grows with its text between these row counts, then scrolls.
 const INPUT_MIN_ROWS: usize = 2;
 const INPUT_MAX_ROWS: usize = 10;
+/// Side of the (square) send button, and height of Stop.
+const BUTTON_SIZE: f32 = 48.0;
 
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     let id = vm.session.id;
     let idle = vm.status == SessionStatus::Idle;
     let streaming = vm.status == SessionStatus::Streaming;
+    let running = streaming || vm.status == SessionStatus::NeedsApproval;
 
-    let mut send = false;
+    // `Some(other)`: send requested, `other` = the opposite of the setting while running.
+    let mut send: Option<bool> = None;
     let input_id = ui.scope_id().with("composer_input");
     let focused = ui.memory(|m| m.has_focus(input_id));
+    // The Shift variant first: Cmd+Enter would also match it.
+    let hotkey_other = focused
+        && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter));
     let hotkey = focused && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
     egui::Frame::new()
         .fill(theme::BG_RAISED)
@@ -28,54 +37,111 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
         .inner_margin(egui::Margin::same(6))
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
-                let w = (ui.available_width() - 52.0).max(40.0);
+                let w = (ui.available_width() - if streaming { 130.0 } else { 64.0 }).max(40.0);
                 // A pasted wall of text scrolls inside the box instead of growing the panel.
                 let max_h = INPUT_MAX_ROWS as f32 * ui.text_style_height(&egui::TextStyle::Body);
-                ui.allocate_ui(egui::vec2(w, max_h), |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt("composer_scroll")
-                        .max_height(max_h)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            ui.add(
-                                egui::TextEdit::multiline(&mut vm.input)
-                                    .id(input_id)
-                                    .frame(egui::Frame::NONE)
-                                    .desired_width(f32::INFINITY)
-                                    .desired_rows(INPUT_MIN_ROWS)
-                                    .hint_text("Message (Cmd+Enter to send)"),
-                            );
-                        });
+                let input_h = ui
+                    .allocate_ui(egui::vec2(w, max_h), |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt("composer_scroll")
+                            .max_height(max_h)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                ui.add(
+                                    egui::TextEdit::multiline(&mut vm.input)
+                                        .id(input_id)
+                                        .frame(egui::Frame::NONE)
+                                        .desired_width(f32::INFINITY)
+                                        .desired_rows(INPUT_MIN_ROWS)
+                                        .hint_text(if running {
+                                            "Message (Cmd+Enter to queue or steer)"
+                                        } else {
+                                            "Message (Cmd+Enter to send)"
+                                        }),
+                                );
+                            });
+                    })
+                    .response
+                    .rect
+                    .height();
+                // The buttons sit in the vertical middle of the input.
+                let pad = ((input_h - BUTTON_SIZE) / 2.0).max(0.0);
+                ui.vertical(|ui| {
+                    ui.add_space(pad);
+                    ui.horizontal(|ui| {
+                        let can_send = (idle || running) && !vm.input.trim().is_empty();
+                        let btn = egui::Button::new(
+                            RichText::new(icons::SEND).size(26.0).color(theme::TEXT),
+                        )
+                        .fill(theme::ACCENT)
+                        .min_size(egui::vec2(BUTTON_SIZE, BUTTON_SIZE));
+                        let mut resp = ui.add_enabled(can_send, btn);
+                        if running {
+                            resp = resp.on_hover_text(match env.send_mode {
+                                SendMode::Queue => "Queue: sent when the turn ends",
+                                SendMode::Steer => "Steer: sent into the running turn",
+                            });
+                        }
+                        if resp.clicked() {
+                            send = Some(false);
+                        }
+                        if streaming {
+                            let stop = egui::Button::new(
+                                RichText::new(icons::with(icons::STOP, "Stop")).color(theme::TEXT),
+                            )
+                            .fill(theme::DANGER)
+                            .min_size(egui::vec2(0.0, BUTTON_SIZE));
+                            if ui.add(stop).clicked() {
+                                vm.queued.clear();
+                                let _ = env.cmd_tx.send(ManagerCmd::Interrupt { session_id: id });
+                            }
+                        }
+                        if can_send {
+                            if hotkey {
+                                send = Some(false);
+                            } else if hotkey_other {
+                                send = Some(true);
+                            }
+                        }
+                    });
                 });
-                let can_send = idle && !vm.input.trim().is_empty();
-                if streaming {
-                    let stop = egui::Button::new(
-                        RichText::new(icons::with(icons::STOP, "Stop")).color(theme::TEXT),
-                    )
-                    .fill(theme::DANGER);
-                    if ui.add(stop).clicked() {
-                        let _ = env.cmd_tx.send(ManagerCmd::Interrupt { session_id: id });
-                    }
-                } else {
-                    let btn =
-                        egui::Button::new(RichText::new(icons::SEND).strong().color(theme::TEXT))
-                            .fill(theme::ACCENT);
-                    send = ui.add_enabled(can_send, btn).clicked();
-                }
-                send |= hotkey && can_send;
             });
         });
-    if send {
+    if let Some(other) = send {
         let text = std::mem::take(&mut vm.input);
-        push_user_message(vm, text.clone());
-        vm.error = None;
-        let _ = env.cmd_tx.send(ManagerCmd::Send {
-            session_id: id,
-            text,
-        });
+        let mode = if other {
+            env.send_mode.other()
+        } else {
+            env.send_mode
+        };
+        // Steering needs a turn that is reading; while waiting for approval, queue.
+        if running && !(mode == SendMode::Steer && streaming) {
+            vm.queued.push_back(text);
+        } else {
+            send_now(vm, env, text);
+        }
     }
+    queued_rows(ui, vm);
 
     controls(ui, vm, env);
+    if idle {
+        let last = vm
+            .sync
+            .transcript
+            .mtime
+            .map_or(vm.session.updated_at, time::OffsetDateTime::from);
+        if let Some((text, kind)) = send_note(
+            vm.session.usage.context_tokens_used,
+            last,
+            time::OffsetDateTime::now_utc(),
+        ) {
+            let color = match kind {
+                CacheKind::Fresh => theme::TEXT_MUTED,
+                CacheKind::Expired => theme::WARN,
+            };
+            ui.label(RichText::new(text).small().color(color));
+        }
+    }
     ui.horizontal_wrapped(|ui| {
         let u = &vm.session.usage;
         ui.label(
@@ -89,6 +155,65 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
                 .color(theme::TEXT_MUTED),
         );
     });
+}
+
+/// What the next message will resend: the whole context, cheap while the prompt cache is warm.
+fn send_note(
+    context_tokens: u64,
+    last_activity: time::OffsetDateTime,
+    now: time::OffsetDateTime,
+) -> Option<(String, CacheKind)> {
+    if context_tokens == 0 {
+        return None;
+    }
+    let tokens = fmt_tokens(context_tokens);
+    let (cache, kind) = running::cache_label(last_activity, now);
+    let text = match kind {
+        CacheKind::Fresh => format!("Sending resends ~{tokens} tokens of context ({cache})"),
+        CacheKind::Expired => format!(
+            "{} Cache expired: sending resends ~{tokens} tokens of context at full price",
+            icons::WARNING
+        ),
+    };
+    Some((text, kind))
+}
+
+/// Shows the user's message and hands it to the session.
+pub fn send_now(vm: &mut SessionVm, env_cmd: &Env, text: String) {
+    push_user_message(vm, text.clone());
+    vm.error = None;
+    let _ = env_cmd.cmd_tx.send(ManagerCmd::Send {
+        session_id: vm.session.id,
+        text,
+    });
+}
+
+/// One row per queued message, each cancellable.
+fn queued_rows(ui: &mut egui::Ui, vm: &mut SessionVm) {
+    let mut cancel = None;
+    for (i, text) in vm.queued.iter().enumerate() {
+        ui.horizontal(|ui| {
+            if ui
+                .small_button(icons::CLOSE)
+                .on_hover_text("Cancel this queued message")
+                .clicked()
+            {
+                cancel = Some(i);
+            }
+            let line = text.lines().next().unwrap_or_default();
+            ui.add(
+                egui::Label::new(
+                    RichText::new(format!("Queued: {line}"))
+                        .small()
+                        .color(theme::TEXT_MUTED),
+                )
+                .truncate(),
+            );
+        });
+    }
+    if let Some(i) = cancel {
+        vm.queued.remove(i);
+    }
 }
 
 fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
@@ -285,6 +410,7 @@ mod tests {
             },
             cwd: "/tmp".into(),
             status: SessionStatus::Idle,
+            queued: Default::default(),
             messages: Vec::new(),
             live_text: String::new(),
             thinking_tokens: None,
@@ -312,6 +438,7 @@ mod tests {
             providers: &[],
             vscode: None,
             maximized: None,
+            send_mode: crate::config::SendMode::Queue,
         };
         let mut v = vm(input);
         let mut out = egui::Rect::NOTHING;
@@ -339,6 +466,11 @@ mod tests {
             .join("\n");
         let one = render("hi".into());
         let many = render(wall);
+        // Two input rows, the 48px button row inside the frame, controls and meters.
+        assert!(
+            one.height() < 160.0,
+            "composer is too tall at rest: {one:?}"
+        );
         assert!(
             many.height() > one.height(),
             "input still grows: {one:?} {many:?}"
@@ -349,6 +481,18 @@ mod tests {
             "uncapped: {one:?} {many:?}"
         );
         assert!(many.width() <= 700.0);
+    }
+
+    #[test]
+    fn send_note_warns_when_the_cache_expired() {
+        let now = OffsetDateTime::now_utc();
+        assert!(send_note(0, now, now).is_none());
+        let (text, kind) = send_note(42_000, now, now).unwrap();
+        assert_eq!(kind, CacheKind::Fresh);
+        assert!(text.contains("~42.0k tokens"), "{text}");
+        let (text, kind) = send_note(42_000, now - time::Duration::hours(2), now).unwrap();
+        assert_eq!(kind, CacheKind::Expired);
+        assert!(text.contains("full price"), "{text}");
     }
 
     #[test]
