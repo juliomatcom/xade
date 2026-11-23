@@ -8,6 +8,10 @@ use crate::app::{push_user_message, SessionVm};
 use crate::workspace::Env;
 use crate::{icons, theme};
 
+/// The input grows with its text between these row counts, then scrolls.
+const INPUT_MIN_ROWS: usize = 2;
+const INPUT_MAX_ROWS: usize = 10;
+
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     let id = vm.session.id;
     let idle = vm.status == SessionStatus::Idle;
@@ -24,14 +28,25 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
         .inner_margin(egui::Margin::same(6))
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
-                let w = ui.available_width() - 52.0;
-                ui.add_sized(
-                    [w.max(40.0), 44.0],
-                    egui::TextEdit::multiline(&mut vm.input)
-                        .id(input_id)
-                        .frame(egui::Frame::NONE)
-                        .hint_text("Message (Cmd+Enter to send)"),
-                );
+                let w = (ui.available_width() - 52.0).max(40.0);
+                // A pasted wall of text scrolls inside the box instead of growing the panel.
+                let max_h = INPUT_MAX_ROWS as f32 * ui.text_style_height(&egui::TextStyle::Body);
+                ui.allocate_ui(egui::vec2(w, max_h), |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("composer_scroll")
+                        .max_height(max_h)
+                        .auto_shrink([false, true])
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut vm.input)
+                                    .id(input_id)
+                                    .frame(egui::Frame::NONE)
+                                    .desired_width(f32::INFINITY)
+                                    .desired_rows(INPUT_MIN_ROWS)
+                                    .hint_text("Message (Cmd+Enter to send)"),
+                            );
+                        });
+                });
                 let can_send = idle && !vm.input.trim().is_empty();
                 if streaming {
                     let stop = egui::Button::new(
@@ -244,8 +259,95 @@ pub fn usage_text(u: &UsageTotals) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use time::OffsetDateTime;
+    use xade_core::{ProviderId, Session, SessionId, SessionStatus, WorkspaceId};
+
+    fn vm(input: String) -> SessionVm {
+        let now = OffsetDateTime::now_utc();
+        SessionVm {
+            session: Session {
+                origin: xade_core::SessionOrigin::default(),
+                id: SessionId::new(),
+                workspace_id: WorkspaceId::new(),
+                provider_id: ProviderId::Claude,
+                provider_session_id: None,
+                title: "t".into(),
+                preview_snippet: String::new(),
+                model_id: "opus".into(),
+                effort: Effort::Default,
+                auto_mode: false,
+                usage: UsageTotals::default(),
+                created_at: now,
+                updated_at: now,
+            },
+            cwd: "/tmp".into(),
+            status: SessionStatus::Idle,
+            messages: Vec::new(),
+            live_text: String::new(),
+            thinking_tokens: None,
+            pending_permission: None,
+            input,
+            error: None,
+            md_cache: egui_commonmark::CommonMarkCache::default(),
+            diff: None,
+            settings_pending: false,
+            collapsed: false,
+            window_rect: None,
+            apply_rect: None,
+        }
+    }
+
+    /// The composer's rect after a few frames at this input.
+    fn render(input: String) -> egui::Rect {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            vscode: None,
+            maximized: None,
+        };
+        let mut v = vm(input);
+        let mut out = egui::Rect::NOTHING;
+        for _ in 0..4 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(700.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| {
+                out = ui.scope(|ui| show(ui, &mut v, &env)).response.rect;
+            })
+            .drop_without_applying_deltas();
+        }
+        out
+    }
+
+    #[test]
+    fn a_pasted_wall_of_text_stays_inside_a_capped_input() {
+        let wall = (0..500)
+            .map(|i| format!("{i} line of a pasted log"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let one = render("hi".into());
+        let many = render(wall);
+        assert!(
+            many.height() > one.height(),
+            "input still grows: {one:?} {many:?}"
+        );
+        // Cap plus the controls row, the meters row and the frame margins.
+        assert!(
+            many.height() <= one.height() + 8.0 * 20.0,
+            "uncapped: {one:?} {many:?}"
+        );
+        assert!(many.width() <= 700.0);
+    }
 
     #[test]
     fn meters_format_compactly() {
