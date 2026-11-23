@@ -30,4 +30,9 @@ pub trait AgentProvider: Send + Sync {
     fn running_sessions(&self) -> Vec<RunningSession> {
         Vec::new()
     }
+    /// Removes the provider's own copy of a session (its transcript). Already gone is Ok.
+    /// Blocking; callers use `spawn_blocking`.
+    fn delete_session(&self, _provider_session_id: &str) -> Result<(), ProviderError> {
+        Ok(())
+    }
 }

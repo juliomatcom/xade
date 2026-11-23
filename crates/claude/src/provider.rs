@@ -193,4 +193,96 @@ impl AgentProvider for ClaudeProvider {
         };
         crate::running::scan_running(&home.join(".claude/sessions"))
     }
+
+    fn delete_session(&self, provider_session_id: &str) -> Result<(), ProviderError> {
+        let home =
+            std::env::var_os("HOME").ok_or_else(|| ProviderError::Protocol("no HOME".into()))?;
+        delete_transcript(
+            &Path::new(&home).join(".claude/projects"),
+            provider_session_id,
+        )
+    }
+}
+
+/// Removes `<projects>/*/<id>.jsonl` and the `<id>` directory (subagent transcripts) beside it.
+/// The id must be a plain token so it can never address anything outside `projects`; missing
+/// files are fine.
+fn delete_transcript(projects: &Path, id: &str) -> Result<(), ProviderError> {
+    let plain = !id.is_empty()
+        && id.len() <= 128
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    if !plain {
+        return Err(ProviderError::Protocol(format!(
+            "invalid session id {id:?}"
+        )));
+    }
+    let io = |e: std::io::Error| ProviderError::Protocol(e.to_string());
+    let ignore_missing = |r: std::io::Result<()>| match r {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(io(e)),
+        _ => Ok(()),
+    };
+    let entries = match std::fs::read_dir(projects) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io(e)),
+    };
+    for entry in entries.flatten() {
+        // `file_type` does not follow symlinks: a linked project dir is never entered.
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let dir = entry.path();
+        ignore_missing(std::fs::remove_file(dir.join(format!("{id}.jsonl"))))?;
+        let sub = dir.join(id);
+        match std::fs::symlink_metadata(&sub) {
+            Ok(m) if m.is_dir() => ignore_missing(std::fs::remove_dir_all(&sub))?,
+            Ok(_) => ignore_missing(std::fs::remove_file(&sub))?,
+            Err(e) => ignore_missing(Err(e))?,
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn delete_removes_transcript_and_subagent_dir_only() {
+        let root = tempfile::tempdir().unwrap();
+        let projects = root.path().join("projects");
+        let (a, b) = (projects.join("-tmp-a"), projects.join("-tmp-b"));
+        std::fs::create_dir_all(a.join("sid/subagents")).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("sid.jsonl"), "{}").unwrap();
+        std::fs::write(a.join("sid/subagents/x.jsonl"), "{}").unwrap();
+        std::fs::write(a.join("other.jsonl"), "{}").unwrap();
+        std::fs::write(b.join("sid.jsonl"), "{}").unwrap();
+        let outside = root.path().join("sid.jsonl");
+        std::fs::write(&outside, "{}").unwrap();
+
+        delete_transcript(&projects, "sid").unwrap();
+        assert!(!a.join("sid.jsonl").exists() && !a.join("sid").exists());
+        assert!(!b.join("sid.jsonl").exists());
+        assert!(a.join("other.jsonl").exists() && outside.exists());
+        // Already gone is fine.
+        delete_transcript(&projects, "sid").unwrap();
+        delete_transcript(&root.path().join("missing"), "sid").unwrap();
+    }
+
+    #[test]
+    fn delete_rejects_ids_that_are_not_plain_tokens() {
+        let root = tempfile::tempdir().unwrap();
+        let projects = root.path().join("projects");
+        std::fs::create_dir_all(projects.join("p")).unwrap();
+        let victim = root.path().join("victim.jsonl");
+        std::fs::write(&victim, "{}").unwrap();
+        for bad in ["", "..", "../victim", "a/b", "a\\b", ".", "x y", "a\0b"] {
+            assert!(delete_transcript(&projects, bad).is_err(), "{bad:?}");
+        }
+        assert!(victim.exists());
+    }
 }

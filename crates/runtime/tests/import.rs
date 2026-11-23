@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use time::{Duration, OffsetDateTime};
@@ -18,6 +19,9 @@ use xade_runtime::{AppEventKind, ManagerCmd};
 struct FakeProvider {
     import: Mutex<Vec<ImportedSession>>,
     spawns: Mutex<Vec<SpawnConfig>>,
+    /// Provider session ids passed to `delete_session`; a success also drops the transcript.
+    deleted: Mutex<Vec<String>>,
+    delete_fails: AtomicBool,
 }
 
 impl AgentProvider for FakeProvider {
@@ -76,6 +80,17 @@ impl AgentProvider for FakeProvider {
     }
     fn import_sessions(&self) -> Vec<ImportedSession> {
         self.import.lock().unwrap().clone()
+    }
+    fn delete_session(&self, id: &str) -> Result<(), ProviderError> {
+        if self.delete_fails.load(Ordering::SeqCst) {
+            return Err(ProviderError::Protocol("disk on fire".into()));
+        }
+        self.deleted.lock().unwrap().push(id.into());
+        self.import
+            .lock()
+            .unwrap()
+            .retain(|s| s.provider_session_id != id);
+        Ok(())
     }
 }
 
@@ -295,4 +310,84 @@ async fn throwaway_cwds_are_skipped_and_earlier_leftovers_pruned() {
             .total,
         1
     );
+}
+
+#[tokio::test]
+async fn delete_closes_live_session_aborts_on_provider_error_and_stays_deleted() {
+    let dir = non_temp_dir();
+    let provider = Arc::new(FakeProvider::default());
+    let mut h = common::start(dir.path(), provider.clone()).await;
+    h.create("haiku");
+    let ev = h.until_status(5, SessionStatus::Idle).await;
+    let id = ev.iter().find_map(|e| e.session_id).unwrap();
+    h.tx.send(ManagerCmd::Send {
+        session_id: id,
+        text: "hello".into(),
+    })
+    .unwrap();
+    h.until_status(5, SessionStatus::Idle).await;
+    // The transcript the CLI would have written, which an import would otherwise bring back.
+    provider
+        .import
+        .lock()
+        .unwrap()
+        .push(imported("xade-owned", "hello", &h.cwd, 0));
+
+    // A provider failure deletes nothing, but the live session was closed first.
+    provider.delete_fails.store(true, Ordering::SeqCst);
+    h.tx.send(ManagerCmd::DeleteSession { session_id: id })
+        .unwrap();
+    let ev = h
+        .until(5, |e| matches!(e.kind, AppEventKind::Error(_)))
+        .await;
+    assert!(
+        matches!(&ev.last().unwrap().kind, AppEventKind::Error(m) if m.contains("disk on fire"))
+    );
+    assert!(common::statuses(&ev).contains(&SessionStatus::Closed));
+    assert_eq!(h.reader.load_session(id).await.unwrap().1.len(), 2);
+    assert!(provider.deleted.lock().unwrap().is_empty());
+
+    provider.delete_fails.store(false, Ordering::SeqCst);
+    h.tx.send(ManagerCmd::DeleteSession { session_id: id })
+        .unwrap();
+    let ev = h
+        .until(5, |e| matches!(e.kind, AppEventKind::SessionDeleted { .. }))
+        .await;
+    assert_eq!(ev.last().unwrap().session_id, Some(id));
+    assert_eq!(*provider.deleted.lock().unwrap(), ["xade-owned"]);
+    assert!(h.reader.load_session(id).await.is_err());
+
+    // Import after a delete does not bring it back.
+    assert_eq!(import(&mut h).await, (0, 0));
+    assert_eq!(
+        h.reader
+            .list_sessions(None, None, 0, 24)
+            .await
+            .unwrap()
+            .total,
+        0
+    );
+}
+
+#[tokio::test]
+async fn delete_refuses_sessions_not_created_in_xade() {
+    let dir = non_temp_dir();
+    let provider = Arc::new(FakeProvider::default());
+    let mut h = common::start(dir.path(), provider.clone()).await;
+    *provider.import.lock().unwrap() = vec![imported("cc", "from the CLI", &h.cwd, 10)];
+    assert_eq!(import(&mut h).await, (1, 0));
+    let cc = h
+        .reader
+        .list_sessions(None, None, 0, 24)
+        .await
+        .unwrap()
+        .items
+        .remove(0);
+
+    h.tx.send(ManagerCmd::DeleteSession { session_id: cc.id })
+        .unwrap();
+    h.until(5, |e| matches!(e.kind, AppEventKind::Error(_)))
+        .await;
+    assert!(provider.deleted.lock().unwrap().is_empty());
+    assert!(h.reader.load_session(cc.id).await.is_ok());
 }

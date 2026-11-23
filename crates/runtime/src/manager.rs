@@ -138,6 +138,7 @@ impl SessionManager {
                         let _ = tx.send(ActorCmd::Close);
                     }
                 }
+                ManagerCmd::DeleteSession { session_id } => self.delete(session_id).await,
                 ManagerCmd::Import => self.start_import(),
                 ManagerCmd::ShutdownAll(done) => {
                     for (_, tx) in self.live.drain() {
@@ -302,6 +303,55 @@ impl SessionManager {
         );
         self.start_actor(actor);
         self.emit(Some(id), AppEventKind::Status(SessionStatus::Idle));
+    }
+
+    /// Xade-origin sessions only. The provider copy goes first: if that fails nothing is
+    /// deleted, and if the row went first an import would bring the session back.
+    async fn delete(&mut self, id: SessionId) {
+        let fail = |this: &Self, msg: String| this.emit(Some(id), AppEventKind::Error(msg));
+        let mut session = match self.reader.load_session(id).await {
+            Ok((s, _)) => s,
+            Err(e) => return fail(self, format!("Could not delete the session: {e}")),
+        };
+        if session.origin != SessionOrigin::Xade {
+            return fail(
+                self,
+                "Only sessions created in Xade can be deleted here.".into(),
+            );
+        }
+        if let Some(tx) = self.live.remove(&id) {
+            let _ = tx.send(ActorCmd::Close);
+            // The actor drops its receiver when it ends, after its child exited.
+            if timeout(Duration::from_secs(10), tx.closed()).await.is_err() {
+                self.live.insert(id, tx);
+                return fail(
+                    self,
+                    "Could not delete the session: it did not stop in time.".into(),
+                );
+            }
+            // The actor may have stored the provider id while it ran.
+            flush(&self.writer).await;
+            session = match self.reader.load_session(id).await {
+                Ok((s, _)) => s,
+                Err(e) => return fail(self, format!("Could not delete the session: {e}")),
+            };
+        }
+        if let (Some(psid), Some(provider)) = (
+            session.provider_session_id.clone(),
+            self.provider(session.provider_id),
+        ) {
+            let done = tokio::task::spawn_blocking(move || provider.delete_session(&psid)).await;
+            match done {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => return fail(self, format!("Could not delete the transcript: {e}")),
+                Err(e) => return fail(self, format!("Could not delete the transcript: {e}")),
+            }
+        }
+        if let Err(e) = self.writer.send(WriteOp::DeleteSession(id)) {
+            return fail(self, format!("Could not delete the session: {e}"));
+        }
+        flush(&self.writer).await;
+        self.emit(Some(id), AppEventKind::SessionDeleted { session_id: id });
     }
 
     async fn open(&mut self, id: SessionId) {

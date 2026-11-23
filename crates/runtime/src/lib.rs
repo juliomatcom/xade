@@ -59,6 +59,11 @@ pub enum ManagerCmd {
     Close {
         session_id: SessionId,
     },
+    /// Xade-origin sessions only: closes it if live, deletes the provider's transcript, then
+    /// the row. Replies with `SessionDeleted`, or `Error` (nothing deleted) on any failure.
+    DeleteSession {
+        session_id: SessionId,
+    },
     /// Reads every provider's own history and imports what is new or newer (idempotent).
     /// Replies with `AppEventKind::ImportDone`.
     Import,
@@ -94,6 +99,9 @@ pub enum AppEventKind {
     Git {
         dir: PathBuf,
         state: GitState,
+    },
+    SessionDeleted {
+        session_id: SessionId,
     },
     Error(String),
 }

@@ -27,6 +27,7 @@ use crate::file_tree::{self, FileTree, Listing, TreeAction};
 use crate::home::HomeState;
 use crate::keymap::{self, Action, Chord};
 use crate::running::{self, PendingOpen};
+use crate::widgets::delete_modal::{self, PendingDelete};
 use crate::widgets::keymaps_modal;
 use crate::widgets::session_picker::{self, PickerState};
 use crate::workspace::{Tiling, WindowKind};
@@ -204,6 +205,8 @@ pub struct App {
     pub running: HashMap<String, RunningSession>,
     /// Awaiting confirmation to open a session that is running elsewhere.
     pub pending_open: Option<PendingOpen>,
+    /// Awaiting confirmation to delete a session forever.
+    pub pending_delete: Option<PendingDelete>,
     running_checked: Option<Instant>,
     running_inflight: bool,
     running_polled: bool,
@@ -282,6 +285,7 @@ impl App {
             picker_generation: 0,
             running: HashMap::new(),
             pending_open: None,
+            pending_delete: None,
             running_checked: None,
             running_inflight: false,
             running_polled: false,
@@ -346,6 +350,7 @@ impl App {
             picker_generation: 0,
             running: HashMap::new(),
             pending_open: None,
+            pending_delete: None,
             running_checked: None,
             running_inflight: false,
             running_polled: false,
@@ -726,6 +731,14 @@ impl App {
             }
             None => self.open_confirmed(card.id, background),
         }
+    }
+
+    /// Asks for confirmation before deleting a card's session.
+    pub fn request_delete(&mut self, card: &SessionCard) {
+        self.pending_delete = Some(PendingDelete {
+            id: card.id,
+            title: card.title.clone(),
+        });
     }
 
     pub fn open_confirmed(&mut self, id: SessionId, background: bool) {
@@ -1397,6 +1410,16 @@ impl App {
             (_, AppEventKind::Error(msg)) => {
                 self.report(ErrorReport::new("Something went wrong", msg))
             }
+            (Some(id), AppEventKind::SessionDeleted { .. }) => {
+                self.drop_session(id);
+                self.background.remove(&id);
+                self.reloading.remove(&id);
+                if self.pending_open.as_ref().is_some_and(|p| p.id == id) {
+                    self.pending_open = None;
+                }
+                self.refresh_workspaces();
+                self.refresh_cards();
+            }
             (Some(_), AppEventKind::SessionCreated(s)) => {
                 self.insert_vm(s, Vec::new());
                 self.refresh_workspaces();
@@ -1641,6 +1664,7 @@ impl App {
         let ctx = ui.ctx().clone();
         session_picker::show(self, &ctx);
         running::confirm_modal(self, &ctx);
+        delete_modal::show(self, &ctx);
         self.editor_modal(&ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {
             self.keymaps_open = false;

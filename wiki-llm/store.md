@@ -10,3 +10,4 @@
 - Import (`WriteOp::ImportSession`) upserts the workspace by path and the session by provider id in one transaction, never touches an `xade` origin row, replaces messages (and their search rows), and keeps effort, cost and a known context max.
 - Deltas and session status are never stored; there is no attachments table yet.
 - Every Import skips sessions whose cwd is missing or under a temp root (`throwaway::is_throwaway_dir`), first running `WriteOp::PruneThrowaway`: deletes `claude_code` sessions in throwaway workspaces, then session-less throwaway workspaces.
+- `WriteOp::DeleteSession` removes the row (messages and search rows cascade); `ManagerCmd::DeleteSession` is Xade-origin only, closes the live session, deletes the CLI transcript first (provider error aborts, nothing deleted), so Import cannot resurrect it.

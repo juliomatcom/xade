@@ -399,6 +399,32 @@ fn title_update_reindexes_and_delete_cascades() {
 }
 
 #[test]
+fn delete_session_removes_row_messages_and_search_rows() {
+    let f = Fixture::new();
+    let id = f.add_session("Alpha topic", 1);
+    let other = f.add_session("Alpha keeper", 2);
+    f.add_message(id, 1, Role::User, "gamma body");
+    f.add_message(other, 1, Role::User, "gamma stays");
+    assert_eq!(f.titles("gamma").len(), 2);
+    f.writer.send(WriteOp::DeleteSession(id)).unwrap();
+    f.writer.flush().unwrap();
+    assert!(block_on(f.reader.load_session(id)).is_err());
+    assert_eq!(f.titles("gamma"), vec!["Alpha keeper".to_string()]);
+    assert!(f.titles("alpha topic").is_empty());
+    assert_eq!(block_on(f.reader.max_seq(id)).unwrap(), 0);
+    let conn = rusqlite::Connection::open(&f.path).unwrap();
+    let left: i64 = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM messages WHERE session_id = ?1)
+                  + (SELECT COUNT(*) FROM search_index WHERE session_id = ?1)",
+            [id.0.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
 fn load_session_roundtrip_and_max_seq() {
     let f = Fixture::new();
     let id = f.add_session("Round trip", 1);

@@ -29,6 +29,7 @@ pub const SETTINGS: &str = "\u{2699}";
 pub const WARNING: &str = "\u{26A0}";
 pub const COPY: &str = "\u{1F4CB}";
 pub const BUG: &str = "\u{1F41B}";
+pub const TRASH: &str = "\u{1F5D1}";
 pub const FOLDER: &str = ADD_DIR;
 pub const FOLDER_OPEN: &str = OPEN_SESSION;
 pub const FILE: &str = "\u{1F4C4}";
@@ -75,6 +76,7 @@ mod tests {
             WARNING,
             COPY,
             BUG,
+            TRASH,
             FILE,
             COLLAPSED,
             EXPANDED,

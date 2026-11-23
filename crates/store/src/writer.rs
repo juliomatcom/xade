@@ -59,6 +59,8 @@ pub enum WriteOp {
     /// `throwaway::is_throwaway_dir`; messages and search rows go with them), then workspaces
     /// that are throwaway and hold no session. Replies with the counts.
     PruneThrowaway(mpsc::Sender<PruneCounts>),
+    /// Deletes the session row; its messages and search rows go with it.
+    DeleteSession(SessionId),
     /// Replies once every earlier op has been applied.
     Flush(mpsc::Sender<()>),
     /// Panics the writer thread, to exercise its supervision. Debug builds only.
@@ -345,6 +347,12 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
             tx.commit()?;
             let _ = reply.send(counts);
             return Ok(());
+        }
+        WriteOp::DeleteSession(id) => {
+            tx.execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                params![id.0.to_string()],
+            )?;
         }
         WriteOp::Flush(_) => {}
         #[cfg(debug_assertions)]

@@ -479,6 +479,7 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
     ui.add_space(CARD_GAP);
     let area = ui.available_rect_before_wrap();
     let mut open: Option<SessionCard> = None;
+    let mut delete: Option<SessionCard> = None;
     if app.home.cards.is_empty() {
         let msg = if !app.home.search.trim().is_empty() {
             "No sessions match your search."
@@ -492,9 +493,14 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
         });
     }
     for (card, rect) in app.home.cards.iter().zip(tile_rects(area)) {
-        if card_ui(app, ui, card, rect) {
-            open = Some(card.clone());
+        match card_ui(app, ui, card, rect) {
+            Some(CardClick::Open) => open = Some(card.clone()),
+            Some(CardClick::Delete) => delete = Some(card.clone()),
+            None => {}
         }
+    }
+    if let Some(card) = delete {
+        app.request_delete(&card);
     }
     if let Some(card) = open {
         // Cmd+click keeps Home and just adds the window.
@@ -534,8 +540,22 @@ fn clipped_text(
     painter.layout_job(job)
 }
 
-/// Draws one card inside `rect`, clipped to it; returns true when clicked.
-fn card_ui(app: &App, ui: &mut egui::Ui, card: &SessionCard, rect: egui::Rect) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CardClick {
+    Open,
+    Delete,
+}
+
+/// Side of the trash button in a card's bottom-right corner.
+const TRASH_SIZE: f32 = 22.0;
+
+/// Draws one card inside `rect`, clipped to it; returns what was clicked.
+fn card_ui(
+    app: &App,
+    ui: &mut egui::Ui,
+    card: &SessionCard,
+    rect: egui::Rect,
+) -> Option<CardClick> {
     let resp = ui
         .interact(
             rect,
@@ -556,8 +576,9 @@ fn card_ui(app: &App, ui: &mut egui::Ui, card: &SessionCard, rect: egui::Rect) -
         egui::StrokeKind::Inside,
     );
     let inner = rect.shrink(CARD_PAD);
+    let open = || resp.clicked().then_some(CardClick::Open);
     if inner.width() <= 0.0 || inner.height() <= 0.0 {
-        return resp.clicked();
+        return open();
     }
     let running = app.running_for(card);
     if let Some(r) = running {
@@ -608,9 +629,12 @@ fn card_ui(app: &App, ui: &mut egui::Ui, card: &SessionCard, rect: egui::Rect) -
     y += title.size().y + ROW_GAP;
 
     let badge_h = line_h + 4.0;
+    // Only Xade-origin sessions can be deleted; the button sits in the bottom-right corner.
+    let can_delete = card.origin == SessionOrigin::Xade;
+    let trash_w = if can_delete { TRASH_SIZE + 4.0 } else { 0.0 };
     let bottom = egui::Rect::from_min_max(
         egui::pos2(inner.left(), (inner.bottom() - line_h).max(inner.top())),
-        inner.max,
+        egui::pos2((inner.right() - trash_w).max(inner.left()), inner.bottom()),
     );
     let badges = egui::Rect::from_min_size(
         egui::pos2(inner.left(), y),
@@ -669,7 +693,41 @@ fn card_ui(app: &App, ui: &mut egui::Ui, card: &SessionCard, rect: egui::Rect) -
         let (text, color) = status_badge(&status);
         ui.label(RichText::new(text).small().color(color));
     });
-    resp.clicked()
+    if can_delete {
+        let trash = egui::Rect::from_min_size(
+            egui::pos2(
+                inner.right() - TRASH_SIZE,
+                inner.bottom() - TRASH_SIZE + 4.0,
+            ),
+            egui::Vec2::splat(TRASH_SIZE),
+        );
+        // Added after the card so it takes the click before the tile's open handler.
+        let tr = ui.interact(
+            trash,
+            ui.make_persistent_id(("trash", card.id)),
+            egui::Sense::click(),
+        );
+        let (color, tip) = match running {
+            Some(r) => (
+                theme::TEXT_MUTED.gamma_multiply(0.4),
+                format!("Running in {} \u{2014} close it there first", r.location),
+            ),
+            None if tr.hovered() => (theme::DANGER, "Delete forever".to_string()),
+            None => (theme::TEXT_MUTED, "Delete forever".to_string()),
+        };
+        ui.painter().text(
+            trash.center(),
+            egui::Align2::CENTER_CENTER,
+            icons::TRASH,
+            egui::FontId::proportional(14.0),
+            color,
+        );
+        let tr = tr.on_hover_text(tip);
+        if tr.clicked() {
+            return running.is_none().then_some(CardClick::Delete);
+        }
+    }
+    open()
 }
 
 fn status_badge(s: &SessionStatus) -> (&'static str, egui::Color32) {
@@ -904,6 +962,118 @@ mod tests {
             (p.id, p.location.as_str(), p.background),
             (idle.id, "VS Code", true)
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Runs headless frames over one card with `events` on the last one; returns the click
+    /// and the rect of every text drawn.
+    fn click_card(
+        app: &App,
+        ctx: &egui::Context,
+        card: &SessionCard,
+        at: Option<egui::Pos2>,
+    ) -> (Option<CardClick>, Vec<(String, egui::Rect)>) {
+        let rect = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(300.0, 180.0));
+        let frame = |events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut click = None;
+            let mut out = ctx.run_ui(input, |ui| click = card_ui(app, ui, card, rect));
+            out.textures_delta.clear();
+            let mut texts = Vec::new();
+            fn walk(s: &egui::Shape, t: &mut Vec<(String, egui::Rect)>) {
+                match s {
+                    egui::Shape::Text(x) => {
+                        t.push((x.galley.text().to_string(), x.visual_bounding_rect()))
+                    }
+                    egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, t)),
+                    _ => {}
+                }
+            }
+            out.shapes.iter().for_each(|c| walk(&c.shape, &mut texts));
+            (click, texts)
+        };
+        let Some(pos) = at else { return frame(vec![]) };
+        frame(vec![egui::Event::PointerMoved(pos)]);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![button(true)]);
+        frame(vec![button(false)])
+    }
+
+    #[test]
+    fn trash_sits_bottom_right_only_on_xade_cards_and_does_not_open_the_session() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-trash-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let card_rect = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(300.0, 180.0));
+        let trash_of = |texts: &[(String, egui::Rect)]| {
+            texts
+                .iter()
+                .find(|(t, _)| t == icons::TRASH)
+                .map(|(_, r)| *r)
+        };
+
+        let mut xade = test_card(Some("p-x"), 60);
+        xade.origin = SessionOrigin::Xade;
+        click_card(&app, &ctx, &xade, None);
+        let (_, texts) = click_card(&app, &ctx, &xade, None);
+        let trash = trash_of(&texts).expect("trash icon drawn");
+        let c = trash.center();
+        assert!(
+            c.x > card_rect.center().x && c.y > card_rect.center().y,
+            "{trash:?} not bottom-right of {card_rect:?}"
+        );
+        assert!(
+            card_rect.right() - trash.right() < 20.0 && card_rect.bottom() - trash.bottom() < 20.0
+        );
+
+        // Clicking it asks for confirmation and neither opens the session nor sends a command.
+        let (click, _) = click_card(&app, &ctx, &xade, Some(c));
+        assert_eq!(click, Some(CardClick::Delete));
+        app.request_delete(&xade);
+        assert_eq!(app.pending_delete.as_ref().map(|p| p.id), Some(xade.id));
+        assert!(app.open_windows.is_empty() && cmds.try_recv().is_err());
+        // A click elsewhere on the card still opens it.
+        let (click, _) = click_card(&app, &ctx, &xade, Some(card_rect.center()));
+        assert_eq!(click, Some(CardClick::Open));
+
+        // Running elsewhere: the button is inert.
+        app.running.insert(
+            "p-x".into(),
+            xade_core::RunningSession {
+                provider_session_id: "p-x".into(),
+                state: xade_core::RunState::Idle,
+                location: "VS Code".into(),
+                pid: 1,
+            },
+        );
+        let (click, texts) = click_card(&app, &ctx, &xade, Some(c));
+        assert!(trash_of(&texts).is_some());
+        assert_eq!(click, None);
+
+        // Claude Code cards have no trash at all.
+        let mut cc = test_card(Some("p-cc"), 60);
+        cc.origin = SessionOrigin::ClaudeCode;
+        let (_, texts) = click_card(&app, &ctx, &cc, None);
+        assert!(trash_of(&texts).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
