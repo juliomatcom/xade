@@ -30,6 +30,35 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     let hotkey_other = focused
         && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter));
     let hotkey = focused && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
+    if idle {
+        let last = vm
+            .sync
+            .transcript
+            .mtime
+            .map_or(vm.session.updated_at, time::OffsetDateTime::from);
+        if let Some(text) = send_note(
+            vm.session.usage.context_tokens_used,
+            last,
+            time::OffsetDateTime::now_utc(),
+        ) {
+            egui::Frame::new()
+                .fill(theme::BG_RAISED)
+                .stroke(egui::Stroke::new(1.0, theme::WARN))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(8, 4))
+                .show(ui, |ui| {
+                    ui.add(
+                        egui::Label::new(
+                            RichText::new(icons::with(icons::WARNING, &text))
+                                .small()
+                                .color(theme::WARN),
+                        )
+                        .wrap(),
+                    );
+                });
+            ui.add_space(4.0);
+        }
+    }
     egui::Frame::new()
         .fill(theme::BG_RAISED)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
@@ -124,24 +153,6 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     queued_rows(ui, vm);
 
     controls(ui, vm, env);
-    if idle {
-        let last = vm
-            .sync
-            .transcript
-            .mtime
-            .map_or(vm.session.updated_at, time::OffsetDateTime::from);
-        if let Some((text, kind)) = send_note(
-            vm.session.usage.context_tokens_used,
-            last,
-            time::OffsetDateTime::now_utc(),
-        ) {
-            let color = match kind {
-                CacheKind::Fresh => theme::TEXT_MUTED,
-                CacheKind::Expired => theme::WARN,
-            };
-            ui.label(RichText::new(text).small().color(color));
-        }
-    }
     ui.horizontal_wrapped(|ui| {
         let u = &vm.session.usage;
         ui.label(
@@ -157,25 +168,23 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     });
 }
 
-/// What the next message will resend: the whole context, cheap while the prompt cache is warm.
+/// Shown above the input when the prompt cache has expired: the next message resends the whole
+/// context at full price. While the cache is warm there is nothing worth saying.
 fn send_note(
     context_tokens: u64,
     last_activity: time::OffsetDateTime,
     now: time::OffsetDateTime,
-) -> Option<(String, CacheKind)> {
+) -> Option<String> {
     if context_tokens == 0 {
         return None;
     }
-    let tokens = fmt_tokens(context_tokens);
-    let (cache, kind) = running::cache_label(last_activity, now);
-    let text = match kind {
-        CacheKind::Fresh => format!("Sending resends ~{tokens} tokens of context ({cache})"),
-        CacheKind::Expired => format!(
-            "{} Cache expired: sending resends ~{tokens} tokens of context at full price",
-            icons::WARNING
-        ),
-    };
-    Some((text, kind))
+    let (_, kind) = running::cache_label(last_activity, now);
+    (kind == CacheKind::Expired).then(|| {
+        format!(
+            "Cache expired: sending will resend ~{} tokens of context at full price",
+            fmt_tokens(context_tokens)
+        )
+    })
 }
 
 /// Shows the user's message and hands it to the session.
@@ -484,15 +493,16 @@ mod tests {
     }
 
     #[test]
-    fn send_note_warns_when_the_cache_expired() {
+    fn send_note_only_appears_once_the_cache_expired() {
         let now = OffsetDateTime::now_utc();
-        assert!(send_note(0, now, now).is_none());
-        let (text, kind) = send_note(42_000, now, now).unwrap();
-        assert_eq!(kind, CacheKind::Fresh);
-        assert!(text.contains("~42.0k tokens"), "{text}");
-        let (text, kind) = send_note(42_000, now - time::Duration::hours(2), now).unwrap();
-        assert_eq!(kind, CacheKind::Expired);
-        assert!(text.contains("full price"), "{text}");
+        let old = now - time::Duration::hours(2);
+        assert!(send_note(0, old, now).is_none());
+        assert!(send_note(42_000, now, now).is_none());
+        let text = send_note(42_000, old, now).unwrap();
+        assert!(
+            text.contains("~42.0k tokens") && text.contains("full price"),
+            "{text}"
+        );
     }
 
     #[test]
