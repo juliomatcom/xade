@@ -1,14 +1,16 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Domain types and the provider contract. No I/O.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod error;
+pub mod events;
+pub mod ids;
+pub mod model;
+pub mod provider;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use error::ProviderError;
+pub use events::{ProviderEvent, SessionCommand};
+pub use ids::{ProviderId, SessionId, WorkspaceId};
+pub use model::{
+    Effort, Message, ModelOption, QuotaKind, QuotaWindow, Role, Session, SessionStatus,
+    SpawnConfig, UsageTotals, Workspace,
+};
+pub use provider::{AgentProvider, SessionHandle};

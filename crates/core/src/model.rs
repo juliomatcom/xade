@@ -1,0 +1,239 @@
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+use time::OffsetDateTime;
+use uuid::Uuid;
+
+use crate::ids::{ProviderId, SessionId, WorkspaceId};
+
+const TITLE_MAX_CHARS: usize = 60;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Effort {
+    /// Omit `--effort`.
+    #[default]
+    Default,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl Effort {
+    /// Value for the CLI `--effort` flag; `None` means omit the flag.
+    pub fn cli_value(self) -> Option<&'static str> {
+        match self {
+            Effort::Default => None,
+            Effort::Low => Some("low"),
+            Effort::Medium => Some("medium"),
+            Effort::High => Some("high"),
+            Effort::XHigh => Some("xhigh"),
+            Effort::Max => Some("max"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelOption {
+    pub id: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionStatus {
+    Closed,
+    Starting,
+    Idle,
+    Streaming,
+    NeedsApproval,
+    Error(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Workspace {
+    pub id: WorkspaceId,
+    pub root_path: PathBuf,
+    pub display_name: String,
+    pub last_opened_at: OffsetDateTime,
+    pub is_pinned: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UsageTotals {
+    pub context_tokens_used: u64,
+    pub context_window_max: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cost_usd: f64,
+}
+
+impl UsageTotals {
+    /// Adds the turn's input, output, cache-read and cost; replaces the context figures.
+    pub fn accumulate(&mut self, turn: &UsageTotals) {
+        self.input_tokens += turn.input_tokens;
+        self.output_tokens += turn.output_tokens;
+        self.cache_read_tokens += turn.cache_read_tokens;
+        self.cost_usd += turn.cost_usd;
+        self.context_tokens_used = turn.context_tokens_used;
+        self.context_window_max = turn.context_window_max;
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Session {
+    pub id: SessionId,
+    pub workspace_id: WorkspaceId,
+    pub provider_id: ProviderId,
+    pub provider_session_id: Option<String>,
+    pub title: String,
+    pub preview_snippet: String,
+    pub model_id: String,
+    pub effort: Effort,
+    pub auto_mode: bool,
+    pub usage: UsageTotals,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+impl Session {
+    /// First line of the prompt, trimmed, at most 60 chars (including the `…` when cut).
+    pub fn derive_title(first_prompt: &str) -> String {
+        let line = first_prompt.trim().lines().next().unwrap_or("").trim();
+        if line.chars().count() <= TITLE_MAX_CHARS {
+            return line.to_string();
+        }
+        let mut title: String = line.chars().take(TITLE_MAX_CHARS - 1).collect();
+        title.truncate(title.trim_end().len());
+        title.push('…');
+        title
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    User,
+    Assistant,
+    ToolCall,
+    ToolResult,
+    System,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Message {
+    pub id: Uuid,
+    pub session_id: SessionId,
+    pub seq: i64,
+    pub role: Role,
+    pub content_text: String,
+    pub thinking_text: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub tool_payload_json: Option<String>,
+    pub is_error: bool,
+    pub created_at: OffsetDateTime,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QuotaKind {
+    FiveHour,
+    SevenDay,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuotaWindow {
+    pub kind: QuotaKind,
+    pub utilization_pct: f32,
+    pub resets_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpawnConfig {
+    pub cwd: PathBuf,
+    pub model_id: String,
+    pub effort: Effort,
+    pub auto_mode: bool,
+    /// `provider_session_id` to resume.
+    pub resume: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn title_empty() {
+        assert_eq!(Session::derive_title(""), "");
+        assert_eq!(Session::derive_title("  \n\t "), "");
+    }
+
+    #[test]
+    fn title_takes_first_line_trimmed() {
+        assert_eq!(
+            Session::derive_title("  fix the bug \nsecond line"),
+            "fix the bug"
+        );
+        assert_eq!(Session::derive_title("\n\n  hello\nworld"), "hello");
+    }
+
+    #[test]
+    fn title_short_and_exact_limit_untouched() {
+        let exact = "a".repeat(60);
+        assert_eq!(Session::derive_title(&exact), exact);
+    }
+
+    #[test]
+    fn title_cut_at_60_chars_with_ellipsis() {
+        let long = "a".repeat(100);
+        let title = Session::derive_title(&long);
+        assert_eq!(title.chars().count(), 60);
+        assert_eq!(title, format!("{}…", "a".repeat(59)));
+    }
+
+    #[test]
+    fn title_unicode_boundary() {
+        let long = "é".repeat(80);
+        let title = Session::derive_title(&long);
+        assert_eq!(title.chars().count(), 60);
+        assert!(title.ends_with('…'));
+        let emoji = "😀".repeat(70);
+        assert_eq!(Session::derive_title(&emoji).chars().count(), 60);
+    }
+
+    #[test]
+    fn accumulate_adds_totals_and_replaces_context() {
+        let mut total = UsageTotals {
+            context_tokens_used: 10,
+            context_window_max: 100,
+            input_tokens: 1,
+            output_tokens: 2,
+            cache_read_tokens: 3,
+            cost_usd: 0.5,
+        };
+        let turn = UsageTotals {
+            context_tokens_used: 40,
+            context_window_max: 200,
+            input_tokens: 10,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cost_usd: 0.25,
+        };
+        total.accumulate(&turn);
+        assert_eq!(total.input_tokens, 11);
+        assert_eq!(total.output_tokens, 22);
+        assert_eq!(total.cache_read_tokens, 33);
+        assert_eq!(total.cost_usd, 0.75);
+        assert_eq!(total.context_tokens_used, 40);
+        assert_eq!(total.context_window_max, 200);
+    }
+
+    #[test]
+    fn effort_cli_values() {
+        assert_eq!(Effort::Default.cli_value(), None);
+        assert_eq!(Effort::XHigh.cli_value(), Some("xhigh"));
+        assert_eq!(Effort::Max.cli_value(), Some("max"));
+        assert_eq!(serde_json::to_string(&Effort::XHigh).unwrap(), "\"xhigh\"");
+    }
+}
