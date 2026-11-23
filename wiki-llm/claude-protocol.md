@@ -39,6 +39,7 @@ Verified against Claude Code 2.1.330 with fixtures in `crates/claude/fixtures/` 
 ## Transcripts (`crates/claude/src/transcript.rs`, fixture `fixtures/transcripts/`)
 - The CLI writes `~/.claude/projects/<dir>/<sessionId>.jsonl`; the file stem is the `--resume` id and a resume keeps it. Entries: `user`, `assistant`, `ai-title` matter; `isSidechain`/`isMeta`/`isCompactSummary` and every other type are skipped.
 - Mapping: `cwd` = workspace, last `aiTitle` (else first user text) = title, last assistant `model`; user text and `tool_result` (+ `toolUseResult`) and assistant `text`/`tool_use` become messages; usage is deduped per `message.id`.
+- Live sessions: `~/.claude/sessions/<pid>.json` (`pid`, `sessionId`, `status` busy|idle, `entrypoint`) per CLI process (`crates/claude/src/running.rs`); read only `*.json`, never the `<pid>.<hex>.key` files; drop entries whose pid is dead (`kill(pid,0)`, EPERM = alive) since crashes leave stale files.
 
 ## Lifecycle
 - Closing stdin ends the process after the current turn (exit 0; exit 1 if the last turn was interrupted).

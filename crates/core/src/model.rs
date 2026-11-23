@@ -174,6 +174,22 @@ pub struct ImportedSession {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RunState {
+    Busy,
+    Idle,
+}
+
+/// A provider session currently running in a live process anywhere (terminal, IDE, SDK).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunningSession {
+    pub provider_session_id: String,
+    pub state: RunState,
+    /// Human label: "VS Code", "terminal", "SDK", or the raw entrypoint.
+    pub location: String,
+    pub pid: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum QuotaKind {
     FiveHour,
     SevenDay,

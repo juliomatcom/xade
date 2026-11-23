@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use serde::Deserialize;
 use xade_core::{
-    AgentProvider, Effort, ImportedSession, ModelOption, ProviderError, ProviderId, SessionHandle,
-    SpawnConfig,
+    AgentProvider, Effort, ImportedSession, ModelOption, ProviderError, ProviderId, RunningSession,
+    SessionHandle, SpawnConfig,
 };
 
 use crate::models::{fetch_catalog, Catalog};
@@ -170,5 +170,12 @@ impl AgentProvider for ClaudeProvider {
             return Vec::new();
         };
         transcript::scan_projects(&home.join(".claude/projects")).sessions
+    }
+
+    fn running_sessions(&self) -> Vec<RunningSession> {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return Vec::new();
+        };
+        crate::running::scan_running(&home.join(".claude/sessions"))
     }
 }

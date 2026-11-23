@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 use crate::error::ProviderError;
 use crate::events::{ProviderEvent, SessionCommand};
 use crate::ids::ProviderId;
-use crate::model::{Effort, ImportedSession, ModelOption, SpawnConfig};
+use crate::model::{Effort, ImportedSession, ModelOption, RunningSession, SpawnConfig};
 
 /// Not `Clone`: it owns the single receiver of the session's events.
 #[derive(Debug)]
@@ -24,6 +24,10 @@ pub trait AgentProvider: Send + Sync {
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError>;
     /// Sessions found in the provider's own history. Blocking; callers use `spawn_blocking`.
     fn import_sessions(&self) -> Vec<ImportedSession> {
+        Vec::new()
+    }
+    /// Sessions running right now in live processes. Blocking; callers use `spawn_blocking`.
+    fn running_sessions(&self) -> Vec<RunningSession> {
         Vec::new()
     }
 }

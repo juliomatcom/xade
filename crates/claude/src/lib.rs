@@ -4,8 +4,10 @@ pub mod frames;
 pub mod models;
 pub mod process;
 pub mod provider;
+pub mod running;
 pub mod transcript;
 pub mod translate;
 
 pub use provider::ClaudeProvider;
+pub use running::scan_running;
 pub use translate::Translator;
