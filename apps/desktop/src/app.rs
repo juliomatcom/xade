@@ -21,6 +21,9 @@ use xade_store::{Page, SessionCard, StoreReader, WriteOp, WriterHandle};
 
 use crate::diff::{is_code_change, DiffData};
 use crate::home::HomeState;
+use crate::keymap::{self, Action, Chord};
+use crate::widgets::keymaps_modal;
+use crate::widgets::session_picker::{self, PickerState};
 use crate::workspace::Tiling;
 use crate::{home, icons, status_bar, theme, workspace};
 
@@ -43,6 +46,10 @@ pub enum UiMsg {
     Preflight(Option<String>),
     /// Quota rows saved by earlier runs.
     SavedQuota(Vec<QuotaWindow>),
+    PickerCards {
+        generation: u64,
+        page: Page<SessionCard>,
+    },
 }
 
 /// Sends to the UI thread and wakes it.
@@ -141,6 +148,14 @@ pub struct App {
     /// Window to bring to the front on the next frame.
     pub raise: Option<SessionId>,
     pub vscode: Option<PathBuf>,
+    pub chord: Chord,
+    pub sidebar_visible: bool,
+    pub keymaps_open: bool,
+    /// The session picker, when open.
+    pub picker: Option<PickerState>,
+    picker_generation: u64,
+    /// Sessions being opened from Home with Cmd+click: they get a window but no view switch.
+    background: HashSet<SessionId>,
     events_rx: Receiver<UiMsg>,
     bridge: Bridge,
     git_inflight: HashSet<PathBuf>,
@@ -194,6 +209,12 @@ impl App {
             maximized: None,
             raise: None,
             vscode: crate::widgets::diff_modal::find_code(),
+            chord: Chord::default(),
+            sidebar_visible: true,
+            keymaps_open: false,
+            picker: None,
+            picker_generation: 0,
+            background: HashSet::new(),
             events_rx,
             bridge,
             git_inflight: HashSet::new(),
@@ -234,6 +255,12 @@ impl App {
             maximized: None,
             raise: None,
             vscode: None,
+            chord: Chord::default(),
+            sidebar_visible: true,
+            keymaps_open: false,
+            picker: None,
+            picker_generation: 0,
+            background: HashSet::new(),
             events_rx,
             bridge: Bridge {
                 tx,
@@ -282,6 +309,27 @@ impl App {
             match res {
                 Ok(page) => bridge.send(UiMsg::Cards { generation, page }),
                 Err(e) => tracing::error!(error = %e, "session query failed"),
+            }
+        });
+    }
+
+    /// Lists or searches every session for the picker's query.
+    pub fn refresh_picker(&mut self) {
+        let Some(picker) = &self.picker else { return };
+        self.picker_generation += 1;
+        let generation = self.picker_generation;
+        let query = picker.query.trim().to_string();
+        let (reader, bridge) = (self.reader.clone(), self.bridge.clone());
+        self.rt.spawn(async move {
+            let size = session_picker::PAGE_SIZE;
+            let res = if query.is_empty() {
+                reader.list_sessions(None, None, 0, size).await
+            } else {
+                reader.search(None, None, query, 0, size).await
+            };
+            match res {
+                Ok(page) => bridge.send(UiMsg::PickerCards { generation, page }),
+                Err(e) => tracing::error!(error = %e, "picker query failed"),
             }
         });
     }
@@ -381,21 +429,40 @@ impl App {
         if self.home.preflight_error.is_some() {
             return;
         }
-        let live = self
-            .sessions
-            .get(&id)
-            .is_some_and(|vm| !matches!(vm.status, SessionStatus::Error(_)));
-        if !live {
+        self.background.remove(&id);
+        if !self.is_live(id) {
             let _ = self.cmd_tx.send(ManagerCmd::Open { session_id: id });
         }
         self.focus(id);
     }
 
-    fn focus(&mut self, id: SessionId) {
+    /// Opens a stored session as a window without leaving the current view (Cmd+click on Home).
+    pub fn open_session_background(&mut self, id: SessionId) {
+        if self.home.preflight_error.is_some() {
+            return;
+        }
+        if self.is_live(id) {
+            self.add_window(id);
+        } else if self.background.insert(id) {
+            let _ = self.cmd_tx.send(ManagerCmd::Open { session_id: id });
+        }
+    }
+
+    fn is_live(&self, id: SessionId) -> bool {
+        self.sessions
+            .get(&id)
+            .is_some_and(|vm| !matches!(vm.status, SessionStatus::Error(_)))
+    }
+
+    fn add_window(&mut self, id: SessionId) {
         if !self.open_windows.contains(&id) {
             self.open_windows.push(id);
             self.maximized = None;
         }
+    }
+
+    fn focus(&mut self, id: SessionId) {
+        self.add_window(id);
         self.focused = Some(id);
         self.raise = Some(id);
         self.view = View::Workspace;
@@ -453,6 +520,113 @@ impl App {
             .count()
     }
 
+    /// Runs one shortcut. Actions that need a focused session do nothing without one.
+    pub fn run_action(&mut self, action: Action) {
+        let focused = self.focused.filter(|id| self.sessions.contains_key(id));
+        let in_workspace = self.view == View::Workspace;
+        match action {
+            Action::NewSession => {
+                if self.home.scope.is_none() {
+                    self.error = Some("Select a workspace in the sidebar first.".into());
+                } else {
+                    self.new_session();
+                }
+            }
+            Action::OpenPicker => {
+                if self.picker.take().is_none() {
+                    self.picker = Some(PickerState::default());
+                    self.refresh_picker();
+                }
+            }
+            Action::Stop => {
+                if let Some(vm) = focused.and_then(|id| self.sessions.get(&id)) {
+                    if vm.status == SessionStatus::Streaming {
+                        let _ = self.cmd_tx.send(ManagerCmd::Interrupt {
+                            session_id: vm.session.id,
+                        });
+                    }
+                }
+            }
+            Action::CloseWindow => {
+                if let (true, Some(id)) = (in_workspace, focused) {
+                    self.close_session(id);
+                }
+            }
+            Action::FocusWindow(n) => {
+                let id = self
+                    .open_windows
+                    .get(usize::from(n).saturating_sub(1))
+                    .copied();
+                if let Some(id) = id.filter(|id| self.sessions.contains_key(id)) {
+                    self.focus(id);
+                }
+            }
+            Action::NextWindow | Action::PrevWindow => {
+                let n = self.open_windows.len();
+                let at = self
+                    .focused
+                    .and_then(|f| self.open_windows.iter().position(|id| *id == f));
+                if let (true, Some(at)) = (n > 1, at) {
+                    let next = if action == Action::NextWindow {
+                        (at + 1) % n
+                    } else {
+                        (at + n - 1) % n
+                    };
+                    self.focus(self.open_windows[next]);
+                }
+            }
+            Action::Maximize => {
+                if let (true, Some(id)) = (in_workspace, focused) {
+                    self.maximized = (self.maximized != Some(id)).then_some(id);
+                    self.tiling.retile();
+                    self.raise = Some(id);
+                }
+            }
+            Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
+            Action::Retile => self.tiling.retile(),
+            Action::ToggleView => {
+                if in_workspace {
+                    self.view = View::Home;
+                } else if !self.open_windows.is_empty() {
+                    self.view = View::Workspace;
+                }
+            }
+            Action::ToggleAuto => {
+                if let Some(vm) = focused.and_then(|id| self.sessions.get_mut(&id)) {
+                    vm.session.auto_mode = !vm.session.auto_mode;
+                    let _ = self.cmd_tx.send(ManagerCmd::SetAutoMode {
+                        session_id: vm.session.id,
+                        on: vm.session.auto_mode,
+                    });
+                }
+            }
+            Action::Shortcuts => self.keymaps_open = !self.keymaps_open,
+            // Handled by the composer and the modals themselves.
+            Action::Send | Action::CloseModal => {}
+        }
+    }
+
+    /// Reads this frame's shortcuts, before any widget can take the keys.
+    fn handle_shortcuts(&mut self, ctx: &egui::Context) {
+        let now = Instant::now();
+        self.chord.expire(now);
+        let actions = ctx.input_mut(|i| keymap::poll(i, &mut self.chord, now));
+        for action in actions {
+            self.run_action(action);
+        }
+        if let Some(left) = self.chord.remaining(now) {
+            ctx.request_repaint_after(left);
+        }
+        let typed_help = ctx.input(|i| {
+            i.events
+                .iter()
+                .any(|e| matches!(e, egui::Event::Text(t) if t == "?"))
+        });
+        if typed_help && !ctx.egui_wants_keyboard_input() {
+            self.keymaps_open = true;
+        }
+    }
+
     // ----- event folding -----
 
     fn on_msg(&mut self, msg: UiMsg) {
@@ -462,6 +636,16 @@ impl App {
                 if generation == self.home.generation {
                     self.home.cards = page.items;
                     self.home.total = page.total;
+                }
+            }
+            UiMsg::PickerCards { generation, page } => {
+                if let Some(p) = self
+                    .picker
+                    .as_mut()
+                    .filter(|_| generation == self.picker_generation)
+                {
+                    p.results = page.items;
+                    p.selected = p.selected.min(p.results.len().saturating_sub(1));
                 }
             }
             UiMsg::Workspaces(ws) => {
@@ -522,7 +706,11 @@ impl App {
                 apply_rect: None,
             },
         );
-        self.focus(id);
+        if self.background.remove(&id) {
+            self.add_window(id);
+        } else {
+            self.focus(id);
+        }
     }
 
     fn on_app_event(&mut self, ev: AppEvent) {
@@ -688,6 +876,7 @@ impl eframe::App for App {
         while let Ok(msg) = self.events_rx.try_recv() {
             self.on_msg(msg);
         }
+        self.handle_shortcuts(ctx);
         if let Some(changed) = self.home.search_changed_at {
             let wait = home::SEARCH_DEBOUNCE.saturating_sub(changed.elapsed());
             if wait.is_zero() {
@@ -713,7 +902,9 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         home::top_bar(self, ui);
         status_bar::show(self, ui);
-        home::sidebar(self, ui);
+        if self.sidebar_visible {
+            home::sidebar(self, ui);
+        }
         let frame = egui::Frame::new()
             .fill(theme::BG_PANEL)
             .inner_margin(egui::Margin::same(16));
@@ -734,6 +925,11 @@ impl eframe::App for App {
                 View::Workspace => workspace::show(self, ui),
             }
         });
+        let ctx = ui.ctx().clone();
+        session_picker::show(self, &ctx);
+        if self.keymaps_open && keymaps_modal::show(&ctx) {
+            self.keymaps_open = false;
+        }
     }
 
     /// eframe calls this on the window close button and on Cmd+Q (via `exiting`),
@@ -745,5 +941,49 @@ impl eframe::App for App {
                 .rt
                 .block_on(tokio::time::timeout(Duration::from_secs(5), rx));
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    fn key(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        }
+    }
+
+    #[test]
+    fn chord_and_plain_shortcuts_drive_the_app() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-app-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let frame = |app: &mut App, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                events,
+                ..Default::default()
+            };
+            ctx.run_pass(input, |ctx| app.handle_shortcuts(ctx))
+                .drop_without_applying_deltas();
+        };
+        frame(&mut app, vec![key(egui::Key::B)]);
+        assert!(!app.sidebar_visible);
+        frame(&mut app, vec![key(egui::Key::K)]);
+        assert!(app.chord.armed(Instant::now()) && !app.keymaps_open);
+        frame(&mut app, vec![key(egui::Key::S)]);
+        assert!(app.keymaps_open);
+        frame(&mut app, vec![key(egui::Key::P)]);
+        assert!(app.picker.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

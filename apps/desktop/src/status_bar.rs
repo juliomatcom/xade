@@ -1,10 +1,12 @@
 //! Bottom status bar: git state of the active directory.
 
+use std::time::Instant;
+
 use egui::RichText;
 use xade_runtime::GitState;
 
 use crate::app::App;
-use crate::theme;
+use crate::{keymap, theme};
 
 pub fn show(app: &App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
@@ -15,6 +17,10 @@ pub fn show(app: &App, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 let muted = |s: String| RichText::new(s).small().color(theme::TEXT_MUTED);
+                if let Some(first) = app.chord.pending(Instant::now()) {
+                    let first = keymap::stroke_label(&first, cfg!(target_os = "macos"));
+                    ui.label(muted(format!("{first} \u{2026}")));
+                }
                 let Some(dir) = app.active_dir() else {
                     ui.label(muted("No directory".into()));
                     return;

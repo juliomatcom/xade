@@ -4,6 +4,7 @@ mod conversation;
 mod diff;
 mod home;
 mod icons;
+mod keymap;
 mod session_view;
 mod status_bar;
 mod theme;

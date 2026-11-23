@@ -8,6 +8,7 @@ use xade_core::{QuotaKind, QuotaWindow, SessionOrigin, SessionStatus, Workspace,
 use xade_store::SessionCard;
 
 use crate::app::{App, View};
+use crate::keymap::{self, Action};
 use crate::{icons, theme};
 
 /// The home grid is `GRID` x `GRID` tiles per page.
@@ -45,7 +46,7 @@ pub struct HomeState {
 
 /// Room the provider dropdown and the right-hand cluster (buttons, quota meters) take; the
 /// top-bar test fails if they outgrow it.
-const TOP_BAR_RESERVED: f32 = 108.0 + 704.0;
+const TOP_BAR_RESERVED: f32 = 108.0 + 704.0 + 90.0;
 
 /// The search field shrinks with the space left of `TOP_BAR_RESERVED`.
 fn search_width(available: f32) -> f32 {
@@ -71,6 +72,16 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             }
             provider_dropdown(ui);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui
+                    .button(icons::SHORTCUTS)
+                    .on_hover_text(format!(
+                        "Keyboard shortcuts ({})",
+                        keymap::shortcut_text(Action::Shortcuts)
+                    ))
+                    .clicked()
+                {
+                    app.keymaps_open = true;
+                }
                 let can_tile = app.view == View::Workspace && !app.open_windows.is_empty();
                 if ui
                     .add_enabled(
@@ -109,6 +120,16 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                     .on_disabled_hover_text("Select a workspace in the sidebar first");
                 if new.clicked() {
                     app.new_session();
+                }
+                if ui
+                    .button(icons::OPEN_SESSION)
+                    .on_hover_text(format!(
+                        "Open session ({})",
+                        keymap::shortcut_text(Action::OpenPicker)
+                    ))
+                    .clicked()
+                {
+                    app.run_action(Action::OpenPicker);
                 }
                 for kind in [QuotaKind::SevenDay, QuotaKind::FiveHour] {
                     quota_meter(ui, kind, app.quota.iter().find(|q| q.kind == kind));
@@ -454,7 +475,12 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     if let Some(id) = open {
-        app.open_session(id);
+        // Cmd+click keeps Home and just adds the window.
+        if ui.input(|i| i.modifiers.command) {
+            app.open_session_background(id);
+        } else {
+            app.open_session(id);
+        }
     }
 }
 
@@ -615,7 +641,7 @@ fn status_badge(s: &SessionStatus) -> (&'static str, egui::Color32) {
     }
 }
 
-fn relative_time(t: OffsetDateTime) -> String {
+pub fn relative_time(t: OffsetDateTime) -> String {
     let secs = (OffsetDateTime::now_utc() - t).whole_seconds().max(0);
     match secs {
         0..=59 => "just now".into(),
