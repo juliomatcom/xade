@@ -638,12 +638,14 @@ impl eframe::App for App {
         });
     }
 
+    /// eframe calls this on the window close button and on Cmd+Q (via `exiting`),
+    /// possibly twice; a repeat `ShutdownAll` returns at once.
     fn on_exit(&mut self) {
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self.cmd_tx.send(ManagerCmd::ShutdownAll(tx)).is_ok() {
             let _ = self
                 .rt
-                .block_on(tokio::time::timeout(Duration::from_secs(10), rx));
+                .block_on(tokio::time::timeout(Duration::from_secs(5), rx));
         }
     }
 }

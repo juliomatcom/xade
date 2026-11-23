@@ -39,3 +39,4 @@ Verified against Claude Code 2.1.330 with fixtures in `crates/claude/fixtures/` 
 ## Lifecycle
 - Closing stdin ends the process after the current turn (exit 0; exit 1 if the last turn was interrupted).
 - Shutdown: close stdin, wait 3 s, SIGTERM the process group, wait 2 s, SIGKILL; `Exited` is always the last event.
+- Parent death: after `kill -9` of the parent the child exits on stdin EOF in about 1 s (no pidfile needed); re-check with `cargo run -p xade-claude --example parent_death`.
