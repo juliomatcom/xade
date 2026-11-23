@@ -5,6 +5,17 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+aw-core = { path = "../core" }
+nucleo-matcher = "=0.3.1"
+rusqlite = { version = "=0.43.0", features = ["bundled"] }
+thiserror = "=2.0.21"
+time = "=0.3.55"
+tokio = { version = "=1.54.1", default-features = false, features = ["rt", "sync"] }
+tracing = "=0.1.44"
+uuid = "=1.29.3"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
 
 [lints]
 workspace = true
