@@ -229,6 +229,12 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                     app.add_directory();
                 }
                 import_button(app, ui);
+                // bottom_up: later items sit higher, so providers stay above the buttons
+                // and the workspace list below can take all remaining height.
+                ui.add_space(8.0);
+                ui.label(RichText::new("Claude").color(theme::CLAUDE));
+                heading(ui, "Active Providers");
+                ui.separator();
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     heading(ui, "Workspaces");
                     if ui
@@ -243,22 +249,25 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                         .iter()
                         .map(|w| (w.id, w.display_name.clone(), app.live_count(w.id)))
                         .collect();
-                    for (id, name, live) in rows {
-                        let text = if live > 0 {
-                            format!("{name}  ({live})")
-                        } else {
-                            name
-                        };
-                        if ui
-                            .selectable_label(app.home.scope == Some(id), text)
-                            .clicked()
-                        {
-                            set_scope(app, Some(id));
-                        }
-                    }
-                    ui.add_space(16.0);
-                    heading(ui, "Active Providers");
-                    ui.label(RichText::new("Claude").color(theme::CLAUDE));
+                    let row_h = ui.spacing().interact_size.y;
+                    egui::ScrollArea::vertical()
+                        .id_salt("workspaces")
+                        .auto_shrink([false, false])
+                        .show_rows(ui, row_h, rows.len(), |ui, range| {
+                            for (id, name, live) in &rows[range] {
+                                let text = if *live > 0 {
+                                    format!("{name}  ({live})")
+                                } else {
+                                    name.clone()
+                                };
+                                let selected = app.home.scope == Some(*id);
+                                let resp =
+                                    ui.add(egui::Button::selectable(selected, text).truncate());
+                                if resp.clicked() {
+                                    set_scope(app, Some(*id));
+                                }
+                            }
+                        });
                 });
             });
         });
