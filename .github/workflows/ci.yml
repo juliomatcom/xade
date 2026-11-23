@@ -34,3 +34,31 @@ jobs:
         run: cargo test --workspace
       - name: Build
         run: cargo build --workspace --release
+
+  release-macos:
+    # Every push to main publishes Xade.app as a zip on a new GitHub Release.
+    if: github.event_name == 'push'
+    needs: check
+    runs-on: macos-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Bundle Xade.app
+        run: |
+          mkdir -p dist
+          ./scripts/bundle-macos.sh "$PWD/dist"
+      - name: Zip
+        run: ditto -c -k --keepParent dist/Xade.app Xade-macos-arm64.zip
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="$(grep -m1 '^version' apps/desktop/Cargo.toml | cut -d'"' -f2)"
+          TAG="v${VERSION}-build.${{ github.run_number }}"
+          gh release create "$TAG" Xade-macos-arm64.zip \
+            --target "${{ github.sha }}" \
+            --title "Xade $VERSION (build ${{ github.run_number }})" \
+            --notes "Automated build of ${{ github.sha }}. Unsigned: right-click Xade.app > Open the first time."
