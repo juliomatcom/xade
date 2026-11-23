@@ -27,6 +27,8 @@ pub const OPEN_SESSION: &str = "\u{1F4C2}";
 pub const SHORTCUTS: &str = "\u{2328}";
 pub const SETTINGS: &str = "\u{2699}";
 pub const WARNING: &str = "\u{26A0}";
+pub const COPY: &str = "\u{1F4CB}";
+pub const BUG: &str = "\u{1F41B}";
 pub const FOLDER: &str = ADD_DIR;
 pub const FOLDER_OPEN: &str = OPEN_SESSION;
 pub const FILE: &str = "\u{1F4C4}";
@@ -71,6 +73,8 @@ mod tests {
             SHORTCUTS,
             SETTINGS,
             WARNING,
+            COPY,
+            BUG,
             FILE,
             COLLAPSED,
             EXPANDED,

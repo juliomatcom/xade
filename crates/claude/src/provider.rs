@@ -169,7 +169,22 @@ impl AgentProvider for ClaudeProvider {
         let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
             return Vec::new();
         };
-        transcript::scan_projects(&home.join(".claude/projects")).sessions
+        let scan = transcript::scan_projects(&home.join(".claude/projects"));
+        let st = &scan.stats;
+        if st.read_errors > 0 {
+            tracing::warn!(
+                read_errors = st.read_errors,
+                "some Claude transcripts were unreadable"
+            );
+        }
+        tracing::info!(
+            files = st.files,
+            parsed = st.parsed,
+            skipped = st.skipped,
+            bad_lines = st.bad_lines,
+            "history scanned"
+        );
+        scan.sessions
     }
 
     fn running_sessions(&self) -> Vec<RunningSession> {

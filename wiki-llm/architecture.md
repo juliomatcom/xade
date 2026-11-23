@@ -6,3 +6,4 @@
 - The session actor is the only producer of message `WriteOp`s; the UI never writes messages.
 - `XADE_DATA_DIR` overrides the data directory (the DB lives at `$XADE_DATA_DIR/workspace.db`).
 - Import: `ManagerCmd::Import` runs each provider's `import_sessions` via `spawn_blocking`, then the manager skips Xade-origin, live and not-newer sessions, sends `WriteOp::ImportSession` for the rest and emits `ImportDone`.
+- Supervision: the manager task, each session actor and the store writer thread are watched; a panic becomes an `AppEvent` error (the session goes to `Error`) or, for the writer, "Saving is disabled" (`WriterHandle::take_failure`); logs are `<data dir>/logs/xade.log.<date>` (7 days) with a `crash-<ts>.txt` per panic.

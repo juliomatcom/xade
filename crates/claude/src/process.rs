@@ -137,7 +137,15 @@ async fn read_stdout(
     pending: Pending,
 ) {
     let mut lines = BufReader::new(stdout).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!(error = %e, "reading claude stdout failed");
+                break;
+            }
+        };
         if line.trim().is_empty() {
             continue;
         }
@@ -169,7 +177,15 @@ async fn read_stdout(
 
 async fn read_stderr(stderr: ChildStderr, tail: StderrTail) {
     let mut lines = BufReader::new(stderr).lines();
-    while let Ok(Some(line)) = lines.next_line().await {
+    loop {
+        let line = match lines.next_line().await {
+            Ok(Some(line)) => line,
+            Ok(None) => break,
+            Err(e) => {
+                tracing::warn!(error = %e, "reading claude stderr failed");
+                break;
+            }
+        };
         let mut t = lock(&tail);
         if t.len() == STDERR_LINES {
             t.pop_front();
@@ -209,8 +225,13 @@ async fn run(mut s: Session) {
     };
 
     // Let the readers drain what the child wrote before we report the exit.
-    let _ = timeout(SIGTERM_WAIT, &mut s.reader).await;
-    let _ = timeout(SIGTERM_WAIT, &mut s.err_reader).await;
+    for reader in [&mut s.reader, &mut s.err_reader] {
+        match timeout(SIGTERM_WAIT, reader).await {
+            Ok(Err(e)) => tracing::warn!(error = %e, "claude reader task failed"),
+            Err(_) => tracing::warn!("claude reader task did not finish"),
+            Ok(Ok(())) => {}
+        }
+    }
 
     let code = status.and_then(|st| st.code());
     if !requested && code != Some(0) {

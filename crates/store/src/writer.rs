@@ -1,14 +1,16 @@
 //! The only write path: one std thread owns the write connection.
 
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use time::OffsetDateTime;
 use xade_core::{
-    Effort, Message, QuotaWindow, Role, Session, SessionId, SessionOrigin, UsageTotals, Workspace,
-    WorkspaceId,
+    panic_message, Effort, Message, QuotaWindow, Role, Session, SessionId, SessionOrigin,
+    UsageTotals, Workspace, WorkspaceId,
 };
 
 use crate::schema::{self, fmt_ts, to_i64};
@@ -59,6 +61,9 @@ pub enum WriteOp {
     PruneThrowaway(mpsc::Sender<PruneCounts>),
     /// Replies once every earlier op has been applied.
     Flush(mpsc::Sender<()>),
+    /// Panics the writer thread, to exercise its supervision. Debug builds only.
+    #[cfg(debug_assertions)]
+    Poison,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -67,15 +72,56 @@ pub struct PruneCounts {
     pub workspaces: u32,
 }
 
+/// Whether the writer thread is still running, shared by every handle.
+#[derive(Default)]
+struct Health {
+    dead: AtomicBool,
+    reported: AtomicBool,
+    reason: Mutex<String>,
+}
+
+impl Health {
+    fn mark_dead(&self, reason: String) {
+        let mut r = self.reason.lock().unwrap_or_else(|e| e.into_inner());
+        if r.is_empty() {
+            *r = reason;
+        }
+        self.dead.store(true, Ordering::SeqCst);
+    }
+}
+
 /// Cheap to clone; the writer thread exits when the last handle is dropped.
 #[derive(Clone)]
 pub struct WriterHandle {
     tx: mpsc::Sender<WriteOp>,
+    health: Arc<Health>,
 }
 
 impl WriterHandle {
+    /// A failed send means the writer thread is gone; see [`WriterHandle::take_failure`].
     pub fn send(&self, op: WriteOp) -> Result<(), StoreError> {
-        self.tx.send(op).map_err(|_| StoreError::WriterClosed)
+        self.tx.send(op).map_err(|_| {
+            self.health
+                .mark_dead("the store writer channel is closed".into());
+            StoreError::WriterClosed
+        })
+    }
+
+    /// The reason the writer thread died, returned once; `None` while it runs or after it
+    /// was reported.
+    pub fn take_failure(&self) -> Option<String> {
+        if !self.health.dead.load(Ordering::SeqCst)
+            || self.health.reported.swap(true, Ordering::SeqCst)
+        {
+            return None;
+        }
+        Some(
+            self.health
+                .reason
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
+        )
     }
 
     /// Blocks until all previously sent ops are applied.
@@ -93,18 +139,30 @@ impl StoreWriter {
     pub fn spawn(path: &Path) -> Result<WriterHandle, StoreError> {
         let mut conn = schema::open_writer(path)?;
         let (tx, rx) = mpsc::channel::<WriteOp>();
+        let health = Arc::new(Health::default());
+        let thread_health = health.clone();
+        // The JoinHandle is dropped on purpose: `Health` reports a panic or early exit.
         thread::Builder::new()
             .name("store-writer".into())
             .spawn(move || {
-                while let Ok(op) = rx.recv() {
-                    if let WriteOp::Flush(done) = op {
-                        let _ = done.send(());
-                    } else if let Err(e) = apply(&mut conn, op) {
-                        tracing::error!(error = %e, "store write failed");
+                let ran = catch_unwind(AssertUnwindSafe(|| {
+                    while let Ok(op) = rx.recv() {
+                        if let WriteOp::Flush(done) = op {
+                            let _ = done.send(());
+                        } else if let Err(e) = apply(&mut conn, op) {
+                            tracing::error!(error = %e, "store write failed");
+                        }
                     }
+                }));
+                if let Err(payload) = ran {
+                    let msg = panic_message(&*payload);
+                    tracing::error!(%msg, "store writer panicked");
+                    thread_health.mark_dead(format!("the store writer panicked: {msg}"));
+                } else {
+                    thread_health.mark_dead("the store writer stopped".into());
                 }
             })?;
-        Ok(WriterHandle { tx })
+        Ok(WriterHandle { tx, health })
     }
 }
 
@@ -289,6 +347,8 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
             return Ok(());
         }
         WriteOp::Flush(_) => {}
+        #[cfg(debug_assertions)]
+        WriteOp::Poison => panic!("forced store writer failure"),
     }
     tx.commit()
 }

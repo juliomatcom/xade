@@ -101,7 +101,9 @@ pub enum AppEventKind {
 /// Waits until every write sent so far is applied.
 pub async fn flush(writer: &WriterHandle) {
     let w = writer.clone();
-    if let Ok(Err(e)) = tokio::task::spawn_blocking(move || w.flush()).await {
-        tracing::error!(error = %e, "store flush failed");
+    match tokio::task::spawn_blocking(move || w.flush()).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::error!(error = %e, "store flush failed"),
+        Err(e) => tracing::error!(error = %e, "store flush task failed"),
     }
 }

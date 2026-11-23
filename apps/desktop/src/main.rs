@@ -5,10 +5,12 @@ mod config;
 mod conversation;
 mod diff;
 mod editor;
+mod errors;
 mod file_tree;
 mod home;
 mod icons;
 mod keymap;
+mod logging;
 mod running;
 mod session_view;
 mod status_bar;
@@ -38,15 +40,12 @@ fn data_dir() -> PathBuf {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt()
-        .with_writer(std::io::stderr)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
-        )
-        .init();
-
     let dir = data_dir();
     std::fs::create_dir_all(&dir)?;
+    let logs = logging::log_dir(&dir);
+    logging::init(&logs);
+    logging::install_panic_hook(logs.clone());
+    logging::log_startup(&dir);
     let db = dir.join("workspace.db");
     tracing::info!(path = %db.display(), "opening store");
     let writer = StoreWriter::spawn(&db)?;
@@ -94,6 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 reader,
                 preflight,
                 config_path,
+                logs,
             )))
         }),
     )?;

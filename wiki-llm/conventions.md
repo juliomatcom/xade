@@ -18,6 +18,7 @@
 - No trait without two implementations (FakeProvider counts for AgentProvider).
 - Pin exact versions (`=x.y.z`) when adding a crate; never upgrade/swap one without asking. egui-family crates move together.
 - `tracing` for logs; never log prompt or message text above `debug`.
+- Never swallow an error: log it, or report it to the user (`App::report`); the UI never panics out of a frame.
 - UI colors only from `theme.rs` tokens.
 
 ## Docs

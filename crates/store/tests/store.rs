@@ -857,3 +857,23 @@ fn prune_removes_throwaway_imports_and_empty_workspaces_only() {
     f.writer.flush().unwrap();
     assert_eq!(rx.recv().unwrap(), xade_store::PruneCounts::default());
 }
+
+#[test]
+fn a_dead_writer_thread_is_reported_once() {
+    let f = Fixture::new();
+    assert!(f.writer.take_failure().is_none(), "healthy writer");
+    f.writer.send(WriteOp::Poison).unwrap();
+    let mut reason = None;
+    for _ in 0..200 {
+        reason = f.writer.take_failure();
+        if reason.is_some() {
+            break;
+        }
+        thread::sleep(std::time::Duration::from_millis(25));
+    }
+    let reason = reason.expect("writer death reported");
+    assert!(reason.contains("forced store writer failure"), "{reason}");
+    assert!(f.writer.take_failure().is_none(), "reported once");
+    assert!(f.writer.send(WriteOp::TouchWorkspace(f.ws)).is_err());
+    assert!(f.writer.flush().is_err());
+}

@@ -1,12 +1,12 @@
 //! `App`: all UI state, the event bridge, and the shared shell (top bar, status bar, sidebar).
 
 use std::collections::{HashMap, HashSet};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::RichText;
 use egui_commonmark::CommonMarkCache;
 use time::OffsetDateTime;
 use tokio::runtime::Handle;
@@ -22,6 +22,7 @@ use xade_store::{Page, SessionCard, StoreReader, WriteOp, WriterHandle};
 use crate::config::{self, Config};
 use crate::diff::{is_code_change, DiffData};
 use crate::editor::{self, CloseChoice, EditorId, Editors, SaveOutcome};
+use crate::errors::{self, ErrorQueue, ErrorReport, ModalAction};
 use crate::file_tree::{self, FileTree, Listing, TreeAction};
 use crate::home::HomeState;
 use crate::keymap::{self, Action, Chord};
@@ -29,11 +30,14 @@ use crate::running::{self, PendingOpen};
 use crate::widgets::keymaps_modal;
 use crate::widgets::session_picker::{self, PickerState};
 use crate::workspace::{Tiling, WindowKind};
-use crate::{home, icons, status_bar, theme, workspace};
+use crate::{home, logging, status_bar, theme, workspace};
 
 const GIT_REFRESH: Duration = Duration::from_secs(5);
 /// A running-set change re-imports at most this often.
 const RUNNING_IMPORT_GAP: Duration = Duration::from_secs(30);
+/// How long a warning stays in the status bar.
+const WARNING_TTL: Duration = Duration::from_secs(10);
+const LOG_TAIL_LINES: usize = 50;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -52,6 +56,8 @@ pub enum UiMsg {
     Preflight(Option<String>),
     /// Quota rows saved by earlier runs.
     SavedQuota(Vec<QuotaWindow>),
+    /// An error from a background task.
+    Report(ErrorReport),
     PickerCards {
         generation: u64,
         page: Page<SessionCard>,
@@ -170,7 +176,12 @@ pub struct App {
     pub cmd_tx: UnboundedSender<ManagerCmd>,
     pub rt: Handle,
     pub git: HashMap<PathBuf, GitState>,
-    pub error: Option<String>,
+    /// Errors waiting for the modal; see `report`.
+    pub errors: ErrorQueue,
+    /// A non-fatal notice for the status bar, with when it appeared.
+    warning: Option<(String, Instant)>,
+    /// Where the log files live; `None` in headless tests.
+    log_dir: Option<PathBuf>,
     pub providers: Vec<Arc<dyn AgentProvider>>,
     pub writer: WriterHandle,
     pub reader: StoreReader,
@@ -222,6 +233,7 @@ impl App {
         reader: StoreReader,
         preflight_error: Option<String>,
         config_path: PathBuf,
+        log_dir: PathBuf,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
         let (config, config_error) = config::load(&config_path);
@@ -251,7 +263,9 @@ impl App {
             cmd_tx,
             rt,
             git: HashMap::new(),
-            error: None,
+            errors: ErrorQueue::default(),
+            warning: None,
+            log_dir: Some(log_dir),
             providers,
             writer,
             reader,
@@ -282,7 +296,9 @@ impl App {
             git_dir: None,
             git_checked: Instant::now(),
         };
-        app.error = config_error;
+        if let Some(e) = config_error {
+            app.warn(e);
+        }
         app.apply_config(&cc.egui_ctx, config);
         app.refresh_workspaces();
         app.refresh_cards();
@@ -311,7 +327,9 @@ impl App {
             cmd_tx: tokio::sync::mpsc::unbounded_channel().0,
             rt,
             git: HashMap::new(),
-            error: None,
+            errors: ErrorQueue::default(),
+            warning: None,
+            log_dir: None,
             providers: Vec::new(),
             writer,
             reader,
@@ -347,6 +365,91 @@ impl App {
         }
     }
 
+    // ----- errors and warnings -----
+
+    /// Queues an error for the modal (and logs it).
+    pub fn report(&mut self, report: ErrorReport) {
+        tracing::error!(title = %report.title, message = %report.message, "error reported");
+        self.errors.push(report);
+    }
+
+    /// Logs a non-fatal problem and shows it in the status bar for `WARNING_TTL`. A warning
+    /// that repeats while still shown is not logged again.
+    pub fn warn(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        if self.warning_text() != Some(message.as_str()) {
+            tracing::warn!(%message, "warning shown");
+        }
+        self.warning = Some((message, Instant::now()));
+    }
+
+    /// The warning still on display.
+    pub fn warning_text(&self) -> Option<&str> {
+        self.warning
+            .as_ref()
+            .filter(|(_, at)| at.elapsed() < WARNING_TTL)
+            .map(|(m, _)| m.as_str())
+    }
+
+    /// Runs one frame step so that a panic never closes the app: it is logged by the panic hook,
+    /// recorded as an error report, and the rest of the step is skipped. Returns whether `f`
+    /// finished.
+    fn guarded(&mut self, what: &str, f: impl FnOnce(&mut Self)) -> bool {
+        match catch_unwind(AssertUnwindSafe(|| f(self))) {
+            Ok(()) => true,
+            Err(payload) => {
+                let msg = xade_core::panic_message(&*payload);
+                let report = ErrorReport::new(
+                    "Xade hit an internal error",
+                    format!("A bug stopped part of the {what}: {msg}\nXade is still running."),
+                )
+                .with_details(logging::take_panic_details().unwrap_or_default());
+                self.report(report);
+                false
+            }
+        }
+    }
+
+    /// `guarded` for a drawing step: a panic leaves the frame half drawn, so an empty central
+    /// panel finishes it. The error modal comes last either way.
+    fn guarded_ui(&mut self, ui: &mut egui::Ui, draw: impl FnOnce(&mut Self, &mut egui::Ui)) {
+        if !self.guarded("window", |app| draw(app, ui)) {
+            egui::CentralPanel::default().show(ui, |_| {});
+        }
+        self.error_modal(&ui.ctx().clone());
+    }
+
+    /// Shows the first queued error and carries out the button pressed.
+    fn error_modal(&mut self, ctx: &egui::Context) {
+        let Some((report, count)) = self.errors.current().map(|(r, n)| (r.clone(), n)) else {
+            return;
+        };
+        let action = catch_unwind(AssertUnwindSafe(|| errors::modal(ctx, &self.errors)))
+            .unwrap_or_else(|_| {
+                tracing::error!("the error modal panicked; dismissing the error");
+                ModalAction::Dismiss
+            });
+        let tail = || {
+            let dir = self.log_dir.as_deref();
+            dir.map(|d| logging::tail(d, LOG_TAIL_LINES))
+                .unwrap_or_default()
+        };
+        match action {
+            ModalAction::None => {}
+            ModalAction::Copy => ctx.copy_text(errors::report_text(&report, count, &tail())),
+            ModalAction::OpenIssue => {
+                let url = errors::issue_url(&report, count, &tail(), dirs::home_dir().as_deref());
+                ctx.open_url(egui::OpenUrl::new_tab(url));
+            }
+            ModalAction::OpenLogs => {
+                if let Some(dir) = &self.log_dir {
+                    logging::open_dir(dir);
+                }
+            }
+            ModalAction::Dismiss => self.errors.dismiss(),
+        }
+    }
+
     // ----- settings.json -----
 
     /// Applies `next`; fonts are rebuilt only when the family changed (or at startup with one).
@@ -356,8 +459,7 @@ impl App {
             let defs = match next.font_family.as_deref().map(config::font_definitions) {
                 Some(Ok(defs)) => Some(defs),
                 Some(Err(e)) => {
-                    tracing::warn!(error = %e, "font not applied");
-                    self.error = Some(format!("settings.json: {e}"));
+                    self.warn(format!("settings.json: {e}"));
                     None
                 }
                 None => Some(egui::FontDefinitions::default()),
@@ -380,14 +482,8 @@ impl App {
         }
         let (next, error) = config::load(watch.path());
         tracing::info!("settings.json reloaded");
-        if error.is_some() {
-            self.error = error;
-        } else if self
-            .error
-            .as_deref()
-            .is_some_and(|e| e.starts_with("settings.json:"))
-        {
-            self.error = None;
+        if let Some(e) = error {
+            self.warn(e);
         }
         self.apply_config(ctx, next);
     }
@@ -439,7 +535,7 @@ impl App {
         self.rt.spawn(async move {
             match reader.list_workspaces().await {
                 Ok(ws) => bridge.send(UiMsg::Workspaces(ws)),
-                Err(e) => tracing::error!(error = %e, "list workspaces failed"),
+                Err(e) => read_failed(&bridge, "workspaces", &e),
             }
         });
     }
@@ -467,7 +563,7 @@ impl App {
             };
             match res {
                 Ok(page) => bridge.send(UiMsg::Cards { generation, page }),
-                Err(e) => tracing::error!(error = %e, "session query failed"),
+                Err(e) => read_failed(&bridge, "sessions", &e),
             }
         });
     }
@@ -488,7 +584,7 @@ impl App {
             };
             match res {
                 Ok(page) => bridge.send(UiMsg::PickerCards { generation, page }),
-                Err(e) => tracing::error!(error = %e, "picker query failed"),
+                Err(e) => read_failed(&bridge, "sessions", &e),
             }
         });
     }
@@ -498,7 +594,7 @@ impl App {
         self.rt.spawn(async move {
             match reader.load_quota().await {
                 Ok(q) => bridge.send(UiMsg::SavedQuota(q)),
-                Err(e) => tracing::error!(error = %e, "load quota failed"),
+                Err(e) => read_failed(&bridge, "usage limits", &e),
             }
         });
     }
@@ -663,16 +759,21 @@ impl App {
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_else(|| root_path.display().to_string());
-            let _ = writer.send(WriteOp::UpsertWorkspace(Workspace {
+            let added = writer.send(WriteOp::UpsertWorkspace(Workspace {
                 id: WorkspaceId::new(),
                 root_path,
                 display_name,
                 last_opened_at: OffsetDateTime::now_utc(),
                 is_pinned: false,
             }));
+            if let Err(e) = added {
+                let report = ErrorReport::new("Could not add the folder", e.to_string());
+                return bridge.send(UiMsg::Report(report));
+            }
             xade_runtime::flush(&writer).await;
-            if let Ok(ws) = reader.list_workspaces().await {
-                bridge.send(UiMsg::Workspaces(ws));
+            match reader.list_workspaces().await {
+                Ok(ws) => bridge.send(UiMsg::Workspaces(ws)),
+                Err(e) => read_failed(&bridge, "workspaces", &e),
             }
         });
     }
@@ -841,7 +942,7 @@ impl App {
 
     fn on_file_opened(&mut self, path: PathBuf, text: Result<String, String>) {
         match text {
-            Err(e) => self.error = Some(e),
+            Err(e) => self.report(ErrorReport::new("Could not open the file", e)),
             Ok(text) => {
                 let id = match self.editors.find_path(&path) {
                     Some(id) => id,
@@ -926,7 +1027,7 @@ impl App {
                 }
             }
             SaveOutcome::Cancelled => {}
-            SaveOutcome::Failed(e) => self.error = Some(format!("Save failed: {e}")),
+            SaveOutcome::Failed(e) => self.report(ErrorReport::new("Could not save the file", e)),
         }
     }
 
@@ -988,10 +1089,14 @@ impl App {
             return;
         }
         self.editors.checked = Some(Instant::now());
-        for vm in self.editors.map.values_mut() {
-            if let Err(e) = vm.check_disk() {
-                self.error = Some(e);
-            }
+        let failures: Vec<String> = self
+            .editors
+            .map
+            .values_mut()
+            .filter_map(|vm| vm.check_disk().err())
+            .collect();
+        for e in failures {
+            self.warn(e);
         }
     }
 
@@ -1049,7 +1154,7 @@ impl App {
         match action {
             Action::NewSession => {
                 if self.home.scope.is_none() {
-                    self.error = Some("Select a workspace in the sidebar first.".into());
+                    self.warn("Select a workspace in the sidebar first.");
                 } else {
                     self.new_session();
                 }
@@ -1135,6 +1240,12 @@ impl App {
                 }
             }
             Action::Shortcuts => self.keymaps_open = !self.keymaps_open,
+            #[cfg(debug_assertions)]
+            Action::DebugPanic => panic!("forced panic (debug key)"),
+            #[cfg(debug_assertions)]
+            Action::DebugKillWriter => {
+                let _ = self.writer.send(WriteOp::Poison);
+            }
             Action::OpenSettings => self.open_settings(),
             // Handled by the composer and the modals themselves.
             Action::Send | Action::CloseModal => {}
@@ -1208,6 +1319,7 @@ impl App {
                     self.start_import();
                 }
             }
+            UiMsg::Report(report) => self.report(report),
             UiMsg::SavedQuota(saved) => {
                 // A live report may have arrived first; it wins.
                 for q in saved {
@@ -1282,7 +1394,9 @@ impl App {
                     self.refresh_git(dir);
                 }
             }
-            (_, AppEventKind::Error(msg)) => self.error = Some(msg),
+            (_, AppEventKind::Error(msg)) => {
+                self.report(ErrorReport::new("Something went wrong", msg))
+            }
             (Some(_), AppEventKind::SessionCreated(s)) => {
                 self.insert_vm(s, Vec::new());
                 self.refresh_workspaces();
@@ -1397,6 +1511,12 @@ impl App {
     }
 }
 
+/// A store read that failed in a background task: the user sees it, with the cause.
+fn read_failed(bridge: &Bridge, what: &str, e: &xade_store::StoreError) {
+    let report = ErrorReport::new(format!("Could not read {what}"), e.to_string());
+    bridge.send(UiMsg::Report(report));
+}
+
 /// A session whose child is alive (or starting); an errored one has none.
 fn live_status(status: &SessionStatus) -> bool {
     !matches!(status, SessionStatus::Error(_))
@@ -1428,6 +1548,47 @@ pub fn push_user_message(vm: &mut SessionVm, text: String) {
 impl eframe::App for App {
     /// Drains the bridge and runs timers; no painting here.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.guarded("frame update", |app| app.update(ctx));
+    }
+
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.guarded_ui(ui, Self::draw);
+    }
+
+    /// eframe calls this on the window close button and on Cmd+Q (via `exiting`),
+    /// possibly twice; a repeat `ShutdownAll` returns at once.
+    fn on_exit(&mut self) {
+        let dirty = self.editors.map.values().filter(|vm| vm.dirty).count();
+        if dirty > 0 {
+            tracing::warn!(dirty, "exiting with unsaved editors");
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        if self.cmd_tx.send(ManagerCmd::ShutdownAll(tx)).is_ok() {
+            let waited = self
+                .rt
+                .block_on(tokio::time::timeout(Duration::from_secs(5), rx));
+            if waited.is_err() {
+                tracing::warn!("sessions did not shut down within 5 s");
+            }
+        }
+    }
+}
+
+impl App {
+    /// Drains the bridge and runs timers; no painting here.
+    fn update(&mut self, ctx: &egui::Context) {
+        if let Some(reason) = self.writer.take_failure() {
+            self.report(ErrorReport::new(
+                "Saving is disabled",
+                format!(
+                    "{reason}. New messages and sessions are no longer saved; restart Xade to \
+                     recover."
+                ),
+            ));
+        }
+        if let Some((_, at)) = &self.warning {
+            ctx.request_repaint_after(WARNING_TTL.saturating_sub(at.elapsed()));
+        }
         while let Ok(msg) = self.events_rx.try_recv() {
             self.on_msg(msg);
         }
@@ -1459,7 +1620,8 @@ impl eframe::App for App {
         }
     }
 
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    /// Draws the whole window except the error modal.
+    fn draw(&mut self, ui: &mut egui::Ui) {
         home::top_bar(self, ui);
         if status_bar::show(self, ui) {
             self.open_settings();
@@ -1470,44 +1632,18 @@ impl eframe::App for App {
         let frame = egui::Frame::new()
             .fill(theme::BG_PANEL)
             .inner_margin(egui::Margin::same(16));
-        egui::CentralPanel::default().frame(frame).show(ui, |ui| {
-            if let Some(err) = self.error.clone() {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(&err).color(theme::DANGER));
-                    if ui
-                        .small_button(icons::with(icons::CLOSE, "Dismiss"))
-                        .clicked()
-                    {
-                        self.error = None;
-                    }
-                });
-            }
-            match self.view {
+        egui::CentralPanel::default()
+            .frame(frame)
+            .show(ui, |ui| match self.view {
                 View::Home => home::grid(self, ui),
                 View::Workspace => workspace::show(self, ui),
-            }
-        });
+            });
         let ctx = ui.ctx().clone();
         session_picker::show(self, &ctx);
         running::confirm_modal(self, &ctx);
         self.editor_modal(&ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {
             self.keymaps_open = false;
-        }
-    }
-
-    /// eframe calls this on the window close button and on Cmd+Q (via `exiting`),
-    /// possibly twice; a repeat `ShutdownAll` returns at once.
-    fn on_exit(&mut self) {
-        let dirty = self.editors.map.values().filter(|vm| vm.dirty).count();
-        if dirty > 0 {
-            tracing::warn!(dirty, "exiting with unsaved editors");
-        }
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        if self.cmd_tx.send(ManagerCmd::ShutdownAll(tx)).is_ok() {
-            let _ = self
-                .rt
-                .block_on(tokio::time::timeout(Duration::from_secs(5), rx));
         }
     }
 }
@@ -1653,7 +1789,7 @@ mod tests {
         pump(&mut app);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
         assert!(!app.editors.map[&id].dirty && !app.editors.map[&id].busy);
-        assert!(app.error.is_none());
+        assert!(app.errors.current().is_none());
         let names: Vec<_> = std::fs::read_dir(&dir)
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
@@ -1732,6 +1868,121 @@ mod tests {
                 .drop_without_applying_deltas();
         }
         assert_eq!(app.editors.pending_close, Some(id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_panic_in_a_step_is_reported_and_does_not_propagate() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, dir) = test_app(&rt);
+        assert!(app.guarded("test step", |_| {}));
+        assert!(app.errors.current().is_none());
+        let finished = app.guarded("test step", |_| panic!("boom in a handler"));
+        assert!(!finished);
+        let (report, count) = app.errors.current().unwrap();
+        assert_eq!(count, 1);
+        assert!(
+            report.message.contains("boom in a handler") && report.message.contains("test step")
+        );
+        // The same panic again collapses into one entry.
+        app.guarded("test step", |_| panic!("boom in a handler"));
+        assert_eq!(app.errors.current().unwrap().1, 2);
+        assert_eq!(app.errors.pending(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A panic while drawing still ends the frame: the empty panel and the error modal are
+    /// drawn, and the next frame draws normally.
+    #[test]
+    fn a_panic_while_drawing_finishes_the_frame_with_the_modal() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+        let frame = |app: &mut App, panics: bool| {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                app.guarded_ui(ui, |app, ui| {
+                    if panics {
+                        panic!("draw failed");
+                    }
+                    app.draw(ui);
+                });
+            });
+            out.textures_delta.clear();
+            out.shapes
+        };
+        let has_text = |shapes: &[egui::epaint::ClippedShape], needle: &str| {
+            fn walk(s: &egui::Shape, needle: &str) -> bool {
+                match s {
+                    egui::Shape::Text(t) => t.galley.text().contains(needle),
+                    egui::Shape::Vec(l) => l.iter().any(|s| walk(s, needle)),
+                    _ => false,
+                }
+            }
+            shapes.iter().any(|c| walk(&c.shape, needle))
+        };
+        frame(&mut app, true);
+        let shapes = frame(&mut app, false);
+        assert!(
+            has_text(&shapes, "Xade hit an internal error"),
+            "modal shown"
+        );
+        assert!(has_text(&shapes, "Dismiss"));
+        assert_eq!(app.errors.current().map(|(_, n)| n), Some(1));
+        app.errors.dismiss();
+        let shapes = frame(&mut app, false);
+        assert!(!has_text(&shapes, "Dismiss"), "modal gone once dismissed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dead_writer_shows_saving_is_disabled_once() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let ctx = egui::Context::default();
+        app.update(&ctx);
+        assert!(app.errors.current().is_none());
+        app.writer.send(WriteOp::Poison).unwrap();
+        for _ in 0..200 {
+            app.update(&ctx);
+            if app.errors.current().is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        let (report, _) = app.errors.current().expect("writer death reported");
+        assert_eq!(report.title, "Saving is disabled");
+        app.update(&ctx);
+        assert_eq!(app.errors.current().unwrap().1, 1, "reported only once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn warnings_expire_and_repeats_are_not_stacked() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, dir) = test_app(&rt);
+        assert!(app.warning_text().is_none());
+        app.warn("settings.json: bad");
+        assert_eq!(app.warning_text(), Some("settings.json: bad"));
+        assert!(app.errors.current().is_none(), "warnings get no modal");
+        app.warning = app
+            .warning
+            .take()
+            .map(|(m, at)| (m, at - WARNING_TTL - Duration::from_secs(1)));
+        assert!(app.warning_text().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

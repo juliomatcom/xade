@@ -49,12 +49,24 @@ pub struct Scan {
 /// Parses every `<dir>/<sessionId>.jsonl` directly under the project directories of `root`.
 pub fn scan_projects(root: &Path) -> Scan {
     let mut scan = Scan::default();
-    let Ok(dirs) = std::fs::read_dir(root) else {
-        return scan;
+    let dirs = match std::fs::read_dir(root) {
+        Ok(d) => d,
+        // No history yet is normal.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return scan,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot read the Claude projects directory");
+            scan.stats.read_errors += 1;
+            return scan;
+        }
     };
     for dir in dirs.flatten().filter(|d| d.path().is_dir()) {
-        let Ok(files) = std::fs::read_dir(dir.path()) else {
-            continue;
+        let files = match std::fs::read_dir(dir.path()) {
+            Ok(f) => f,
+            Err(e) => {
+                tracing::debug!(error = %e, "project directory unreadable");
+                scan.stats.read_errors += 1;
+                continue;
+            }
         };
         for path in files.flatten().map(|f| f.path()) {
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") || !path.is_file() {

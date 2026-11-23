@@ -41,6 +41,9 @@ fn left(app: &App, ui: &mut egui::Ui) {
         let first = keymap::stroke_label(&first, cfg!(target_os = "macos"));
         ui.label(muted(format!("{first} \u{2026}")));
     }
+    if let Some(warning) = app.warning_text() {
+        ui.label(muted(warning.to_string()));
+    }
     let Some(dir) = app.active_dir() else {
         ui.label(muted("No directory".into()));
         return;

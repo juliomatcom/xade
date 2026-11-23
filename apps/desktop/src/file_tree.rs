@@ -96,8 +96,9 @@ pub fn read_listing(dir: &Path) -> Result<Listing, String> {
         let s = e.to_string();
         s.split(" (os error").next().unwrap_or(&s).to_string()
     })?;
-    let entries = rd
-        .filter_map(|e| e.ok())
+    let mut unreadable = 0;
+    let entries: Vec<Entry> = rd
+        .filter_map(|e| e.map_err(|_| unreadable += 1).ok())
         .map(|e| {
             // `DirEntry::file_type` does not follow symlinks.
             let kind = match e.file_type() {
@@ -112,6 +113,9 @@ pub fn read_listing(dir: &Path) -> Result<Listing, String> {
             }
         })
         .collect();
+    if unreadable > 0 {
+        tracing::warn!(dir = %dir.display(), unreadable, "skipped unreadable directory entries");
+    }
     Ok(sort_and_cap(entries, MAX_ENTRIES))
 }
 

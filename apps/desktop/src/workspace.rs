@@ -1,5 +1,6 @@
 //! Workspace view: one `egui::Window` per open session or editor, auto-tiled into a grid.
 
+use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -289,14 +290,33 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         };
         let win = window(win_id(*kind), collapsed, area, applying, default_pos);
         let mut out = session_view::ViewOut::default();
-        let resp = win.show(&ctx, |ui| match &mut taken {
-            Taken::Session(vm) => out = session_view::show(ui, vm, &env),
-            Taken::Editor(vm) => {
-                let o = editor::show(ui, vm, editor_maximized);
-                out = o.view;
-                errors.extend(o.error);
+        let shown = catch_unwind(AssertUnwindSafe(|| {
+            win.show(&ctx, |ui| match &mut taken {
+                Taken::Session(vm) => out = session_view::show(ui, vm, &env),
+                Taken::Editor(vm) => {
+                    let o = editor::show(ui, vm, editor_maximized);
+                    out = o.view;
+                    errors.extend(o.error);
+                }
+            })
+        }));
+        let resp = match shown {
+            Ok(resp) => resp,
+            Err(payload) => {
+                // The window's state was taken out of `app`; put it back before the frame guard
+                // reports the panic, or the session would vanish from the UI.
+                match (taken, *kind) {
+                    (Taken::Session(vm), WindowKind::Session(id)) => {
+                        app.sessions.insert(id, *vm);
+                    }
+                    (Taken::Editor(vm), WindowKind::Editor(id)) => {
+                        app.editors.map.insert(id, *vm);
+                    }
+                    _ => {}
+                }
+                resume_unwind(payload)
             }
-        });
+        };
         let mut collapsed = collapsed;
         let mut window_rect = *taken.geom().1;
         if let Some(resp) = &resp {
@@ -359,7 +379,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
     if let Some(e) = errors.pop() {
-        app.error = Some(e);
+        app.report(crate::errors::ErrorReport::new(
+            "Could not reload the file",
+            e,
+        ));
     }
 
     if let Some(kind) = toggle_max {

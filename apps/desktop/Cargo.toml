@@ -20,9 +20,10 @@ eframe = "=0.37.0"
 rfd = "=0.18.0"
 serde_json = "=1.0.154"
 similar = "=3.2.1"
-time = "=0.3.55"
+time = { version = "=0.3.55", features = ["formatting"] }
 tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "macros", "process", "time", "sync"] }
 tracing = "=0.1.44"
+tracing-appender = "=0.2.5"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 uuid = { version = "=1.29.3", features = ["v4"] }
 

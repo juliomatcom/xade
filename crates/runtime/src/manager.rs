@@ -10,8 +10,8 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
 use xade_core::{
-    AgentProvider, Effort, ImportedSession, Message, ProviderId, Session, SessionId, SessionOrigin,
-    SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
+    panic_message, AgentProvider, Effort, ImportedSession, Message, ProviderId, Session, SessionId,
+    SessionOrigin, SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
 };
 use xade_store::{throwaway, StoreReader, WriteOp, WriterHandle};
 
@@ -39,6 +39,7 @@ impl SessionManager {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (events, event_rx) = mpsc::unbounded_channel();
         let (import_tx, import_rx) = mpsc::unbounded_channel();
+        let supervisor_events = events.clone();
         let manager = SessionManager {
             providers,
             writer,
@@ -48,7 +49,13 @@ impl SessionManager {
             tasks: Vec::new(),
             import_tx,
         };
-        tokio::spawn(manager.run(cmd_rx, import_rx));
+        let task = tokio::spawn(manager.run(cmd_rx, import_rx));
+        tokio::spawn(supervise(
+            task,
+            "The session manager",
+            None,
+            supervisor_events,
+        ));
         (cmd_tx, event_rx)
     }
 
@@ -137,7 +144,9 @@ impl SessionManager {
                         let _ = tx.send(ActorCmd::Close);
                     }
                     for t in self.tasks.drain(..) {
-                        let _ = timeout(Duration::from_secs(10), t).await;
+                        if timeout(Duration::from_secs(10), t).await.is_err() {
+                            tracing::warn!("a session did not finish before shutdown");
+                        }
                     }
                     let _ = done.send(());
                 }
@@ -168,20 +177,34 @@ impl SessionManager {
         let (tx, rx) = mpsc::unbounded_channel();
         self.live.insert(id, tx);
         self.tasks.retain(|t| !t.is_finished());
-        self.tasks.push(tokio::spawn(actor.run(rx)));
+        let task = tokio::spawn(actor.run(rx));
+        self.tasks.push(tokio::spawn(supervise(
+            task,
+            "A session",
+            Some(id),
+            self.events.clone(),
+        )));
     }
 
     /// Parses histories off the manager task; `apply_import` runs when they arrive.
     fn start_import(&self) {
         let providers = self.providers.clone();
         let tx = self.import_tx.clone();
+        let events = self.events.clone();
         tokio::spawn(async move {
             let mut batches = Vec::new();
             for p in providers {
                 let id = p.id();
                 match tokio::task::spawn_blocking(move || p.import_sessions()).await {
                     Ok(sessions) => batches.push((id, sessions)),
-                    Err(e) => tracing::error!(error = %e, "import task failed"),
+                    Err(e) => {
+                        tracing::error!(error = %e, "import task failed");
+                        let kind = AppEventKind::Error(format!("Importing history failed: {e}"));
+                        let _ = events.send(AppEvent {
+                            session_id: None,
+                            kind,
+                        });
+                    }
                 }
             }
             let _ = tx.send(batches);
@@ -297,7 +320,16 @@ impl SessionManager {
                 .map(|w| w.root_path),
             Err(e) => return self.emit(Some(id), AppEventKind::Error(e.to_string())),
         };
-        let next_seq = self.reader.max_seq(id).await.unwrap_or(0) + 1;
+        // A wrong guess here would reuse sequence numbers of stored messages.
+        let next_seq = match self.reader.max_seq(id).await {
+            Ok(seq) => seq + 1,
+            Err(e) => {
+                return self.emit(
+                    Some(id),
+                    AppEventKind::Error(format!("Could not open the session: {e}")),
+                )
+            }
+        };
         let _ = self
             .writer
             .send(WriteOp::TouchWorkspace(session.workspace_id));
@@ -339,6 +371,34 @@ impl SessionManager {
             Err(msg) => self.emit(Some(id), AppEventKind::Status(SessionStatus::Error(msg))),
         }
     }
+}
+
+/// Awaits a manager or session task and makes a panic visible: an error event, and for a
+/// session its `Error` status. A cancelled task (runtime shutdown) is not an error.
+async fn supervise(
+    task: JoinHandle<()>,
+    what: &'static str,
+    session_id: Option<SessionId>,
+    events: UnboundedSender<AppEvent>,
+) {
+    let Err(e) = task.await else { return };
+    if !e.is_panic() {
+        return;
+    }
+    let msg = panic_message(&*e.into_panic());
+    tracing::error!(what, %msg, "task panicked");
+    if session_id.is_some() {
+        let status = SessionStatus::Error(format!("session crashed: {msg}"));
+        let _ = events.send(AppEvent {
+            session_id,
+            kind: AppEventKind::Status(status),
+        });
+    }
+    let kind = AppEventKind::Error(format!("{what} crashed: {msg}"));
+    let _ = events.send(AppEvent {
+        session_id: None,
+        kind,
+    });
 }
 
 /// Rows for `WriteOp::ImportSession`; the writer resolves the real workspace id from the path.
@@ -386,4 +446,29 @@ fn imported_rows(
         updated_at: imp.updated_at,
     };
     (session, messages, imp.cwd)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_panicking_task_becomes_error_events() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let id = SessionId::new();
+        let task = tokio::spawn(async { panic!("boom") });
+        supervise(task, "A session", Some(id), tx.clone()).await;
+        let first = rx.recv().await.expect("status event");
+        assert_eq!(first.session_id, Some(id));
+        assert!(
+            matches!(first.kind, AppEventKind::Status(SessionStatus::Error(m)) if m.contains("boom"))
+        );
+        let second = rx.recv().await.expect("error event");
+        assert!(
+            matches!(second.kind, AppEventKind::Error(m) if m.contains("A session crashed: boom"))
+        );
+        // A task that ends normally says nothing.
+        supervise(tokio::spawn(async {}), "A session", Some(id), tx).await;
+        assert!(rx.try_recv().is_err());
+    }
 }

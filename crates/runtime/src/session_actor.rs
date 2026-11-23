@@ -285,7 +285,10 @@ impl Actor {
                 self.set_status(SessionStatus::Idle);
                 return self.apply_pending().await;
             }
-            ProviderEvent::Error(msg) => self.last_error = Some(msg.clone()),
+            ProviderEvent::Error(msg) => {
+                tracing::warn!(session = %self.session.id.0, %msg, "provider error");
+                self.last_error = Some(msg.clone());
+            }
             ProviderEvent::Exited { code } => {
                 let msg = self
                     .last_error

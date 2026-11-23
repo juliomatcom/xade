@@ -188,7 +188,9 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
         if let Ok(meta) = std::fs::metadata(path) {
-            let _ = std::fs::set_permissions(&tmp, meta.permissions());
+            if let Err(e) = std::fs::set_permissions(&tmp, meta.permissions()) {
+                tracing::warn!(error = %e, "could not keep the file's permissions");
+            }
         }
         std::fs::rename(&tmp, path)
     };

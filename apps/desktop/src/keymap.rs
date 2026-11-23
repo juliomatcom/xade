@@ -30,6 +30,12 @@ pub enum Action {
     Shortcuts,
     OpenSettings,
     CloseModal,
+    /// Debug builds only: panics in the UI handler, to try the crash safety net.
+    #[cfg(debug_assertions)]
+    DebugPanic,
+    /// Debug builds only: kills the store writer thread.
+    #[cfg(debug_assertions)]
+    DebugKillWriter,
 }
 
 impl Action {
@@ -83,6 +89,9 @@ pub struct Binding {
 const CMD: Modifiers = Modifiers::COMMAND;
 const CMD_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
 
+#[cfg(debug_assertions)]
+const CMD_SHIFT_ALT: Modifiers = CMD_SHIFT.plus(Modifiers::ALT);
+
 const fn k(mods: Modifiers, key: Key) -> Stroke {
     Stroke { mods, key }
 }
@@ -99,6 +108,18 @@ const fn row(
         title,
         keys,
         show: Show::Row,
+    }
+}
+
+/// A binding the keymaps modal never lists.
+#[cfg(debug_assertions)]
+const fn hidden(action: Action, keys: &'static [Stroke]) -> Binding {
+    Binding {
+        action,
+        group: Group::General,
+        title: "Debug",
+        keys,
+        show: Show::Hidden,
     }
 }
 
@@ -235,6 +256,10 @@ pub static BINDINGS: &[Binding] = &[
         "Close a modal",
         &[k(Modifiers::NONE, Key::Escape)],
     ),
+    #[cfg(debug_assertions)]
+    hidden(Action::DebugPanic, &[k(CMD_SHIFT_ALT, Key::P)]),
+    #[cfg(debug_assertions)]
+    hidden(Action::DebugKillWriter, &[k(CMD_SHIFT_ALT, Key::W)]),
 ];
 
 fn hits(s: &Stroke, mods: Modifiers, key: Key) -> bool {
