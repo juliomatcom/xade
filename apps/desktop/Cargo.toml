@@ -5,6 +5,19 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+aw-claude = { path = "../../crates/claude" }
+aw-core = { path = "../../crates/core" }
+aw-runtime = { path = "../../crates/runtime" }
+aw-store = { path = "../../crates/store" }
+dirs = "=7.0.0"
+egui = "=0.37.0"
+eframe = "=0.37.0"
+rfd = "=0.18.0"
+time = "=0.3.55"
+tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "macros", "process", "time", "sync"] }
+tracing = "=0.1.44"
+tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
+uuid = { version = "=1.29.3", features = ["v4"] }
 
 [lints]
 workspace = true

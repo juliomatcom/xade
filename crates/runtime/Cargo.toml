@@ -5,6 +5,17 @@ edition.workspace = true
 publish = false
 
 [dependencies]
+aw-core = { path = "../core" }
+aw-store = { path = "../store" }
+time = "=0.3.55"
+tokio = { version = "=1.54.1", default-features = false, features = ["rt", "process", "time", "sync", "macros"] }
+tracing = "=0.1.44"
+uuid = { version = "=1.29.3", features = ["v4"] }
+
+[dev-dependencies]
+aw-claude = { path = "../claude" }
+tempfile = "=3.27.0"
+tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync"] }
 
 [lints]
 workspace = true

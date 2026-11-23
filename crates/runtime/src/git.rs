@@ -1,0 +1,189 @@
+//! Git status of a directory via the user's `git`; read-only, no library.
+
+use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
+
+use tokio::process::Command;
+use tokio::time::timeout;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GitState {
+    Repo {
+        branch: Option<String>,
+        /// Short sha when HEAD is detached.
+        detached_sha: Option<String>,
+        has_upstream: bool,
+        ahead: u32,
+        behind: u32,
+        staged: u32,
+        modified: u32,
+        untracked: u32,
+    },
+    NotARepo,
+    GitMissing,
+}
+
+/// Runs `git status --porcelain=v2 --branch`; never takes the index lock.
+pub async fn git_status(dir: &Path) -> GitState {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C")
+        .arg(dir)
+        .args(["status", "--porcelain=v2", "--branch"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    match timeout(Duration::from_secs(2), cmd.output()).await {
+        Ok(Ok(out)) if out.status.success() => {
+            parse_porcelain_v2(&String::from_utf8_lossy(&out.stdout))
+        }
+        Ok(Ok(_)) => GitState::NotARepo,
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::NotFound => GitState::GitMissing,
+        Ok(Err(e)) => {
+            tracing::warn!(error = %e, "git status failed");
+            GitState::GitMissing
+        }
+        Err(_) => {
+            tracing::warn!("git status timed out");
+            GitState::NotARepo
+        }
+    }
+}
+
+pub fn parse_porcelain_v2(out: &str) -> GitState {
+    let mut oid = None;
+    let mut head = None;
+    let (mut has_upstream, mut ahead, mut behind) = (false, 0, 0);
+    let (mut staged, mut modified, mut untracked) = (0, 0, 0);
+    for line in out.lines() {
+        if let Some(h) = line.strip_prefix("# branch.oid ") {
+            oid = Some(h.to_string());
+        } else if let Some(h) = line.strip_prefix("# branch.head ") {
+            head = Some(h.to_string());
+        } else if line.starts_with("# branch.upstream ") {
+            has_upstream = true;
+        } else if let Some(ab) = line.strip_prefix("# branch.ab ") {
+            let mut it = ab.split_whitespace();
+            ahead = count(it.next(), '+');
+            behind = count(it.next(), '-');
+        } else if line.starts_with("1 ") || line.starts_with("2 ") {
+            let mut xy = line[2..].chars();
+            staged += u32::from(xy.next().is_some_and(|c| c != '.'));
+            modified += u32::from(xy.next().is_some_and(|c| c != '.'));
+        } else if line.starts_with("u ") {
+            modified += 1;
+        } else if line.starts_with("? ") {
+            untracked += 1;
+        }
+    }
+    let detached = head.as_deref() == Some("(detached)");
+    GitState::Repo {
+        branch: head.filter(|_| !detached),
+        detached_sha: oid
+            .filter(|_| detached)
+            .map(|s| s.chars().take(7).collect()),
+        has_upstream,
+        ahead,
+        behind,
+        staged,
+        modified,
+        untracked,
+    }
+}
+
+fn count(s: Option<&str>, sign: char) -> u32 {
+    s.and_then(|s| s.strip_prefix(sign))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OID: &str = "# branch.oid 0123456789abcdef0123456789abcdef01234567\n";
+
+    fn repo(
+        branch: Option<&str>,
+        sha: Option<&str>,
+        up: bool,
+        ab: (u32, u32),
+        counts: (u32, u32, u32),
+    ) -> GitState {
+        GitState::Repo {
+            branch: branch.map(String::from),
+            detached_sha: sha.map(String::from),
+            has_upstream: up,
+            ahead: ab.0,
+            behind: ab.1,
+            staged: counts.0,
+            modified: counts.1,
+            untracked: counts.2,
+        }
+    }
+
+    #[test]
+    fn clean_with_upstream() {
+        let out =
+            format!("{OID}# branch.head main\n# branch.upstream origin/main\n# branch.ab +0 -0\n");
+        assert_eq!(
+            parse_porcelain_v2(&out),
+            repo(Some("main"), None, true, (0, 0), (0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn dirty_counts() {
+        let out = format!(
+            "{OID}# branch.head main\n\
+             1 M. N... 100644 100644 100644 aaa bbb staged.rs\n\
+             1 .M N... 100644 100644 100644 aaa bbb modified.rs\n\
+             1 MM N... 100644 100644 100644 aaa bbb both.rs\n\
+             2 R. N... 100644 100644 100644 aaa bbb R100 new.rs\told.rs\n\
+             u UU N... 100644 100644 100644 100644 aaa bbb ccc conflict.rs\n\
+             ? new.txt\n? other.txt\n! ignored.log\n"
+        );
+        assert_eq!(
+            parse_porcelain_v2(&out),
+            repo(Some("main"), None, false, (0, 0), (3, 3, 2))
+        );
+    }
+
+    #[test]
+    fn detached_head() {
+        let out = format!("{OID}# branch.head (detached)\n");
+        assert_eq!(
+            parse_porcelain_v2(&out),
+            repo(None, Some("0123456"), false, (0, 0), (0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn no_upstream() {
+        let out = format!("{OID}# branch.head feature\n? a\n");
+        assert_eq!(
+            parse_porcelain_v2(&out),
+            repo(Some("feature"), None, false, (0, 0), (0, 0, 1))
+        );
+    }
+
+    #[test]
+    fn ahead_and_behind() {
+        let out =
+            format!("{OID}# branch.head dev\n# branch.upstream origin/dev\n# branch.ab +3 -12\n");
+        assert_eq!(
+            parse_porcelain_v2(&out),
+            repo(Some("dev"), None, true, (3, 12), (0, 0, 0))
+        );
+    }
+
+    #[test]
+    fn initial_commit() {
+        let out = "# branch.oid (initial)\n# branch.head main\n";
+        assert_eq!(
+            parse_porcelain_v2(out),
+            repo(Some("main"), None, false, (0, 0), (0, 0, 0))
+        );
+    }
+}
