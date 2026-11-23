@@ -62,7 +62,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_title("Xade")
         .with_inner_size([1280.0, 800.0])
         .with_min_inner_size([800.0, 500.0]);
-    match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/xade-icon.png")) {
+    match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/xade-icon-app.png")) {
         Ok(icon) => viewport = viewport.with_icon(icon),
         Err(e) => tracing::warn!("app icon not loaded: {e}"),
     }
