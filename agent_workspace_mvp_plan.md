@@ -712,6 +712,7 @@ The other pages start as one purpose line each. They get filled by the phase tha
 6. Snapping/tiling (`egui_tiles`) and a bottom minimize dock.
 7. Page-number pagination and a page-size selector.
 8. Persisted quota history.
+9. MCP button and modal: list each provider's MCP servers and their status. Source for Claude: `mcp_servers` (name, status) in `system/init` and the `initialize` response; cache it per provider at preflight and refresh it on each session `Started`. The recorder scrubs these lists from fixtures, so tests use a synthetic snippet.
 
 ## 13. Risks
 
