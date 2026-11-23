@@ -38,16 +38,23 @@ pub fn apply(ctx: &egui::Context) {
     ctx.set_theme(Theme::Dark);
     ctx.set_visuals_of(Theme::Dark, visuals());
     ctx.style_mut_of(Theme::Dark, |s| {
-        s.text_styles
-            .insert(TextStyle::Body, FontId::proportional(13.5));
-        s.text_styles
-            .insert(TextStyle::Button, FontId::proportional(13.5));
-        s.text_styles
-            .insert(TextStyle::Small, FontId::proportional(11.5));
-        s.text_styles
-            .insert(TextStyle::Monospace, FontId::monospace(12.5));
         s.spacing.item_spacing = egui::vec2(8.0, 6.0);
         s.spacing.button_padding = egui::vec2(10.0, 4.0);
+    });
+    set_font_size(ctx, crate::config::DEFAULT_FONT_SIZE);
+}
+
+/// Text styles from the body size: small is 2 pt below it, code 1 pt below.
+pub fn set_font_size(ctx: &egui::Context, body: f32) {
+    ctx.style_mut_of(Theme::Dark, |s| {
+        s.text_styles
+            .insert(TextStyle::Body, FontId::proportional(body));
+        s.text_styles
+            .insert(TextStyle::Button, FontId::proportional(body));
+        s.text_styles
+            .insert(TextStyle::Small, FontId::proportional(body - 2.0));
+        s.text_styles
+            .insert(TextStyle::Monospace, FontId::monospace(body - 1.0));
     });
 }
 

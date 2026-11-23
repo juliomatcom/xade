@@ -1,4 +1,4 @@
-//! Workspace view: one `egui::Window` per open session, auto-tiled into equal columns.
+//! Workspace view: one `egui::Window` per open session, auto-tiled into a grid.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -16,6 +16,8 @@ use crate::widgets::diff_modal::{self, ModalAction};
 const GAP: f32 = 8.0;
 const DEFAULT_SIZE: [f32; 2] = [520.0, 640.0];
 const CASCADE: f32 = 28.0;
+/// Smallest tile `tile_rects` makes while the area allows it.
+const MIN_TILE: [f32; 2] = [380.0, 300.0];
 /// How far a window may drift from its tile before auto-tiling turns off.
 const MOVE_TOLERANCE: f32 = 3.0;
 
@@ -53,7 +55,7 @@ impl Tiling {
 }
 
 /// `n` equal-width, full-height columns inside `area`.
-pub fn tile_rects(area: Rect, n: usize) -> Vec<Rect> {
+fn columns(area: Rect, n: usize) -> Vec<Rect> {
     if n == 0 {
         return Vec::new();
     }
@@ -62,6 +64,63 @@ pub fn tile_rects(area: Rect, n: usize) -> Vec<Rect> {
         .map(|i| {
             let x = area.left() + i as f32 * (w + GAP);
             Rect::from_min_size(egui::pos2(x, area.top()), egui::vec2(w, area.height()))
+        })
+        .collect()
+}
+
+/// Preferred column count for `n` windows: 1x1, 2x1, 3x1, 2x2, 3x2, 3x3, then a square-ish grid.
+fn base_cols(n: usize) -> usize {
+    match n {
+        0 | 1 => 1,
+        2 => 2,
+        3 => 3,
+        4 => 2,
+        5..=9 => 3,
+        _ => (n as f32).sqrt().ceil() as usize,
+    }
+}
+
+/// `n` tiles filling `area` as a grid, none narrower than `MIN_TILE[0]` or shorter than
+/// `MIN_TILE[1]`. Columns drop first when the area is narrow; when even that cannot fit, tiles
+/// keep their minimum height and the rows overlap evenly (the last row ends at the bottom).
+pub fn tile_rects(area: Rect, n: usize) -> Vec<Rect> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let gaps = |k: usize| GAP * (k as f32 - 1.0);
+    let max_cols = (((area.width() + GAP) / (MIN_TILE[0] + GAP)).floor() as usize).clamp(1, n);
+    let rows_of = |cols: usize| n.div_ceil(cols);
+    let mut cols = base_cols(n).min(max_cols);
+    // Too short for the rows: spend spare width on more columns.
+    while cols < max_cols
+        && rows_of(cols) as f32 * MIN_TILE[1] + gaps(rows_of(cols)) > area.height()
+    {
+        cols += 1;
+    }
+    let rows = rows_of(cols);
+    let h = ((area.height() - gaps(rows)) / rows as f32)
+        .max(MIN_TILE[1])
+        .min(area.height());
+    let stride = if rows > 1 {
+        ((area.height() - h) / (rows - 1) as f32).min(h + GAP)
+    } else {
+        0.0
+    };
+    (0..n)
+        .map(|i| {
+            let (row, col) = (i / cols, i % cols);
+            // The last row may hold fewer tiles; they share the full width.
+            let in_row = if row + 1 == rows {
+                n - row * cols
+            } else {
+                cols
+            };
+            let w = (area.width() - gaps(in_row)) / in_row as f32;
+            let min = egui::pos2(
+                area.left() + col as f32 * (w + GAP),
+                area.top() + row as f32 * stride,
+            );
+            Rect::from_min_size(min, egui::vec2(w, h))
         })
         .collect()
 }
@@ -82,7 +141,7 @@ pub fn layout(area: Rect, n: usize, maximized: Option<usize>) -> Vec<(Rect, bool
         area.min,
         egui::vec2(area.width(), session_view::HEADER_HEIGHT),
     );
-    let mut heads = tile_rects(strip, n - 1).into_iter();
+    let mut heads = columns(strip, n - 1).into_iter();
     let body = Rect::from_min_max(egui::pos2(area.left(), strip.bottom() + GAP), area.max);
     (0..n)
         .map(|i| {
@@ -427,6 +486,73 @@ mod tests {
         assert!(l[1].0.top() >= l[0].0.bottom());
         assert_eq!(layout(area, 1, Some(0)), vec![(area, false)]);
         assert!(layout(area, 2, None).iter().all(|(_, c)| !c));
+    }
+
+    /// `(columns, rows)` of a tiling: tiles on the first row, distinct row tops.
+    fn shape(tiles: &[Rect]) -> (usize, usize) {
+        let cols = tiles.iter().filter(|r| r.top() == tiles[0].top()).count();
+        let mut tops: Vec<i32> = tiles.iter().map(|r| r.top().round() as i32).collect();
+        tops.dedup();
+        (cols, tops.len())
+    }
+
+    #[test]
+    fn grid_shapes_fill_a_roomy_area() {
+        let area = Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(2000.0, 1200.0));
+        let want = [
+            (1, (1, 1)),
+            (2, (2, 1)),
+            (3, (3, 1)),
+            (4, (2, 2)),
+            (5, (3, 2)),
+            (6, (3, 2)),
+            (7, (3, 3)),
+            (9, (3, 3)),
+            (10, (4, 3)),
+            (17, (5, 4)),
+        ];
+        for (n, cols_rows) in want {
+            let tiles = tile_rects(area, n);
+            assert_eq!(shape(&tiles), cols_rows, "n={n}");
+            assert!(tiles.iter().all(|r| area.expand(0.01).contains_rect(*r)));
+            // Every row spans the area; nothing overlaps.
+            for (i, a) in tiles.iter().enumerate() {
+                for b in &tiles[i + 1..] {
+                    let o = a.intersect(*b);
+                    assert!(o.width() < 0.5 || o.height() < 0.5, "n={n}: {a:?} {b:?}");
+                }
+            }
+        }
+        let five = tile_rects(area, 5);
+        assert!((five[2].right() - area.right()).abs() < 0.01);
+        assert!((five[4].right() - area.right()).abs() < 0.01);
+        assert!((five[4].bottom() - area.bottom()).abs() < 0.01);
+    }
+
+    #[test]
+    fn narrow_areas_drop_columns_and_tiny_ones_overlap_rows() {
+        let min = |r: &Rect| r.width() >= MIN_TILE[0] - 0.5 && r.height() >= MIN_TILE[1] - 0.5;
+        // Room for two 380 px columns only: 3 windows become 2x2 slots, none under the minimum.
+        let area = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 800.0));
+        let tiles = tile_rects(area, 3);
+        assert_eq!(shape(&tiles), (2, 2));
+        assert!(tiles.iter().all(min));
+        // Short and wide: 4 windows prefer one row over four squashed ones.
+        let wide = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1700.0, 500.0));
+        let tiles = tile_rects(wide, 4);
+        assert_eq!(shape(&tiles), (4, 1));
+        assert!(tiles.iter().all(min));
+        // One column, not enough height: minimum size kept, rows overlap evenly inside the area.
+        let tiny = Rect::from_min_size(egui::pos2(5.0, 5.0), egui::vec2(400.0, 700.0));
+        let tiles = tile_rects(tiny, 4);
+        assert!(tiles.iter().all(min));
+        assert!(tiles.iter().all(|r| tiny.expand(0.01).contains_rect(*r)));
+        assert_eq!(tiles[0].top(), tiny.top());
+        assert!((tiles[3].bottom() - tiny.bottom()).abs() < 0.01);
+        assert!(tiles[1].top() > tiles[0].top());
+        // Narrower than a tile: it takes the whole width.
+        let thin = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(300.0, 900.0));
+        assert_eq!(tile_rects(thin, 1)[0], thin);
     }
 
     #[test]

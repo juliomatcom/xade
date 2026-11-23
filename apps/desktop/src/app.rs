@@ -19,6 +19,7 @@ use xade_runtime::git::{git_status, GitState};
 use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
 use xade_store::{Page, SessionCard, StoreReader, WriteOp, WriterHandle};
 
+use crate::config::{self, Config};
 use crate::diff::{is_code_change, DiffData};
 use crate::home::HomeState;
 use crate::keymap::{self, Action, Chord};
@@ -153,6 +154,9 @@ pub struct App {
     /// Window to bring to the front on the next frame.
     pub raise: Option<SessionId>,
     pub vscode: Option<PathBuf>,
+    config: Config,
+    /// Live-reload watcher of `config.json`; absent in headless tests.
+    config_watch: Option<config::Watch>,
     pub chord: Chord,
     pub sidebar_visible: bool,
     pub keymaps_open: bool,
@@ -189,8 +193,10 @@ impl App {
         writer: WriterHandle,
         reader: StoreReader,
         preflight_error: Option<String>,
+        config_path: PathBuf,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
+        let (config, config_error) = config::load(&config_path);
         let (tx, events_rx) = std::sync::mpsc::channel();
         let bridge = Bridge {
             tx,
@@ -223,6 +229,8 @@ impl App {
             maximized: None,
             raise: None,
             vscode: crate::widgets::diff_modal::find_code(),
+            config: Config::default(),
+            config_watch: Some(config::Watch::new(config_path)),
             chord: Chord::default(),
             sidebar_visible: true,
             keymaps_open: false,
@@ -243,6 +251,8 @@ impl App {
             git_dir: None,
             git_checked: Instant::now(),
         };
+        app.error = config_error;
+        app.apply_config(&cc.egui_ctx, config);
         app.refresh_workspaces();
         app.refresh_cards();
         app.load_saved_quota();
@@ -276,6 +286,8 @@ impl App {
             maximized: None,
             raise: None,
             vscode: None,
+            config: Config::default(),
+            config_watch: None,
             chord: Chord::default(),
             sidebar_visible: true,
             keymaps_open: false,
@@ -299,6 +311,68 @@ impl App {
             git_dir: None,
             git_checked: Instant::now(),
         }
+    }
+
+    // ----- config.json -----
+
+    /// Applies `next`; fonts are rebuilt only when the family changed (or at startup with one).
+    fn apply_config(&mut self, ctx: &egui::Context, next: Config) {
+        theme::set_font_size(ctx, next.font_size);
+        if next.font_family != self.config.font_family {
+            let defs = match next.font_family.as_deref().map(config::font_definitions) {
+                Some(Ok(defs)) => Some(defs),
+                Some(Err(e)) => {
+                    tracing::warn!(error = %e, "font not applied");
+                    self.error = Some(format!("config.json: {e}"));
+                    None
+                }
+                None => Some(egui::FontDefinitions::default()),
+            };
+            if let Some(defs) = defs {
+                ctx.set_fonts(defs);
+            }
+        }
+        self.config = next;
+    }
+
+    /// Re-reads `config.json` when its mtime changed (checked every `config::POLL`).
+    fn reload_config(&mut self, ctx: &egui::Context) {
+        let Some(watch) = self.config_watch.as_mut() else {
+            return;
+        };
+        ctx.request_repaint_after(config::POLL);
+        if !watch.changed(Instant::now()) {
+            return;
+        }
+        let (next, error) = config::load(watch.path());
+        tracing::info!("config.json reloaded");
+        if error.is_some() {
+            self.error = error;
+        } else if self
+            .error
+            .as_deref()
+            .is_some_and(|e| e.starts_with("config.json:"))
+        {
+            self.error = None;
+        }
+        self.apply_config(ctx, next);
+    }
+
+    /// Opens `config.json` with the resolved `code`, else the platform's default editor.
+    fn open_settings(&self) {
+        let Some(path) = self.config_watch.as_ref().map(|w| w.path().to_path_buf()) else {
+            return;
+        };
+        let mut cmd = match &self.vscode {
+            Some(code) => std::process::Command::new(code),
+            None => std::process::Command::new(if cfg!(target_os = "macos") {
+                "open"
+            } else {
+                "xdg-open"
+            }),
+        };
+        cmd.arg(path);
+        crate::widgets::diff_modal::spawn_detached(cmd);
     }
 
     // ----- background work -----
@@ -574,6 +648,7 @@ impl App {
         if !self.open_windows.contains(&id) {
             self.open_windows.push(id);
             self.maximized = None;
+            self.tiling.retile();
         }
     }
 
@@ -594,8 +669,8 @@ impl App {
         self.open_windows.retain(|s| *s != id);
         if self.maximized == Some(id) {
             self.maximized = None;
-            self.tiling.retile();
         }
+        self.tiling.retile();
         if self.focused == Some(id) {
             self.focused = self.open_windows.last().copied();
         }
@@ -717,6 +792,7 @@ impl App {
                 }
             }
             Action::Shortcuts => self.keymaps_open = !self.keymaps_open,
+            Action::OpenSettings => self.open_settings(),
             // Handled by the composer and the modals themselves.
             Action::Send | Action::CloseModal => {}
         }
@@ -994,6 +1070,7 @@ impl eframe::App for App {
             self.on_msg(msg);
         }
         self.handle_shortcuts(ctx);
+        self.reload_config(ctx);
         self.poll_running();
         self.run_due_import();
         ctx.request_repaint_after(running::POLL);
@@ -1105,6 +1182,32 @@ mod tests {
         assert!(app.keymaps_open);
         frame(&mut app, vec![key(egui::Key::P)]);
         assert!(app.picker.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_or_closing_a_window_retiles_and_clears_maximize() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-app-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let (a, b, c) = (SessionId::new(), SessionId::new(), SessionId::new());
+        app.add_window(a);
+        app.maximized = Some(a);
+        app.tiling.auto = false;
+        app.add_window(b);
+        assert!(app.maximized.is_none() && app.tiling.auto);
+        app.tiling.auto = false;
+        app.add_window(b);
+        assert!(!app.tiling.auto, "an already open window changes nothing");
+        app.add_window(c);
+        assert!(app.tiling.auto);
+        app.tiling.auto = false;
+        app.drop_session(b);
+        assert!(app.tiling.auto && app.open_windows == vec![a, c]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

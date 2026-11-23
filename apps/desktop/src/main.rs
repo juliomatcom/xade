@@ -1,5 +1,6 @@
 mod app;
 mod composer;
+mod config;
 mod conversation;
 mod diff;
 mod home;
@@ -48,6 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let writer = StoreWriter::spawn(&db)?;
     let reader = StoreReader::open(&db)?;
 
+    let config_path = config::path(&dir);
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
@@ -80,7 +82,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         options,
         Box::new(move |cc| {
             Ok(Box::new(App::new(
-                cc, handle, cmd_tx, event_rx, providers, writer, reader, preflight,
+                cc,
+                handle,
+                cmd_tx,
+                event_rx,
+                providers,
+                writer,
+                reader,
+                preflight,
+                config_path,
             )))
         }),
     )?;

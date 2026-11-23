@@ -88,7 +88,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                         can_tile,
                         egui::Button::new(icons::with(icons::TILE, "Tile")),
                     )
-                    .on_hover_text("Re-tile windows into equal columns")
+                    .on_hover_text("Re-tile windows into a grid")
                     .clicked()
                 {
                     app.tiling.retile();

@@ -38,9 +38,14 @@ pub fn find_code() -> Option<PathBuf> {
 
 /// Runs `code --goto <file>:<line>` without waiting for it.
 pub fn open_in_vscode(code: &Path, file: &Path, line: usize) {
-    let spawned = Command::new(code)
-        .arg("--goto")
-        .arg(format!("{}:{line}", file.display()))
+    let mut cmd = Command::new(code);
+    cmd.arg("--goto").arg(format!("{}:{line}", file.display()));
+    spawn_detached(cmd);
+}
+
+/// Starts `cmd` with no stdio and reaps it in the background.
+pub fn spawn_detached(mut cmd: Command) {
+    let spawned = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -52,7 +57,7 @@ pub fn open_in_vscode(code: &Path, file: &Path, line: usize) {
                 let _ = child.wait();
             });
         }
-        Err(e) => tracing::warn!(error = %e, "could not start code"),
+        Err(e) => tracing::warn!(error = %e, "could not start {:?}", cmd.get_program()),
     }
 }
 

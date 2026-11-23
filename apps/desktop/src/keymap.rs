@@ -24,6 +24,7 @@ pub enum Action {
     ToggleView,
     ToggleAuto,
     Shortcuts,
+    OpenSettings,
     CloseModal,
 }
 
@@ -196,6 +197,12 @@ pub static BINDINGS: &[Binding] = &[
         Group::General,
         "Keyboard shortcuts",
         &[k(CMD, Key::K), k(CMD, Key::S)],
+    ),
+    row(
+        Action::OpenSettings,
+        Group::General,
+        "Open settings (config.json)",
+        &[k(CMD, Key::Comma)],
     ),
     row(
         Action::CloseModal,
