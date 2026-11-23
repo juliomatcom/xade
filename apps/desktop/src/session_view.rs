@@ -1,13 +1,13 @@
 //! One session window's content: header, conversation, permission banner and composer.
 
-use egui::{Align, Layout, RichText};
+use egui::RichText;
 use xade_core::SessionStatus;
 use xade_runtime::ManagerCmd;
 
 use crate::app::SessionVm;
 use crate::diff::is_code_change;
 use crate::workspace::Env;
-use crate::{composer, conversation, home, icons, theme};
+use crate::{chrome, composer, conversation, home, icons, running, theme};
 
 pub const HEADER_HEIGHT: f32 = 34.0;
 
@@ -17,6 +17,8 @@ pub struct ViewOut {
     pub collapse: bool,
     /// Toggles maximize for this window.
     pub maximize: bool,
+    /// Close the session and reopen it with what other processes wrote.
+    pub reload: bool,
 }
 
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
@@ -25,6 +27,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
     if vm.collapsed {
         return out;
     }
+    out.reload = fork_strips(ui, vm);
     egui::Panel::bottom("composer")
         .resizable(false)
         .frame(
@@ -59,48 +62,63 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    egui::Frame::new()
-        .inner_margin(egui::Margin::symmetric(10, 6))
-        .show(ui, |ui| {
-            ui.set_height(HEADER_HEIGHT - 12.0);
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui
-                    .small_button(icons::CLOSE)
-                    .on_hover_text("Close session")
-                    .clicked()
-                {
-                    out.close = true;
-                }
-                let (glyph, tip) = if vm.collapsed {
-                    (icons::RESTORE, "Expand")
-                } else {
-                    (icons::COLLAPSE, "Collapse")
-                };
-                if ui.small_button(glyph).on_hover_text(tip).clicked() {
-                    out.collapse = true;
-                }
-                let (glyph, tip) = if env.maximized == Some(vm.session.id) {
-                    (icons::RESTORE, "Restore")
-                } else {
-                    (icons::MAXIMIZE, "Maximize")
-                };
-                if ui.small_button(glyph).on_hover_text(tip).clicked() {
-                    out.maximize = true;
-                }
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    status_dot(ui, &vm.status);
-                    home::origin_badge(ui, vm.session.origin);
-                    ui.add(
-                        egui::Label::new(RichText::new(format!("{title} • {provider}")).strong())
-                            .truncate(),
+    let maximized = env.maximized == Some(vm.session.id);
+    chrome::header(ui, maximized, vm.collapsed, "Close session", out, |ui| {
+        status_dot(ui, &vm.status);
+        home::origin_badge(ui, vm.session.origin);
+        ui.add(
+            egui::Label::new(RichText::new(format!("{title} • {provider}")).strong()).truncate(),
+        );
+        if !cwd.is_empty() {
+            ui.label(RichText::new(cwd).small().color(theme::TEXT_MUTED))
+                .on_hover_text(vm.cwd.display().to_string());
+        }
+    });
+}
+
+/// The fork warnings under the header: the session is open in another process too, or that
+/// process appended to the transcript. Returns whether Reload was clicked.
+fn fork_strips(ui: &mut egui::Ui, vm: &SessionVm) -> bool {
+    if let Some(location) = &vm.sync.elsewhere {
+        egui::Frame::new()
+            .fill(theme::WARN)
+            .inner_margin(egui::Margin::symmetric(10, 4))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!(
+                            "{} Also open in {location} \u{2014} replies here and there will fork. \
+                             Close one of them.",
+                            icons::WARNING
+                        ))
+                        .color(theme::BG_APP),
+                    )
+                    .truncate(),
+                );
+            });
+    }
+    let t = &vm.sync.transcript;
+    let idle = vm.status == SessionStatus::Idle;
+    let mut reload = false;
+    if running::updated_elsewhere(t.mtime, t.own_write, idle) {
+        egui::Frame::new()
+            .fill(theme::BG_RAISED)
+            .stroke(egui::Stroke::new(1.0, theme::WARN))
+            .inner_margin(egui::Margin::symmetric(10, 2))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(
+                        RichText::new("Updated elsewhere \u{2014}")
+                            .small()
+                            .color(theme::WARN),
                     );
-                    if !cwd.is_empty() {
-                        ui.label(RichText::new(cwd).small().color(theme::TEXT_MUTED))
-                            .on_hover_text(vm.cwd.display().to_string());
-                    }
+                    reload = ui.small_button("Reload").clicked();
                 });
             });
-        });
+    }
+    reload
 }
 
 fn status_dot(ui: &mut egui::Ui, status: &SessionStatus) {

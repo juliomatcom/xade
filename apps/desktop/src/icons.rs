@@ -25,6 +25,8 @@ pub const AUTO: &str = "\u{1F680}";
 pub const IMPORT: &str = "\u{1F4E5}";
 pub const OPEN_SESSION: &str = "\u{1F4C2}";
 pub const SHORTCUTS: &str = "\u{2328}";
+pub const SETTINGS: &str = "\u{2699}";
+pub const WARNING: &str = "\u{26A0}";
 
 /// `"{icon} {label}"`.
 pub fn with(icon: &str, label: &str) -> String {
@@ -62,6 +64,8 @@ mod tests {
             IMPORT,
             OPEN_SESSION,
             SHORTCUTS,
+            SETTINGS,
+            WARNING,
         ];
         let ctx = egui::Context::default();
         // Fonts are installed on the first pass.

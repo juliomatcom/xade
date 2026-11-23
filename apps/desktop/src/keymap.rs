@@ -226,7 +226,7 @@ pub static BINDINGS: &[Binding] = &[
     row(
         Action::OpenSettings,
         Group::General,
-        "Open settings (config.json)",
+        "Open settings (settings.json)",
         &[k(CMD, Key::Comma)],
     ),
     row(

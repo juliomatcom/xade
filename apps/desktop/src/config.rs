@@ -1,4 +1,4 @@
-//! User settings in `<data dir>/config.json`: parsing, creation, live-reload polling and the
+//! User settings in `<data dir>/settings.json`: parsing, creation, live-reload polling and the
 //! font the file names. Colors and sizes stay in `theme.rs`.
 
 use std::path::{Path, PathBuf};
@@ -54,8 +54,17 @@ impl Config {
     }
 }
 
+/// The settings file; a pre-rename `config.json` is moved to it when `settings.json` is absent.
 pub fn path(data_dir: &Path) -> PathBuf {
-    data_dir.join("config.json")
+    let new = data_dir.join("settings.json");
+    let old = data_dir.join("config.json");
+    if old.exists() && !new.exists() {
+        match std::fs::rename(&old, &new) {
+            Ok(()) => tracing::info!("config.json renamed to settings.json"),
+            Err(e) => tracing::warn!(error = %e, "could not rename config.json"),
+        }
+    }
+    new
 }
 
 /// Reads `path`, writing the defaults first when it does not exist. A bad file yields the
@@ -68,7 +77,7 @@ pub fn load(path: &Path) -> (Config, Option<String>) {
         }))
         .unwrap_or_default();
         if let Err(e) = std::fs::write(path, defaults + "\n") {
-            tracing::warn!(error = %e, "could not write config.json");
+            tracing::warn!(error = %e, "could not write settings.json");
         }
         return (Config::default(), None);
     }
@@ -78,8 +87,8 @@ pub fn load(path: &Path) -> (Config, Option<String>) {
     match parsed {
         Ok(cfg) => (cfg, None),
         Err(reason) => {
-            tracing::warn!(%reason, "config.json ignored");
-            (Config::default(), Some(format!("config.json: {reason}")))
+            tracing::warn!(%reason, "settings.json ignored");
+            (Config::default(), Some(format!("settings.json: {reason}")))
         }
     }
 }
@@ -218,7 +227,21 @@ mod tests {
         std::fs::write(&file, "{ nope").unwrap();
         let (cfg, err) = load(&file);
         assert_eq!(cfg, Config::default());
-        assert!(err.unwrap().starts_with("config.json: invalid JSON"));
+        assert!(err.unwrap().starts_with("settings.json: invalid JSON"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn config_json_migrates_unless_settings_json_exists() {
+        let dir = temp_dir();
+        std::fs::write(dir.join("config.json"), "{\"font_size\":15}").unwrap();
+        let file = path(&dir);
+        assert!(file.ends_with("settings.json") && !dir.join("config.json").exists());
+        assert_eq!(load(&file).0.font_size, 15.0);
+        std::fs::write(dir.join("config.json"), "{\"font_size\":20}").unwrap();
+        path(&dir);
+        assert!(dir.join("config.json").exists());
+        assert_eq!(load(&file).0.font_size, 15.0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

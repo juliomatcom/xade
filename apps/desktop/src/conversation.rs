@@ -300,6 +300,7 @@ mod tests {
             collapsed: false,
             window_rect: None,
             apply_rect: None,
+            sync: Default::default(),
         }
     }
 

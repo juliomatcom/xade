@@ -55,8 +55,12 @@ pub enum UiMsg {
         generation: u64,
         page: Page<SessionCard>,
     },
-    /// One `running_sessions` poll.
-    Running(Vec<RunningSession>),
+    /// One `running_sessions` poll, minus Xade's own children, with the live sessions'
+    /// transcript mtimes.
+    Running {
+        list: Vec<RunningSession>,
+        transcripts: Vec<running::TranscriptStat>,
+    },
     /// A file picked with Open File, read off the UI thread.
     FileOpened {
         path: PathBuf,
@@ -106,6 +110,8 @@ pub struct SessionVm {
     pub window_rect: Option<egui::Rect>,
     /// One-frame layout override (tiling, collapse, expand).
     pub apply_rect: Option<egui::Rect>,
+    /// Whether another process shares or has changed this live session's transcript.
+    pub sync: running::SessionSync,
 }
 
 pub struct DiffState {
@@ -168,7 +174,7 @@ pub struct App {
     pub raise: Option<WindowKind>,
     pub vscode: Option<PathBuf>,
     config: Config,
-    /// Live-reload watcher of `config.json`; absent in headless tests.
+    /// Live-reload watcher of `settings.json`; absent in headless tests.
     config_watch: Option<config::Watch>,
     pub chord: Chord,
     pub sidebar_visible: bool,
@@ -185,6 +191,8 @@ pub struct App {
     running_polled: bool,
     running_import_due: bool,
     running_import_at: Option<Instant>,
+    /// Sessions closed for a reload; each reopens when the import that follows finishes.
+    reloading: HashSet<SessionId>,
     /// Sessions being opened from Home with Cmd+click: they get a window but no view switch.
     background: HashSet<SessionId>,
     events_rx: Receiver<UiMsg>,
@@ -257,6 +265,7 @@ impl App {
             running_polled: false,
             running_import_due: false,
             running_import_at: None,
+            reloading: HashSet::new(),
             background: HashSet::new(),
             events_rx,
             bridge,
@@ -315,6 +324,7 @@ impl App {
             running_polled: false,
             running_import_due: false,
             running_import_at: None,
+            reloading: HashSet::new(),
             background: HashSet::new(),
             events_rx,
             bridge: Bridge {
@@ -328,7 +338,7 @@ impl App {
         }
     }
 
-    // ----- config.json -----
+    // ----- settings.json -----
 
     /// Applies `next`; fonts are rebuilt only when the family changed (or at startup with one).
     fn apply_config(&mut self, ctx: &egui::Context, next: Config) {
@@ -338,7 +348,7 @@ impl App {
                 Some(Ok(defs)) => Some(defs),
                 Some(Err(e)) => {
                     tracing::warn!(error = %e, "font not applied");
-                    self.error = Some(format!("config.json: {e}"));
+                    self.error = Some(format!("settings.json: {e}"));
                     None
                 }
                 None => Some(egui::FontDefinitions::default()),
@@ -350,7 +360,7 @@ impl App {
         self.config = next;
     }
 
-    /// Re-reads `config.json` when its mtime changed (checked every `config::POLL`).
+    /// Re-reads `settings.json` when its mtime changed (checked every `config::POLL`).
     fn reload_config(&mut self, ctx: &egui::Context) {
         let Some(watch) = self.config_watch.as_mut() else {
             return;
@@ -360,34 +370,33 @@ impl App {
             return;
         }
         let (next, error) = config::load(watch.path());
-        tracing::info!("config.json reloaded");
+        tracing::info!("settings.json reloaded");
         if error.is_some() {
             self.error = error;
         } else if self
             .error
             .as_deref()
-            .is_some_and(|e| e.starts_with("config.json:"))
+            .is_some_and(|e| e.starts_with("settings.json:"))
         {
             self.error = None;
         }
         self.apply_config(ctx, next);
     }
 
-    /// Opens `config.json` with the resolved `code`, else the platform's default editor.
-    fn open_settings(&self) {
+    /// Opens `settings.json` in Xade's own editor, focusing the window when it is already open.
+    pub fn open_settings(&mut self) {
         let Some(path) = self.config_watch.as_ref().map(|w| w.path().to_path_buf()) else {
             return;
         };
-        let mut cmd = match &self.vscode {
-            Some(code) => std::process::Command::new(code),
-            None => std::process::Command::new(if cfg!(target_os = "macos") {
-                "open"
-            } else {
-                "xdg-open"
-            }),
-        };
-        cmd.arg(path);
-        crate::widgets::diff_modal::spawn_detached(cmd);
+        if let Some(id) = self.editors.find_path(&path) {
+            self.focus(WindowKind::Editor(id));
+            return;
+        }
+        let bridge = self.bridge.clone();
+        self.rt.spawn_blocking(move || {
+            let text = editor::read_file(&path);
+            bridge.send(UiMsg::FileOpened { path, text });
+        });
     }
 
     // ----- background work -----
@@ -482,24 +491,58 @@ impl App {
         };
         self.running_checked = Some(Instant::now());
         self.running_inflight = true;
+        let live = self.live_provider_ids();
+        let jobs: Vec<running::TranscriptJob> = self
+            .sessions
+            .values()
+            .filter(|vm| live_status(&vm.status))
+            .filter_map(|vm| {
+                Some(running::TranscriptJob {
+                    id: vm.session.id,
+                    provider_session_id: vm.session.provider_session_id.clone()?,
+                    path: vm.sync.transcript.path.clone(),
+                })
+            })
+            .collect();
         let bridge = self.bridge.clone();
         self.rt.spawn_blocking(move || {
-            bridge.send(UiMsg::Running(provider.running_sessions()));
+            let list =
+                running::exclude_own(provider.running_sessions(), &live, running::is_own_process);
+            let transcripts = running::stat_transcripts(jobs);
+            bridge.send(UiMsg::Running { list, transcripts });
         });
     }
 
-    /// Stores a poll without Xade's own live sessions and queues a re-import when the set changed.
-    fn on_running(&mut self, list: Vec<RunningSession>) {
-        self.running_inflight = false;
-        let own: HashSet<&str> = self
-            .sessions
+    fn live_provider_ids(&self) -> HashSet<String> {
+        self.sessions
             .values()
-            .filter(|vm| !matches!(vm.status, SessionStatus::Error(_)))
-            .filter_map(|vm| vm.session.provider_session_id.as_deref())
-            .collect();
+            .filter(|vm| live_status(&vm.status))
+            .filter_map(|vm| vm.session.provider_session_id.clone())
+            .collect()
+    }
+
+    /// Stores a poll: the fork state of Xade's live sessions, the other sessions as running
+    /// elsewhere, and a queued re-import when that set changed.
+    fn on_running(&mut self, list: Vec<RunningSession>, transcripts: Vec<running::TranscriptStat>) {
+        self.running_inflight = false;
+        let own = self.live_provider_ids();
+        for vm in self.sessions.values_mut() {
+            vm.sync.elsewhere = running::elsewhere(
+                vm.session.provider_session_id.as_deref(),
+                live_status(&vm.status),
+                &list,
+            )
+            .map(|r| r.location.clone());
+        }
+        for t in transcripts {
+            if let Some(vm) = self.sessions.get_mut(&t.id) {
+                vm.sync.transcript.path = t.path;
+                vm.sync.transcript.mtime = t.mtime;
+            }
+        }
         let next: HashMap<String, RunningSession> = list
             .into_iter()
-            .filter(|r| !own.contains(r.provider_session_id.as_str()))
+            .filter(|r| !own.contains(&r.provider_session_id))
             .map(|r| (r.provider_session_id.clone(), r))
             .collect();
         let changed =
@@ -513,6 +556,13 @@ impl App {
         }
         self.running_polled = true;
         self.running = next;
+    }
+
+    /// Closes a session and reopens it once an import has brought in what other processes wrote.
+    pub fn reload_session(&mut self, id: SessionId) {
+        self.close_session(id);
+        self.reloading.insert(id);
+        self.start_import();
     }
 
     /// Runs the queued re-import once the 30 s gap has passed and no import is in flight.
@@ -656,7 +706,7 @@ impl App {
     fn is_live(&self, id: SessionId) -> bool {
         self.sessions
             .get(&id)
-            .is_some_and(|vm| !matches!(vm.status, SessionStatus::Error(_)))
+            .is_some_and(|vm| live_status(&vm.status))
     }
 
     pub fn window_exists(&self, kind: WindowKind) -> bool {
@@ -1100,7 +1150,7 @@ impl App {
                     p.selected = p.selected.min(p.results.len().saturating_sub(1));
                 }
             }
-            UiMsg::Running(list) => self.on_running(list),
+            UiMsg::Running { list, transcripts } => self.on_running(list, transcripts),
             UiMsg::FileOpened { path, text } => self.on_file_opened(path, text),
             UiMsg::Saved {
                 id,
@@ -1163,6 +1213,7 @@ impl App {
                 collapsed: false,
                 window_rect: None,
                 apply_rect: None,
+                sync: Default::default(),
             },
         );
         if self.background.remove(&id) {
@@ -1186,6 +1237,9 @@ impl App {
                 tracing::info!(imported, updated, "import done");
                 self.refresh_workspaces();
                 self.refresh_cards();
+                for id in std::mem::take(&mut self.reloading) {
+                    self.open_session(id);
+                }
             }
             (_, AppEventKind::Git { dir, state }) => {
                 self.git.insert(dir.clone(), state);
@@ -1287,6 +1341,7 @@ impl App {
                 }
             }
             ProviderEvent::TurnComplete { usage, .. } => {
+                vm.sync.transcript.own_write = std::time::SystemTime::now();
                 vm.live_text.clear();
                 vm.thinking_tokens = None;
                 vm.settings_pending = false;
@@ -1306,6 +1361,11 @@ impl App {
             self.refresh_cards();
         }
     }
+}
+
+/// A session whose child is alive (or starting); an errored one has none.
+fn live_status(status: &SessionStatus) -> bool {
+    !matches!(status, SessionStatus::Error(_))
 }
 
 /// Builds a message for local display (not persisted here; the session actor owns writes).
@@ -1367,7 +1427,9 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         home::top_bar(self, ui);
-        status_bar::show(self, ui);
+        if status_bar::show(self, ui) {
+            self.open_settings();
+        }
         if self.sidebar_visible {
             home::sidebar(self, ui);
         }
@@ -1429,6 +1491,41 @@ mod tests {
             repeat: false,
             modifiers: egui::Modifiers::COMMAND,
         }
+    }
+
+    /// Settings opens in Xade's editor (once), and saving there reaches the mtime watch.
+    #[test]
+    fn settings_open_in_the_editor_and_saving_triggers_reload() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-app-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let file = config::path(&dir);
+        config::load(&file);
+        let mut watch = config::Watch::new(file.clone());
+        app.config_watch = Some(config::Watch::new(file.clone()));
+        let text = std::fs::read_to_string(&file).unwrap();
+        // What `open_settings` sends once the file is read.
+        app.on_msg(UiMsg::FileOpened {
+            path: file.clone(),
+            text: Ok(text),
+        });
+        let id = app.editors.find_path(&file).expect("editor opened");
+        assert_eq!(app.focused, Some(WindowKind::Editor(id)));
+        app.view = View::Home;
+        app.open_settings();
+        assert_eq!(app.editors.map.len(), 1);
+        assert!(app.view == View::Workspace);
+        assert_eq!(app.focused, Some(WindowKind::Editor(id)));
+        // The editor saves with `write_atomic`; the watch sees the new mtime.
+        std::thread::sleep(Duration::from_millis(20));
+        editor::write_atomic(&file, "{\"font_size\": 20}\n").unwrap();
+        assert!(watch.changed(Instant::now() + config::POLL));
+        assert_eq!(config::load(&file).0.font_size, 20.0);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

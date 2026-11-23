@@ -247,6 +247,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     let mut closes = Vec::new();
+    let mut reloads = Vec::new();
     let mut toggle_max = None;
     let mut user_moved = false;
     let mut pressed = None;
@@ -332,6 +333,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if out.close {
             closes.push(*kind);
         }
+        if let (true, WindowKind::Session(id)) = (out.reload, *kind) {
+            reloads.push(id);
+        }
         {
             let (c, w, a) = taken.geom();
             *c = collapsed;
@@ -381,6 +385,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             WindowKind::Session(id) => app.close_session(id),
             WindowKind::Editor(id) => app.request_close_editor(id),
         }
+    }
+    for id in reloads {
+        app.reload_session(id);
     }
 }
 
@@ -564,6 +571,7 @@ mod tests {
             collapsed: false,
             window_rect: None,
             apply_rect: None,
+            sync: Default::default(),
         }
     }
 

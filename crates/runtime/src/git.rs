@@ -186,4 +186,29 @@ mod tests {
             repo(Some("main"), None, false, (0, 0), (0, 0, 0))
         );
     }
+
+    /// A fresh repo with untracked files only (no commit yet) still reports its branch.
+    #[tokio::test]
+    async fn real_unborn_repo_with_untracked_files_has_a_branch() {
+        let dir = std::env::temp_dir().join(format!("xade-git-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("dir");
+        let init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["init", "-q"])
+            .status();
+        if init.is_ok_and(|s| s.success()) {
+            for f in ["a", "b", "c"] {
+                std::fs::write(dir.join(f), "").expect("file");
+            }
+            match git_status(&dir).await {
+                GitState::Repo {
+                    branch, untracked, ..
+                } => assert!(branch.is_some_and(|b| !b.is_empty()) && untracked == 3),
+                other => panic!("{other:?}"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
