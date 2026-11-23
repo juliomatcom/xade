@@ -10,3 +10,5 @@
 - Permissions: non-code tools get a banner (Approve / Approve & Enable Auto / Deny); code-change tools never render inline, their request opens the diff modal (Accept / Accept & Enable Auto / Cancel = deny) and Esc or close only hides it, leaving the card's "Review changes".
 - "Open in VS Code" runs `code --goto <path>:<line>`; the `code` binary is resolved once at startup (`$PATH`, then known macOS locations).
 - Button glyphs live only in `icons.rs`; a unit test asserts each exists in egui's default fonts, which needs the `monochrome_emoji_fonts` feature on `egui`.
+- Home cards and session headers carry an origin badge (Xade / Claude Code); a Home filter row passes `origin` to list and search.
+- `ManagerCmd::Import` runs once at startup after a good preflight (and after a Retry that recovers) and from the sidebar button; `ImportDone` re-runs the home query and workspace list.

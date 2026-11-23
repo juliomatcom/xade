@@ -8,7 +8,7 @@ use crate::theme;
 
 pub fn show(app: &App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
-        .fill(theme::BG_APP)
+        .fill(theme::BG_STATUS)
         .inner_margin(egui::Margin::symmetric(12, 4));
     egui::Panel::bottom("status_bar")
         .frame(frame)

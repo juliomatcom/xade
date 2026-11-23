@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use egui::{Align, Layout, RichText};
 use time::OffsetDateTime;
-use xade_core::{QuotaKind, QuotaWindow, SessionStatus, Workspace, WorkspaceId};
+use xade_core::{QuotaKind, QuotaWindow, SessionOrigin, SessionStatus, Workspace, WorkspaceId};
 use xade_store::SessionCard;
 
 use crate::app::{App, View};
@@ -29,6 +29,11 @@ pub struct HomeState {
     /// Bumped per query; stale results are dropped.
     pub generation: u64,
     pub preflight_error: Option<String>,
+    /// `None` lists every origin.
+    pub origin: Option<SessionOrigin>,
+    pub importing: bool,
+    /// `(imported, updated)` of the last finished import.
+    pub import_result: Option<(u32, u32)>,
 }
 
 pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
@@ -152,32 +157,46 @@ fn quota_meter(ui: &mut egui::Ui, kind: QuotaKind, q: Option<&QuotaWindow>) {
     // A fixed-size slot: inside the right-to-left top bar, an unsized `vertical`
     // lets both meters land on the same rect.
     let size = egui::vec2(150.0, ui.available_height());
+    let now = OffsetDateTime::now_utc();
     ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.horizontal(|ui| {
             ui.label(RichText::new(label).small().color(theme::TEXT_MUTED));
             let used = q.map_or("\u{2014}".to_string(), |q| {
-                format!("{:.0}% Used", q.utilization_pct)
+                format!("{:.0}% Used", quota_pct(q, now))
             });
             ui.label(RichText::new(used).small().color(theme::TEXT_MUTED));
         });
-        let fraction = q.map_or(0.0, |q| (q.utilization_pct / 100.0).clamp(0.0, 1.0));
+        let fraction = q.map_or(0.0, |q| (quota_pct(q, now) / 100.0).clamp(0.0, 1.0));
         ui.add(
             egui::ProgressBar::new(fraction)
                 .desired_width(140.0)
                 .desired_height(4.0)
                 .fill(theme::usage_color(fraction)),
         );
-        if let Some(at) = q.and_then(|q| q.resets_at) {
-            let secs = (at - OffsetDateTime::now_utc()).whole_seconds().max(0);
-            ui.label(
-                RichText::new(format!("Resets in {}", duration_text(secs)))
-                    .small()
-                    .color(theme::TEXT_MUTED),
-            );
+        if let Some(text) = q.and_then(|q| reset_text(q, now)) {
+            ui.label(RichText::new(text).small().color(theme::TEXT_MUTED));
         }
     });
     ui.add_space(8.0);
+}
+
+/// A window whose reset time has passed holds no usage any more.
+fn quota_pct(q: &QuotaWindow, now: OffsetDateTime) -> f32 {
+    if q.resets_at.is_some_and(|at| at <= now) {
+        0.0
+    } else {
+        q.utilization_pct
+    }
+}
+
+fn reset_text(q: &QuotaWindow, now: OffsetDateTime) -> Option<String> {
+    let at = q.resets_at?;
+    Some(if at <= now {
+        "reset".into()
+    } else {
+        format!("Resets in {}", duration_text((at - now).whole_seconds()))
+    })
 }
 
 fn duration_text(secs: i64) -> String {
@@ -191,7 +210,7 @@ fn duration_text(secs: i64) -> String {
 
 pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
-        .fill(theme::BG_PANEL)
+        .fill(theme::BG_SIDEBAR)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
         .inner_margin(egui::Margin::same(12));
     egui::Panel::left("sidebar")
@@ -209,6 +228,7 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                 {
                     app.add_directory();
                 }
+                import_button(app, ui);
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     heading(ui, "Workspaces");
                     if ui
@@ -244,6 +264,81 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
+fn import_button(app: &mut App, ui: &mut egui::Ui) {
+    let enabled = !app.home.importing && app.home.preflight_error.is_none();
+    let btn = egui::Button::new(icons::with(icons::IMPORT, "Import from Claude Code"));
+    if ui
+        .add_enabled_ui(enabled, |ui| {
+            ui.add_sized([ui.available_width(), 28.0], btn)
+        })
+        .inner
+        .clicked()
+    {
+        app.start_import();
+    }
+    if app.home.importing {
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.label(
+                RichText::new("Importing\u{2026}")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+        });
+    } else if let Some((imported, updated)) = app.home.import_result {
+        ui.label(
+            RichText::new(format!("Imported {imported}, updated {updated}"))
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
+    }
+}
+
+fn origin_label(o: SessionOrigin) -> &'static str {
+    match o {
+        SessionOrigin::Xade => "Xade",
+        SessionOrigin::ClaudeCode => "Claude Code",
+    }
+}
+
+/// Small outlined tag naming where a session was created.
+pub fn origin_badge(ui: &mut egui::Ui, origin: SessionOrigin) {
+    let color = match origin {
+        SessionOrigin::Xade => theme::ACCENT,
+        SessionOrigin::ClaudeCode => theme::CLAUDE,
+    };
+    egui::Frame::new()
+        .stroke(egui::Stroke::new(1.0, color))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(6, 0))
+        .show(ui, |ui| {
+            ui.label(RichText::new(origin_label(origin)).small().color(color));
+        });
+}
+
+fn origin_filter(app: &mut App, ui: &mut egui::Ui) {
+    let mut picked = None;
+    ui.horizontal(|ui| {
+        for (label, value) in [
+            ("All", None),
+            ("Xade", Some(SessionOrigin::Xade)),
+            ("Claude Code", Some(SessionOrigin::ClaudeCode)),
+        ] {
+            if ui
+                .selectable_label(app.home.origin == value, label)
+                .clicked()
+            {
+                picked = Some(value);
+            }
+        }
+    });
+    if let Some(origin) = picked.filter(|o| *o != app.home.origin) {
+        app.home.origin = origin;
+        app.home.page = 0;
+        app.refresh_cards();
+    }
+}
+
 fn heading(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).small().color(theme::TEXT_MUTED));
 }
@@ -265,6 +360,7 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
             });
         ui.add_space(12.0);
     }
+    origin_filter(app, ui);
     let pages = app.home.total.div_ceil(u64::from(PAGE_SIZE)).max(1);
     egui::Panel::bottom("pager")
         .frame(egui::Frame::new())
@@ -369,6 +465,7 @@ fn card_ui(app: &App, ui: &mut egui::Ui, card: &SessionCard, width: f32) -> bool
                 .selectable(false),
         );
         ui.horizontal(|ui| {
+            origin_badge(ui, card.origin);
             ui.label(RichText::new("Claude").small().color(theme::CLAUDE));
             ui.label(
                 RichText::new(app.workspace_name(card.workspace_id))
@@ -411,5 +508,33 @@ fn relative_time(t: OffsetDateTime) -> String {
         60..=3599 => format!("{}m ago", secs / 60),
         3600..=86_399 => format!("{}h ago", secs / 3600),
         _ => format!("{}d ago", secs / 86_400),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window(pct: f32, resets_in_secs: Option<i64>, now: OffsetDateTime) -> QuotaWindow {
+        QuotaWindow {
+            kind: QuotaKind::FiveHour,
+            utilization_pct: pct,
+            resets_at: resets_in_secs.map(|s| now + time::Duration::seconds(s)),
+        }
+    }
+
+    #[test]
+    fn past_reset_shows_zero_and_reset() {
+        let now = OffsetDateTime::now_utc();
+        let past = window(80.0, Some(-60), now);
+        assert_eq!(quota_pct(&past, now), 0.0);
+        assert_eq!(reset_text(&past, now).as_deref(), Some("reset"));
+        let future = window(80.0, Some(5400), now);
+        assert_eq!(quota_pct(&future, now), 80.0);
+        assert_eq!(
+            reset_text(&future, now).as_deref(),
+            Some("Resets in 1h 30m")
+        );
+        assert_eq!(reset_text(&window(10.0, None, now), now), None);
     }
 }

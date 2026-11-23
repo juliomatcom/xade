@@ -12,8 +12,15 @@ pub const BG_HOVER: Color32 = Color32::from_rgb(0x27, 0x2D, 0x37);
 pub const BORDER: Color32 = Color32::from_rgb(0x2A, 0x30, 0x3A);
 pub const TEXT: Color32 = Color32::from_rgb(0xD6, 0xDA, 0xE1);
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x93, 0xA1);
-pub const ACCENT: Color32 = Color32::from_rgb(0x2F, 0x81, 0xF7);
-pub const OK: Color32 = Color32::from_rgb(0x2E, 0xA0, 0x43);
+/// Brand jade; primary buttons, selection, links.
+pub const ACCENT: Color32 = Color32::from_rgb(0x05, 0x96, 0x69);
+/// Hover and active fills of accent widgets.
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x10, 0xB9, 0x81);
+/// Left sidebar fill.
+pub const BG_SIDEBAR: Color32 = Color32::from_rgb(0x12, 0x20, 0x1C);
+/// Bottom status bar fill.
+pub const BG_STATUS: Color32 = Color32::from_rgb(0x0C, 0x17, 0x14);
+pub const OK: Color32 = Color32::from_rgb(0x34, 0xD3, 0x99);
 pub const WARN: Color32 = Color32::from_rgb(0xD2, 0x99, 0x22);
 pub const DANGER: Color32 = Color32::from_rgb(0xF8, 0x51, 0x49);
 pub const DIFF_DEL_BG: Color32 = Color32::from_rgb(0x4B, 0x1D, 0x22);
@@ -69,9 +76,9 @@ fn visuals() -> Visuals {
     w.hovered.weak_bg_fill = BG_HOVER;
     w.hovered.bg_stroke = Stroke::new(1.0, TEXT_MUTED);
     w.hovered.fg_stroke = Stroke::new(1.0, TEXT);
-    w.active.bg_fill = ACCENT;
-    w.active.weak_bg_fill = ACCENT;
-    w.active.bg_stroke = Stroke::new(1.0, ACCENT);
+    w.active.bg_fill = ACCENT_HOVER;
+    w.active.weak_bg_fill = ACCENT_HOVER;
+    w.active.bg_stroke = Stroke::new(1.0, ACCENT_HOVER);
     w.active.fg_stroke = Stroke::new(1.0, TEXT);
     for s in [
         &mut w.noninteractive,

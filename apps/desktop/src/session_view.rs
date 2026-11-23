@@ -7,7 +7,7 @@ use xade_runtime::ManagerCmd;
 use crate::app::SessionVm;
 use crate::diff::is_code_change;
 use crate::workspace::Env;
-use crate::{composer, conversation, icons, theme};
+use crate::{composer, conversation, home, icons, theme};
 
 pub const HEADER_HEIGHT: f32 = 34.0;
 
@@ -89,6 +89,7 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
                 }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     status_dot(ui, &vm.status);
+                    home::origin_badge(ui, vm.session.origin);
                     ui.add(
                         egui::Label::new(RichText::new(format!("{title} • {provider}")).strong())
                             .truncate(),

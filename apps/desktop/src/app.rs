@@ -41,6 +41,8 @@ pub enum UiMsg {
     },
     Workspaces(Vec<Workspace>),
     Preflight(Option<String>),
+    /// Quota rows saved by earlier runs.
+    SavedQuota(Vec<QuotaWindow>),
 }
 
 /// Sends to the UI thread and wakes it.
@@ -201,6 +203,10 @@ impl App {
         };
         app.refresh_workspaces();
         app.refresh_cards();
+        app.load_saved_quota();
+        if app.home.preflight_error.is_none() {
+            app.start_import();
+        }
         app
     }
 
@@ -220,8 +226,9 @@ impl App {
     pub fn refresh_cards(&mut self) {
         self.home.generation += 1;
         let generation = self.home.generation;
-        let (scope, query, page) = (
+        let (scope, origin, query, page) = (
             self.home.scope,
+            self.home.origin,
             self.home.search.trim().to_string(),
             self.home.page,
         );
@@ -229,11 +236,11 @@ impl App {
         self.rt.spawn(async move {
             let res = if query.is_empty() {
                 reader
-                    .list_sessions(scope, None, page, home::PAGE_SIZE)
+                    .list_sessions(scope, origin, page, home::PAGE_SIZE)
                     .await
             } else {
                 reader
-                    .search(scope, None, query, page, home::PAGE_SIZE)
+                    .search(scope, origin, query, page, home::PAGE_SIZE)
                     .await
             };
             match res {
@@ -241,6 +248,24 @@ impl App {
                 Err(e) => tracing::error!(error = %e, "session query failed"),
             }
         });
+    }
+
+    fn load_saved_quota(&self) {
+        let (reader, bridge) = (self.reader.clone(), self.bridge.clone());
+        self.rt.spawn(async move {
+            match reader.load_quota().await {
+                Ok(q) => bridge.send(UiMsg::SavedQuota(q)),
+                Err(e) => tracing::error!(error = %e, "load quota failed"),
+            }
+        });
+    }
+
+    /// Imports Claude Code history; one run at a time, finished by `ImportDone`.
+    pub fn start_import(&mut self) {
+        if self.home.importing {
+            return;
+        }
+        self.home.importing = self.cmd_tx.send(ManagerCmd::Import).is_ok();
     }
 
     pub fn retry_preflight(&self) {
@@ -413,7 +438,22 @@ impl App {
                 }
                 self.home.workspaces = ws;
             }
-            UiMsg::Preflight(err) => self.home.preflight_error = err,
+            UiMsg::Preflight(err) => {
+                let recovered = err.is_none() && self.home.preflight_error.is_some();
+                self.home.preflight_error = err;
+                if recovered {
+                    self.start_import();
+                }
+            }
+            UiMsg::SavedQuota(saved) => {
+                // A live report may have arrived first; it wins.
+                for q in saved {
+                    if !self.quota.iter().any(|x| x.kind == q.kind) {
+                        self.quota.push(q);
+                    }
+                }
+                self.quota.sort_by_key(|q| q.kind == QuotaKind::SevenDay);
+            }
         }
     }
 
@@ -456,6 +496,13 @@ impl App {
                 self.quota.retain(|x| x.kind != q.kind);
                 self.quota.push(q);
                 self.quota.sort_by_key(|q| q.kind == QuotaKind::SevenDay);
+            }
+            (_, AppEventKind::ImportDone { imported, updated }) => {
+                self.home.importing = false;
+                self.home.import_result = Some((imported, updated));
+                tracing::info!(imported, updated, "import done");
+                self.refresh_workspaces();
+                self.refresh_cards();
             }
             (_, AppEventKind::Git { dir, state }) => {
                 self.git.insert(dir.clone(), state);

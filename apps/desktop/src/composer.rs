@@ -1,7 +1,7 @@
 //! Prompt input, send/stop, model and effort pickers, Auto toggle and the context and usage meters.
 
 use egui::{Key, Modifiers, RichText};
-use xade_core::{Effort, SessionStatus, UsageTotals};
+use xade_core::{Effort, ModelOption, SessionStatus, UsageTotals};
 use xade_runtime::ManagerCmd;
 
 use crate::app::{push_user_message, SessionVm};
@@ -83,7 +83,8 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
         .iter()
         .find(|p| p.id() == vm.session.provider_id);
     let models = provider.map(|p| p.models()).unwrap_or_default();
-    let efforts = provider.map(|p| p.effort_levels()).unwrap_or_default();
+    let fallback = provider.map(|p| p.effort_levels()).unwrap_or_default();
+    let efforts = effort_choices(&models, &vm.session.model_id, &fallback);
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new("Model").small().color(theme::TEXT_MUTED));
         let current = models
@@ -92,11 +93,12 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
             .map_or(vm.session.model_id.clone(), |m| m.label.clone());
         egui::ComboBox::from_id_salt(("model", id))
             .selected_text(current)
-            .width(80.0)
+            .width(110.0)
             .show_ui(ui, |ui| {
                 for m in &models {
                     let picked = ui
                         .selectable_label(vm.session.model_id == m.id, &m.label)
+                        .on_hover_text(&m.description)
                         .clicked();
                     if picked && vm.session.model_id != m.id {
                         vm.session.model_id = m.id.clone();
@@ -105,6 +107,15 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
                             session_id: id,
                             model_id: m.id.clone(),
                         });
+                        let supported = effort_choices(&models, &m.id, &fallback);
+                        let effort = reconcile_effort(vm.session.effort, &supported);
+                        if effort != vm.session.effort {
+                            vm.session.effort = effort;
+                            let _ = env.cmd_tx.send(ManagerCmd::SetEffort {
+                                session_id: id,
+                                effort,
+                            });
+                        }
                     }
                 }
             });
@@ -153,6 +164,30 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     });
 }
 
+/// `Default` plus the levels of the model with this exact id; `fallback` when the id is unknown.
+fn effort_choices(models: &[ModelOption], model_id: &str, fallback: &[Effort]) -> Vec<Effort> {
+    match models.iter().find(|m| m.id == model_id) {
+        Some(m) => std::iter::once(Effort::Default)
+            .chain(
+                m.effort_levels
+                    .iter()
+                    .copied()
+                    .filter(|e| *e != Effort::Default),
+            )
+            .collect(),
+        None => fallback.to_vec(),
+    }
+}
+
+/// Keeps `current` when supported, else falls back to `Default`.
+fn reconcile_effort(current: Effort, supported: &[Effort]) -> Effort {
+    if supported.contains(&current) {
+        current
+    } else {
+        Effort::Default
+    }
+}
+
 fn effort_label(e: Effort) -> &'static str {
     match e {
         Effort::Default => "Default",
@@ -174,7 +209,10 @@ pub fn fmt_tokens(n: u64) -> String {
 
 pub fn context_text(u: &UsageTotals) -> String {
     if u.context_window_max == 0 {
-        return "ctx —".into();
+        if u.context_tokens_used == 0 {
+            return "ctx —".into();
+        }
+        return format!("ctx {} / ?", fmt_tokens(u.context_tokens_used));
     }
     let pct = u.context_tokens_used as f64 / u.context_window_max as f64 * 100.0;
     format!(
@@ -214,5 +252,29 @@ mod tests {
         assert_eq!(context_text(&u), "ctx 50.0k / 200.0k (25%)");
         assert_eq!(usage_text(&u), "in 1.2k · out 300 · cache 5.0k · $0.12");
         assert_eq!(context_text(&UsageTotals::default()), "ctx —");
+        let imported = UsageTotals {
+            context_tokens_used: 42_000,
+            ..UsageTotals::default()
+        };
+        assert_eq!(context_text(&imported), "ctx 42.0k / ?");
+    }
+
+    #[test]
+    fn effort_follows_the_model() {
+        let models = [ModelOption {
+            id: "m-1".into(),
+            label: "M 1".into(),
+            description: String::new(),
+            effort_levels: vec![Effort::Low, Effort::High],
+        }];
+        let all = [Effort::Default, Effort::Low, Effort::Medium];
+        assert_eq!(
+            effort_choices(&models, "m-1", &all),
+            [Effort::Default, Effort::Low, Effort::High]
+        );
+        assert_eq!(effort_choices(&models, "old-alias", &all), all);
+        let supported = effort_choices(&models, "m-1", &all);
+        assert_eq!(reconcile_effort(Effort::High, &supported), Effort::High);
+        assert_eq!(reconcile_effort(Effort::Max, &supported), Effort::Default);
     }
 }

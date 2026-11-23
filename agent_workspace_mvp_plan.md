@@ -266,7 +266,7 @@ No `async-trait`: `spawn` starts a tokio task internally and returns channels.
 - **Session window:** a header row ("<title> • <provider>", then split/more icon buttons and close); the conversation; the composer docked at the bottom.
 - **Messages:** assistant rows start with a small square provider avatar (Claude in terracotta). A tool call is a compact bordered card with a check or spinner icon and the summary ("✓ Read auth.ts").
 - **Composer:** a rounded input with a send-arrow button inside it on the right. Below it, one row of labeled controls: "Model" dropdown, "Thinking" dropdown, and an "Auto" pill toggle (green ON, gray OFF). Context and usage meters go on the right of that row in muted small text.
-- **Diff modal:** a centered dark card with the title "Review File Changes: <path>" and an accent-colored "Open in VS Code" link beside it, a blue **Accept** and a neutral **Cancel** at top right, then a side-by-side diff with line numbers (red removed, green added).
+- **Diff modal:** a centered dark card with the title "Review File Changes: <path>" and an accent-colored "Open in VS Code" link beside it, an accent-colored **Accept** and a neutral **Cancel** at top right, then a side-by-side diff with line numbers (red removed, green added).
 - **Bottom status bar** (not in the mock; always visible in both views): a thin `TopBottomPanel::bottom` in `bg_app` with muted small text. It shows git state for the **active directory**: the focused session window's cwd in Workspace view, or the selected directory in Home ("All Workspaces" → the most recently used directory). Contents: the directory basename, the branch icon and name (or `detached @ <short sha>`), `↑ahead ↓behind` when there's an upstream, and the counts `● staged ✚ modified … untracked`, or "clean". Outside a repo it shows "Not a git repository"; if git is missing, "git not found". It's a read-only display.
 - **MVP gaps in the mock:** the "Add files" button, attachment chips and the Antigravity provider are shown but out of scope. Show Antigravity disabled in the provider selector with the tooltip "Coming soon". Omit attachments entirely.
 
@@ -275,13 +275,17 @@ No `async-trait`: `spawn` starts a tokio task internally and returns channels.
 | Token | Value | Use |
 |---|---|---|
 | `bg_app` | `#0F1216` | window background, top bar |
-| `bg_panel` | `#161A20` | sidebar, session window body |
+| `bg_panel` | `#161A20` | central area |
+| `bg_sidebar` | `#12201C` | left sidebar (greenish) |
+| `bg_status` | `#0C1714` | bottom status bar (greenish) |
+| `bg_window` | `#1A1F26` | session window frame and body |
 | `bg_raised` | `#1E232B` | cards, inputs, dropdowns, modal |
 | `border` | `#2A303A` | 1px strokes, separators |
 | `text` | `#D6DAE1` | primary text |
 | `text_muted` | `#8A93A1` | labels, timestamps, meters |
-| `accent` | `#2F81F7` | Accept button, quota bars, focus ring, selection |
-| `ok` | `#2EA043` | Auto ON, success icons |
+| `accent` | `#059669` | jade brand: primary buttons, links, focus ring, selection |
+| `accent_hover` | `#10B981` | hover and active fills of accent widgets |
+| `ok` | `#34D399` | Auto ON, success icons, quota bar low end |
 | `warn` | `#D29922` | NeedsApproval |
 | `danger` | `#F85149` | errors |
 | `diff_del_bg` | `#4B1D22` | removed lines |
