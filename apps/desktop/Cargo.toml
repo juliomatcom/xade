@@ -1,6 +1,6 @@
 [package]
 name = "xade"
-version = "0.1.0"
+version = "0.2.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,6 +13,7 @@ xade-runtime = { path = "../../crates/runtime" }
 xade-store = { path = "../../crates/store" }
 dirs = "=7.0.0"
 fontdb = "=0.24.0"
+nucleo-matcher = "=0.3.1"
 egui = { version = "=0.37.0", features = ["monochrome_emoji_fonts"] }
 egui_commonmark = { version = "=0.26.0", features = ["better_syntax_highlighting"] }
 egui_extras = { version = "=0.37.0", features = ["syntect"] }
@@ -28,6 +29,9 @@ two-face = { version = "=0.5.2", default-features = false, features = ["syntect-
 tracing-appender = "=0.2.5"
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 uuid = { version = "=1.29.3", features = ["v4"] }
+ignore = "=0.4.35"
+arboard = { version = "=3.7.0", default-features = false }
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
 
 [lints]
 workspace = true

@@ -116,8 +116,12 @@ impl SessionManager {
                     self.create(session, cwd).await;
                 }
                 ManagerCmd::Open { session_id } => self.open(session_id).await,
-                ManagerCmd::Send { session_id, text } => {
-                    self.forward(session_id, ActorCmd::Send(text));
+                ManagerCmd::Send {
+                    session_id,
+                    text,
+                    delivery,
+                } => {
+                    self.forward(session_id, ActorCmd::Send(text, delivery));
                 }
                 ManagerCmd::Interrupt { session_id } => {
                     self.forward(session_id, ActorCmd::Interrupt);
@@ -180,7 +184,7 @@ impl SessionManager {
     fn forward(&mut self, id: SessionId, cmd: ActorCmd) {
         if self.dormant.contains_key(&id) {
             match cmd {
-                ActorCmd::Send(_) => {
+                ActorCmd::Send(..) => {
                     if !self.wake(id) {
                         return;
                     }

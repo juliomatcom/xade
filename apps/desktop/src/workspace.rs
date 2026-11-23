@@ -251,6 +251,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     let mut closes = Vec::new();
     let mut reloads = Vec::new();
+    let mut attaches = Vec::new();
+    let mut indexes = Vec::new();
+    let mut images = Vec::new();
     let mut opens = Vec::new();
     let mut toggle_max = None;
     let mut user_moved = false;
@@ -360,6 +363,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let (true, WindowKind::Session(id)) = (out.reload, *kind) {
             reloads.push(id);
         }
+        if let (true, WindowKind::Session(id)) = (out.attach, *kind) {
+            attaches.push(id);
+        }
+        if let (Some(img), WindowKind::Session(id)) = (out.pasted_image.take(), *kind) {
+            images.push((id, img));
+        }
+        if let (true, WindowKind::Session(id)) = (out.index_files, *kind) {
+            indexes.push(id);
+        }
         opens.extend(out.open_file.take());
         {
             let (c, w, a) = taken.geom();
@@ -413,6 +425,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             WindowKind::Session(id) => app.close_session(id),
             WindowKind::Editor(id) => app.request_close_editor(id),
         }
+    }
+    for (id, img) in images {
+        app.attach_image(id, img);
+    }
+    for id in indexes {
+        app.index_files(id);
+    }
+    for id in attaches {
+        app.attach_dialog(id);
     }
     for id in reloads {
         app.reload_session(id);
@@ -605,6 +626,8 @@ mod tests {
             window_rect: None,
             apply_rect: None,
             sync: Default::default(),
+            mention: Default::default(),
+            attach_note: None,
         }
     }
 

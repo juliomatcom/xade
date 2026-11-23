@@ -33,7 +33,7 @@ pub async fn start(dir: &Path, provider: Arc<dyn AgentProvider>) -> Harness {
             root_path: cwd.clone(),
             display_name: "project".into(),
             last_opened_at: OffsetDateTime::now_utc(),
-            is_pinned: false,
+            is_open: true,
         }))
         .expect("upsert");
     xade_runtime::flush(&writer).await;

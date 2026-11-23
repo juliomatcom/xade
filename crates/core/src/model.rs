@@ -68,7 +68,8 @@ pub struct Workspace {
     pub root_path: PathBuf,
     pub display_name: String,
     pub last_opened_at: OffsetDateTime,
-    pub is_pinned: bool,
+    /// Listed in the sidebar; import never sets it, adding or opening a session in it does.
+    pub is_open: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -131,6 +132,35 @@ pub enum Role {
     ToolCall,
     ToolResult,
     System,
+}
+
+/// How a prompt sent while a turn was running reached the CLI; kept in a user message's
+/// `tool_name` so the badge survives a reload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delivery {
+    Queued,
+    Steered,
+}
+
+impl Delivery {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Delivery::Queued => "queued",
+            Delivery::Steered => "steered",
+        }
+    }
+
+    /// The delivery recorded on a user message, if any.
+    pub fn of(m: &Message) -> Option<Delivery> {
+        if m.role != Role::User {
+            return None;
+        }
+        match m.tool_name.as_deref() {
+            Some("queued") => Some(Delivery::Queued),
+            Some("steered") => Some(Delivery::Steered),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

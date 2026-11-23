@@ -6,8 +6,10 @@
 - FTS5 trigram `search_index` is filled only by triggers: session titles, and message text for user/assistant roles.
 - Search: empty lists; under 3 chars is `LIKE` on title and preview; otherwise FTS plus a nucleo title fuzzy pass. Rank: exact title substring, FTS bm25, fuzzy-only score; ties by `updated_at` newest.
 - Pages are zero-based; `max_seq` is 0 for a session with no messages. Timestamps are fixed-width UTC RFC3339 text.
+- A user message sent while a turn ran has `tool_name` `queued` or `steered` (`Delivery`); the chat badge reads it. New sessions start with `last_model_choice` (model and effort of the latest Xade session).
 - `sessions.origin` is `xade` or `claude_code`; `(provider_id, provider_session_id)` is unique. `quota` holds the last window per kind; the actor writes it on every `Quota` event.
 - Import (`WriteOp::ImportSession`) upserts the workspace by path and the session by provider id in one transaction, never touches an `xade` origin row, replaces messages (and their search rows), and keeps effort, cost and a known context max.
+- `workspaces.is_open` is what the sidebar lists: set by Add Directory and `TouchWorkspace` (any session open or create), cleared by `WriteOp::CloseWorkspace`, never set by Import; Home cards and names still use every workspace.
 - Deltas and session status are never stored; there is no attachments table yet.
 - Every Import skips sessions whose cwd is missing or under a temp root (`throwaway::is_throwaway_dir`), first running `WriteOp::PruneThrowaway`: deletes `claude_code` sessions in throwaway workspaces, then session-less throwaway workspaces.
 - `WriteOp::DeleteSession` removes the row (messages and search rows cascade); `ManagerCmd::DeleteSession` is Xade-origin only, closes the live session, deletes the CLI transcript first (provider error aborts, nothing deleted), so Import cannot resurrect it.

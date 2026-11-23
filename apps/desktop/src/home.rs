@@ -162,7 +162,7 @@ fn scope_dropdown(app: &mut App, ui: &mut egui::Ui) {
             {
                 picked = Some(None);
             }
-            for w in &app.home.workspaces {
+            for w in app.home.workspaces.iter().filter(|w| w.is_open) {
                 let sel = app.home.scope == Some(w.id);
                 if ui.selectable_label(sel, &w.display_name).clicked() {
                     picked = Some(Some(w.id));
@@ -290,6 +290,7 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                         .home
                         .workspaces
                         .iter()
+                        .filter(|w| w.is_open)
                         .map(|w| {
                             let name = w.display_name.clone();
                             (w.id, w.root_path.clone(), name, app.live_count(w.id))
@@ -298,6 +299,7 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                     // Only expanded folders are walked and off-screen rows are not painted, so
                     // uneven row heights rule out `show_rows`.
                     let mut actions = Vec::new();
+                    let mut close = None;
                     egui::ScrollArea::vertical()
                         .id_salt("workspaces")
                         .auto_shrink([false, false])
@@ -321,6 +323,12 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                                     set_scope(app, Some(*id));
                                     actions.push(TreeAction::Toggle(root.clone()));
                                 }
+                                resp.context_menu(|ui| {
+                                    if ui.button("Close workspace").clicked() {
+                                        close = Some(*id);
+                                        ui.close();
+                                    }
+                                });
                                 let changed = match app.git.get(root) {
                                     Some(GitState::Repo { changed, .. }) => Some(changed),
                                     _ => None,
@@ -330,6 +338,9 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                         });
                     for action in actions {
                         app.tree_action(action);
+                    }
+                    if let Some(id) = close {
+                        app.close_workspace(id);
                     }
                 });
             });
@@ -486,7 +497,7 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
     if app.home.cards.is_empty() {
         let msg = if !app.home.search.trim().is_empty() {
             "No sessions match your search."
-        } else if app.home.workspaces.is_empty() {
+        } else if !app.home.workspaces.iter().any(|w| w.is_open) {
             "Add a directory to get started."
         } else {
             "No sessions yet. Select a workspace and start a new session."
@@ -1112,7 +1123,7 @@ mod tests {
             root_path: root.clone(),
             display_name: "proj".into(),
             last_opened_at: OffsetDateTime::now_utc(),
-            is_pinned: false,
+            is_open: true,
         }];
         for p in [root.clone(), root.join("sub"), root.join("missing")] {
             app.tree.toggle(&p);

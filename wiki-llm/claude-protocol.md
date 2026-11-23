@@ -11,6 +11,8 @@ Verified against Claude Code 2.1.330 with fixtures in `crates/claude/fixtures/` 
 ## Stdin (we send)
 - Prompt: `{"type":"user","session_id":"<id or empty>","parent_tool_use_id":null,"message":{"role":"user","content":[{"type":"text","text":…}]}}`.
 - Allow: `{"type":"control_response","response":{"subtype":"success","request_id":R,"response":{"behavior":"allow","updatedInput":<input>}}}`; deny: `…"response":{"behavior":"deny","message":"…"}`.
+- `@path` and `@"path with spaces"` in the prompt text are expanded by the CLI itself (fixtures `at_mention`, `at_mention_spaces`): the file is read with no tool call or permission prompt.
+- Images (`@red.png`, inside or outside the cwd) are expanded the same way (fixtures `at_image`, `at_image_outside`); PDFs and binaries are not: the model reaches for Read/Bash (fixtures `at_pdf`, `at_binary`), which can raise permission prompts.
 - A prompt written while a turn runs is folded into it at the next tool boundary; one `result` ends both (fixture `steer`).
 - Interrupt: `{"type":"control_request","request_id":<ours>,"request":{"subtype":"interrupt"}}`; acked by `control_response`. Process stays alive.
 - No `initialize` request is needed (fixture `init_first` shows it is accepted but optional).

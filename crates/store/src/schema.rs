@@ -13,9 +13,17 @@ use xade_core::{Effort, ProviderId, QuotaKind, Role, SessionId, SessionOrigin, W
 use crate::StoreError;
 
 /// Migrations in order; `PRAGMA user_version` is the count already applied.
-const MIGRATIONS: &[&str] = &[V1, V2];
+const MIGRATIONS: &[&str] = &[V1, V2, V3];
 
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
+
+/// `is_pinned` was never used; it becomes `is_open` and only the most recently opened
+/// workspace stays in the sidebar.
+const V3: &str = "
+ALTER TABLE workspaces RENAME COLUMN is_pinned TO is_open;
+UPDATE workspaces SET is_open = 1
+ WHERE id = (SELECT id FROM workspaces ORDER BY last_opened_at DESC LIMIT 1);
+";
 
 const V1: &str = "
 CREATE TABLE workspaces (
@@ -321,5 +329,27 @@ mod tests {
             .pragma_query_value(None, "user_version", |r| r.get(0))
             .unwrap();
         assert_eq!(v, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v3_keeps_only_the_most_recent_workspace_open() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1).unwrap();
+        conn.execute_batch(V2).unwrap();
+        conn.pragma_update(None, "user_version", 2).unwrap();
+        conn.execute_batch(
+            "INSERT INTO workspaces VALUES ('old', '/a', 'a', '2026-01-01T00:00:00Z', 0);
+             INSERT INTO workspaces VALUES ('new', '/b', 'b', '2026-02-01T00:00:00Z', 0);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let open: Vec<String> = conn
+            .prepare("SELECT id FROM workspaces WHERE is_open = 1")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(open, ["new"]);
     }
 }

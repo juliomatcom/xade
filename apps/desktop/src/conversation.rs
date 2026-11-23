@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use egui::RichText;
 use egui_commonmark::CommonMarkCache;
-use xade_core::{Message, Role, SessionStatus};
+use xade_core::{Delivery, Message, Role, SessionStatus};
 
 use crate::app::SessionVm;
 use crate::theme;
@@ -155,6 +155,13 @@ fn user_bubble(
                 ui.set_width(ui.available_width());
                 // The row is a horizontal layout; the bubble's own content stacks vertically.
                 ui.vertical(|ui| {
+                    if let Some(d) = Delivery::of(m) {
+                        let (label, color) = match d {
+                            Delivery::Queued => ("Queued", theme::TEXT_MUTED),
+                            Delivery::Steered => ("Steering", theme::WARN),
+                        };
+                        ui.label(RichText::new(label).small().strong().color(color));
+                    }
                     let shown = if long && !open {
                         let cut = m
                             .content_text
@@ -189,17 +196,44 @@ fn assistant(
 ) -> Option<PathBuf> {
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 4.0, theme::CLAUDE);
-        ui.painter().text(
-            rect.center(),
-            egui::Align2::CENTER_CENTER,
-            "A",
-            egui::FontId::proportional(12.0),
-            theme::BG_APP,
-        );
+        if let Some(tex) = claude_symbol(ui.ctx()) {
+            egui::Image::new(&tex).paint_at(ui, rect);
+        }
         ui.vertical(body).inner
     })
     .inner
+}
+
+/// The Claude symbol (`assets/claude-symbol.svg`, CC0, rendered to PNG at 4x the avatar).
+const CLAUDE_SYMBOL: &[u8] = include_bytes!("../../../assets/claude-symbol.png");
+
+/// The symbol as a texture, decoded and uploaded on first use.
+fn claude_symbol(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let id = egui::Id::unique("claude_symbol_texture");
+    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
+        return Some(tex);
+    }
+    let icon = eframe::icon_data::from_png_bytes(CLAUDE_SYMBOL)
+        .map_err(|e| tracing::warn!("claude symbol not loaded: {e}"))
+        .ok()?;
+    let image = egui::ColorImage::from_rgba_unmultiplied(
+        [icon.width as usize, icon.height as usize],
+        &icon.rgba,
+    );
+    let tex = ctx.load_texture("claude_symbol", image, egui::TextureOptions::LINEAR);
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    Some(tex)
+}
+
+#[cfg(test)]
+mod symbol_tests {
+    #[test]
+    fn the_claude_symbol_decodes_into_a_texture() {
+        let ctx = egui::Context::default();
+        let tex = super::claude_symbol(&ctx).expect("symbol");
+        assert_eq!(tex.size(), [80, 80]);
+        assert!(super::claude_symbol(&ctx).is_some(), "cached second call");
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +366,8 @@ mod tests {
             window_rect: None,
             apply_rect: None,
             sync: Default::default(),
+            mention: Default::default(),
+            attach_note: None,
         }
     }
 

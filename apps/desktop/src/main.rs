@@ -1,4 +1,5 @@
 mod app;
+mod attach;
 mod chrome;
 mod composer;
 mod config;
@@ -11,6 +12,7 @@ mod home;
 mod icons;
 mod keymap;
 mod logging;
+mod mention;
 mod running;
 mod send_anim;
 mod session_view;

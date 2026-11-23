@@ -20,10 +20,12 @@ use crate::StoreError;
 const PREVIEW_CHARS: usize = 200;
 
 pub enum WriteOp {
-    /// Insert, or update display name, last-opened time and pin by `root_path`.
+    /// Insert, or update display name, last-opened time and `is_open` by `root_path`.
     UpsertWorkspace(Workspace),
-    /// Sets `last_opened_at` to now.
+    /// Sets `last_opened_at` to now and lists the workspace in the sidebar.
     TouchWorkspace(WorkspaceId),
+    /// Removes the workspace from the sidebar; its sessions stay.
+    CloseWorkspace(WorkspaceId),
     /// Stored as given, including `updated_at`.
     InsertSession(Session),
     /// `None` fields are left unchanged; `updated_at` is always set to now.
@@ -174,25 +176,31 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
     match op {
         WriteOp::UpsertWorkspace(w) => {
             tx.execute(
-                "INSERT INTO workspaces (id, root_path, display_name, last_opened_at, is_pinned)
+                "INSERT INTO workspaces (id, root_path, display_name, last_opened_at, is_open)
                  VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(root_path) DO UPDATE SET
                     display_name = excluded.display_name,
                     last_opened_at = excluded.last_opened_at,
-                    is_pinned = excluded.is_pinned",
+                    is_open = excluded.is_open",
                 params![
                     w.id.0.to_string(),
                     w.root_path.to_string_lossy(),
                     w.display_name,
                     fmt_ts(w.last_opened_at),
-                    w.is_pinned
+                    w.is_open
                 ],
             )?;
         }
         WriteOp::TouchWorkspace(id) => {
             tx.execute(
-                "UPDATE workspaces SET last_opened_at = ?1 WHERE id = ?2",
+                "UPDATE workspaces SET last_opened_at = ?1, is_open = 1 WHERE id = ?2",
                 params![now, id.0.to_string()],
+            )?;
+        }
+        WriteOp::CloseWorkspace(id) => {
+            tx.execute(
+                "UPDATE workspaces SET is_open = 0 WHERE id = ?1",
+                params![id.0.to_string()],
             )?;
         }
         WriteOp::InsertSession(s) => {
@@ -420,7 +428,7 @@ fn import_session(
         |n| n.to_string_lossy().into_owned(),
     );
     tx.execute(
-        "INSERT INTO workspaces (id, root_path, display_name, last_opened_at, is_pinned)
+        "INSERT INTO workspaces (id, root_path, display_name, last_opened_at, is_open)
          VALUES (?1, ?2, ?3, ?4, 0) ON CONFLICT(root_path) DO NOTHING",
         params![
             WorkspaceId::new().0.to_string(),

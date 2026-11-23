@@ -8,8 +8,8 @@ use std::path::PathBuf;
 
 use tokio::sync::oneshot;
 use xade_core::{
-    Effort, Message, ProviderEvent, ProviderId, QuotaWindow, Session, SessionId, SessionStatus,
-    WorkspaceId,
+    Delivery, Effort, Message, ProviderEvent, ProviderId, QuotaWindow, Session, SessionId,
+    SessionStatus, WorkspaceId,
 };
 use xade_store::WriterHandle;
 
@@ -32,6 +32,8 @@ pub enum ManagerCmd {
     Send {
         session_id: SessionId,
         text: String,
+        /// `Some` when sent while a turn was running.
+        delivery: Option<Delivery>,
     },
     Interrupt {
         session_id: SessionId,

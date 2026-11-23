@@ -41,6 +41,12 @@ fn turns(ev: &[ProviderEvent]) -> Vec<&ProviderEvent> {
 #[test]
 fn every_fixture_parses_without_error() {
     for name in [
+        "at_binary",
+        "at_image",
+        "at_image_outside",
+        "at_mention",
+        "at_mention_spaces",
+        "at_pdf",
         "edit_allow",
         "init_first",
         "interrupt",
@@ -262,4 +268,53 @@ fn thinking_tokens() {
 fn resume() {
     let ev = run("resume");
     assert_eq!(turns(&ev).len(), 1);
+}
+
+/// The CLI expands `@path` mentions itself: the file is read without a tool call.
+#[test]
+fn at_mentions_are_answered_without_a_tool_call() {
+    for name in ["at_mention", "at_mention_spaces"] {
+        let ev = run(name);
+        assert!(
+            ev.iter().any(
+                |e| matches!(e, ProviderEvent::AssistantText { text } if text.contains("kumquat7"))
+            ),
+            "{name}: answer from the mentioned file"
+        );
+        assert!(
+            !ev.iter()
+                .any(|e| matches!(e, ProviderEvent::ToolUse { .. })),
+            "{name}: no tool call"
+        );
+        assert_eq!(turns(&ev).len(), 1, "{name}");
+    }
+}
+
+fn used_a_tool(ev: &[ProviderEvent]) -> bool {
+    ev.iter()
+        .any(|e| matches!(e, ProviderEvent::ToolUse { .. }))
+}
+
+/// Images are expanded by the CLI itself, inside the project and outside it.
+#[test]
+fn image_mentions_are_seen_without_a_tool_call() {
+    for name in ["at_image", "at_image_outside"] {
+        let ev = run(name);
+        assert!(
+            ev.iter().any(
+                |e| matches!(e, ProviderEvent::AssistantText { text } if text.contains("Red"))
+            ),
+            "{name}: the model saw the image"
+        );
+        assert!(!used_a_tool(&ev), "{name}: no tool call");
+    }
+}
+
+/// PDFs and binaries are not expanded: the model reaches for tools instead, which is why
+/// the composer only attaches text, images and PDFs.
+#[test]
+fn pdf_and_binary_mentions_make_the_model_use_tools() {
+    for name in ["at_pdf", "at_binary"] {
+        assert!(used_a_tool(&run(name)), "{name}");
+    }
 }

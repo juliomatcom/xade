@@ -9,15 +9,15 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
 use uuid::Uuid;
 use xade_core::{
-    AgentProvider, Effort, Message, ProviderEvent, Role, Session, SessionCommand, SessionHandle,
-    SessionId, SessionStatus, SpawnConfig,
+    AgentProvider, Delivery, Effort, Message, ProviderEvent, Role, Session, SessionCommand,
+    SessionHandle, SessionId, SessionStatus, SpawnConfig,
 };
 use xade_store::{WriteOp, WriterHandle};
 
 use crate::{AppEvent, AppEventKind};
 
 pub(crate) enum ActorCmd {
-    Send(String),
+    Send(String, Option<Delivery>),
     Interrupt,
     Respond {
         request_id: String,
@@ -152,7 +152,7 @@ impl Actor {
     /// Returns false when the actor should end.
     async fn on_cmd(&mut self, cmd: ActorCmd) -> bool {
         match cmd {
-            ActorCmd::Send(text) => {
+            ActorCmd::Send(text, delivery) => {
                 // A prompt sent mid-turn steers the running turn: the CLI folds it in at the
                 // next tool boundary and ends both with one result.
                 if !matches!(self.status, SessionStatus::Idle | SessionStatus::Streaming) {
@@ -170,7 +170,8 @@ impl Actor {
                         self.write(op);
                     }
                 }
-                let msg = self.insert_message(Role::User, text.clone());
+                let mut msg = self.insert_message(Role::User, text.clone());
+                msg.tool_name = delivery.map(|d| d.tag().to_string());
                 self.write(WriteOp::InsertMessage(msg));
                 if self.status != SessionStatus::Streaming {
                     self.set_status(SessionStatus::Streaming);

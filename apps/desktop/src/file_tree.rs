@@ -1,4 +1,4 @@
-//! Sidebar file tree: lazy `read_dir` per expanded folder, cached until it is collapsed.
+//! Sidebar file tree: lazy `read_dir` per expanded folder, re-read every few seconds while expanded.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -57,6 +57,11 @@ pub struct FileTree {
 impl FileTree {
     pub fn is_expanded(&self, path: &Path) -> bool {
         self.nodes.contains_key(path)
+    }
+
+    /// Every expanded folder.
+    pub fn expanded(&self) -> Vec<PathBuf> {
+        self.nodes.keys().cloned().collect()
     }
 
     /// Collapses an expanded folder (dropping its cache and its subfolders') and returns

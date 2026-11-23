@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use time::OffsetDateTime;
 use xade_core::{
-    Message, ProviderId, QuotaWindow, Session, SessionId, SessionOrigin, UsageTotals, Workspace,
-    WorkspaceId,
+    Effort, Message, ProviderId, QuotaWindow, Session, SessionId, SessionOrigin, UsageTotals,
+    Workspace, WorkspaceId,
 };
 
 use crate::schema::{self, to_u64};
@@ -64,6 +64,25 @@ impl StoreReader {
     ) -> Result<Page<SessionCard>, StoreError> {
         self.with_conn(move |c| list_sessions(c, scope, origin, page, page_size))
             .await
+    }
+
+    /// Model and effort of the most recently updated session created in Xade.
+    pub async fn last_model_choice(&self) -> Result<Option<(String, Effort)>, StoreError> {
+        self.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT model_id, effort FROM sessions WHERE origin = 'xade'
+                 ORDER BY updated_at DESC LIMIT 1",
+                [],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        schema::parse_effort(1, &r.get::<_, String>(1)?)?,
+                    ))
+                },
+            )
+            .optional()?)
+        })
+        .await
     }
 
     /// Last saved quota windows (at most one per kind), possibly stale: check `resets_at`.
@@ -127,7 +146,7 @@ pub(crate) fn card_from_row(r: &Row) -> rusqlite::Result<SessionCard> {
 
 fn list_workspaces(conn: &Connection) -> Result<Vec<Workspace>, StoreError> {
     let mut stmt = conn.prepare(
-        "SELECT id, root_path, display_name, last_opened_at, is_pinned
+        "SELECT id, root_path, display_name, last_opened_at, is_open
          FROM workspaces ORDER BY last_opened_at DESC",
     )?;
     let rows = stmt.query_map([], |r| {
@@ -136,7 +155,7 @@ fn list_workspaces(conn: &Connection) -> Result<Vec<Workspace>, StoreError> {
             root_path: PathBuf::from(r.get::<_, String>(1)?),
             display_name: r.get(2)?,
             last_opened_at: schema::parse_ts(3, &r.get::<_, String>(3)?)?,
-            is_pinned: r.get(4)?,
+            is_open: r.get(4)?,
         })
     })?;
     Ok(rows.collect::<Result<_, _>>()?)

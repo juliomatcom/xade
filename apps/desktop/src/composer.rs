@@ -1,14 +1,16 @@
 //! Prompt input, send/stop, model and effort pickers, Auto toggle and the context and usage meters.
 
+use std::path::{Path, PathBuf};
+
 use egui::{Key, Modifiers, RichText};
-use xade_core::{Effort, ModelOption, SessionStatus, UsageTotals};
+use xade_core::{Delivery, Effort, ModelOption, SessionStatus, UsageTotals};
 use xade_runtime::ManagerCmd;
 
 use crate::app::{push_user_message, SessionVm};
 use crate::config::SendMode;
 use crate::running::{self, CacheKind};
 use crate::workspace::Env;
-use crate::{icons, send_anim, theme};
+use crate::{attach, icons, mention, send_anim, theme};
 
 /// The input grows with its text between these row counts, then scrolls.
 const INPUT_MIN_ROWS: usize = 2;
@@ -16,7 +18,19 @@ const INPUT_MAX_ROWS: usize = 10;
 /// Side of the (square) send button, and height of Stop.
 const BUTTON_SIZE: f32 = 48.0;
 
-pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
+/// What the composer asks of the app after drawing.
+#[derive(Default)]
+pub struct ComposerOut {
+    /// The attach button was clicked.
+    pub attach: bool,
+    /// The `@` popup is open and needs the folder's file list.
+    pub index: bool,
+    /// An image pasted from the clipboard, still to be encoded and saved.
+    pub pasted_image: Option<std::sync::Arc<egui::ColorImage>>,
+}
+
+pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
+    let mut out = ComposerOut::default();
     let id = vm.session.id;
     let idle = vm.status == SessionStatus::Idle;
     let streaming = vm.status == SessionStatus::Streaming;
@@ -30,6 +44,23 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     let hotkey_other = focused
         && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter));
     let hotkey = focused && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
+    // Pasting copied files or an image attaches them, like the attach button.
+    if focused {
+        if let Some(files) = ui.input_mut(|i| take_pasted_files(&mut i.events, clipboard_files)) {
+            insert_mentions(vm, &files);
+        }
+        out.pasted_image = ui.input_mut(|i| take_pasted_image(&mut i.events));
+    }
+    let popup = mention_popup_start(ui, vm, input_id, focused, &mut out);
+    if let Some((text, at)) = &vm.attach_note {
+        if at.elapsed() >= ATTACH_NOTE_TTL {
+            vm.attach_note = None;
+        } else {
+            ui.ctx()
+                .request_repaint_after(ATTACH_NOTE_TTL.saturating_sub(at.elapsed()));
+            note_frame(ui, text);
+        }
+    }
     if idle {
         let last = vm
             .sync
@@ -41,25 +72,10 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
             last,
             time::OffsetDateTime::now_utc(),
         ) {
-            egui::Frame::new()
-                .fill(theme::BG_RAISED)
-                .stroke(egui::Stroke::new(1.0, theme::WARN))
-                .corner_radius(6)
-                .inner_margin(egui::Margin::symmetric(8, 4))
-                .show(ui, |ui| {
-                    ui.add(
-                        egui::Label::new(
-                            RichText::new(icons::with(icons::WARNING, &text))
-                                .small()
-                                .color(theme::WARN),
-                        )
-                        .wrap(),
-                    );
-                });
-            ui.add_space(4.0);
+            note_frame(ui, &text);
         }
     }
-    egui::Frame::new()
+    let input_box = egui::Frame::new()
         .fill(theme::BG_HOVER)
         .stroke(egui::Stroke::new(1.5, theme::BORDER_STRONG))
         .corner_radius(8)
@@ -136,6 +152,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
                 });
             });
         });
+    mention_popup_show(ui, vm, input_id, input_box.response.rect, popup);
     if let Some(other) = send {
         send_anim::trigger(ui.ctx(), id);
         let text = std::mem::take(&mut vm.input);
@@ -148,12 +165,159 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
         if running && !(mode == SendMode::Steer && streaming) {
             vm.queued.push_back(text);
         } else {
-            send_now(vm, env, text);
+            let delivery = running.then_some(Delivery::Steered);
+            send_now(vm, env, text, delivery);
         }
     }
     queued_rows(ui, vm);
 
-    controls(ui, vm, env);
+    out.attach = controls(ui, vm, env);
+    out
+}
+
+/// A mention being typed at the cursor, while the popup is showing.
+struct Typing {
+    start: usize,
+    cursor: usize,
+}
+
+/// Decides whether the `@` popup is open this frame and handles its keys (Up/Down, Enter or
+/// Tab to pick, Esc to dismiss) before the text box sees them.
+fn mention_popup_start(
+    ui: &egui::Ui,
+    vm: &mut SessionVm,
+    input_id: egui::Id,
+    focused: bool,
+    out: &mut ComposerOut,
+) -> Option<Typing> {
+    let ctx = ui.ctx();
+    let cursor = egui::TextEdit::load_state(ctx, input_id)
+        .and_then(|s| s.cursor.char_range())
+        .map(|r| r.primary.index.0);
+    let pointer = ui.input(|i| i.pointer.latest_pos());
+    let on_popup = vm
+        .mention
+        .popup_rect
+        .zip(pointer)
+        .is_some_and(|(r, p)| r.contains(p));
+    let found = cursor
+        .filter(|_| focused || on_popup)
+        .and_then(|c| mention::active(&vm.input, c).map(|a| (a, c)));
+    let Some((active, cursor)) = found else {
+        vm.mention.dismissed = None;
+        vm.mention.popup_rect = None;
+        return None;
+    };
+    if vm.mention.dismissed == Some(active.start) {
+        vm.mention.popup_rect = None;
+        return None;
+    }
+    if vm.mention.needs_index() {
+        out.index = true;
+    }
+    vm.mention.update(&active.query);
+    let (esc, up, down, accept) = ui.input_mut(|i| {
+        let none = Modifiers::NONE;
+        let esc = i.consume_key(none, Key::Escape);
+        let has = !vm.mention.matches.is_empty();
+        (
+            esc,
+            has && i.consume_key(none, Key::ArrowUp),
+            has && i.consume_key(none, Key::ArrowDown),
+            has && (i.consume_key(none, Key::Enter) || i.consume_key(none, Key::Tab)),
+        )
+    });
+    if esc {
+        vm.mention.dismissed = Some(active.start);
+        vm.mention.popup_rect = None;
+        return None;
+    }
+    if up {
+        vm.mention.step(false);
+    }
+    if down {
+        vm.mention.step(true);
+    }
+    let typing = Typing {
+        start: active.start,
+        cursor,
+    };
+    if accept {
+        let picked = vm.mention.selected;
+        accept_mention(ctx, vm, input_id, &typing, picked);
+        vm.mention.popup_rect = None;
+        return None;
+    }
+    Some(typing)
+}
+
+/// Replaces the typed `@query` with the `idx`-th match and puts the cursor after it.
+fn accept_mention(
+    ctx: &egui::Context,
+    vm: &mut SessionVm,
+    input_id: egui::Id,
+    typing: &Typing,
+    idx: usize,
+) {
+    let Some(path) = vm.mention.matches.get(idx).cloned() else {
+        return;
+    };
+    let (text, cursor) = mention::apply(&vm.input, typing.start, typing.cursor, &path);
+    vm.input = text;
+    let mut state = egui::TextEdit::load_state(ctx, input_id).unwrap_or_default();
+    state
+        .cursor
+        .set_char_range(Some(egui::text::CCursorRange::one(
+            egui::text::CCursor::new(cursor),
+        )));
+    state.store(ctx, input_id);
+    ctx.memory_mut(|m| m.request_focus(input_id));
+}
+
+/// Draws the popup above the input box; a click picks a row.
+fn mention_popup_show(
+    ui: &egui::Ui,
+    vm: &mut SessionVm,
+    input_id: egui::Id,
+    input_box: egui::Rect,
+    typing: Option<Typing>,
+) {
+    let Some(typing) = typing else {
+        return;
+    };
+    let ctx = ui.ctx().clone();
+    let width = input_box.width().min(560.0);
+    let mut clicked = None;
+    let area = egui::Area::new(egui::Id::unique(("mention_popup", vm.session.id)))
+        .order(egui::Order::Foreground)
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .fixed_pos(input_box.left_top() - egui::vec2(0.0, 4.0))
+        .show(&ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.set_width(width - 16.0);
+                if vm.mention.matches.is_empty() {
+                    let msg = if matches!(vm.mention.files, mention::Files::Ready { .. }) {
+                        "No matching files"
+                    } else {
+                        "Listing files\u{2026}"
+                    };
+                    ui.label(RichText::new(msg).small().color(theme::TEXT_MUTED));
+                }
+                for (i, path) in vm.mention.matches.iter().enumerate() {
+                    let row = egui::Button::selectable(i == vm.mention.selected, path)
+                        .truncate()
+                        .min_size(egui::vec2(ui.available_width(), 0.0));
+                    if ui.add(row).clicked() {
+                        clicked = Some(i);
+                    }
+                }
+            });
+        });
+    vm.mention.popup_rect = Some(area.response.rect);
+    if let Some(i) = clicked {
+        accept_mention(&ctx, vm, input_id, &typing, i);
+        vm.mention.popup_rect = None;
+    }
 }
 
 /// Shown above the input when the prompt cache has expired: the next message resends the whole
@@ -176,12 +340,14 @@ fn send_note(
 }
 
 /// Shows the user's message and hands it to the session.
-pub fn send_now(vm: &mut SessionVm, env_cmd: &Env, text: String) {
-    push_user_message(vm, text.clone());
+pub fn send_now(vm: &mut SessionVm, env_cmd: &Env, text: String, delivery: Option<Delivery>) {
+    push_user_message(vm, text.clone(), delivery);
     vm.error = None;
+    vm.attach_note = None;
     let _ = env_cmd.cmd_tx.send(ManagerCmd::Send {
         session_id: vm.session.id,
         text,
+        delivery,
     });
 }
 
@@ -213,7 +379,8 @@ fn queued_rows(ui: &mut egui::Ui, vm: &mut SessionVm) {
     }
 }
 
-fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
+/// Returns whether the attach button was clicked.
+fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool {
     let id = vm.session.id;
     let provider = env
         .providers
@@ -223,6 +390,13 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     let fallback = provider.map(|p| p.effort_levels()).unwrap_or_default();
     let efforts = effort_choices(&models, &vm.session.model_id, &fallback);
     ui.horizontal(|ui| {
+        let attach = ui
+            .add(
+                egui::Button::new(RichText::new("+").size(20.0).strong())
+                    .min_size(egui::vec2(30.0, 28.0)),
+            )
+            .on_hover_text("Attach files (or type @ or drop files here): adds @path mentions")
+            .clicked();
         ui.label(RichText::new("Model").small().color(theme::TEXT_MUTED));
         let current = models
             .iter()
@@ -319,7 +493,98 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
             )
             .on_hover_text(stats);
         });
+        attach
+    })
+    .inner
+}
+
+/// `@path` for the CLI to expand: relative to the session folder when inside it, quoted when
+/// the path has whitespace.
+pub fn mention(cwd: &Path, path: &Path) -> String {
+    mention::token(&path.strip_prefix(cwd).unwrap_or(path).to_string_lossy())
+}
+
+/// A warning line with the warning icon, above the input.
+fn note_frame(ui: &mut egui::Ui, text: &str) {
+    egui::Frame::new()
+        .fill(theme::BG_RAISED)
+        .stroke(egui::Stroke::new(1.0, theme::WARN))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .show(ui, |ui| {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(icons::with(icons::WARNING, text))
+                        .small()
+                        .color(theme::WARN),
+                )
+                .wrap(),
+            );
+        });
+    ui.add_space(4.0);
+}
+
+/// Files on the system clipboard (e.g. copied in Finder), if any.
+fn clipboard_files() -> Option<Vec<PathBuf>> {
+    let files = arboard::Clipboard::new().ok()?.get().file_list().ok()?;
+    (!files.is_empty()).then_some(files)
+}
+
+/// When the events hold a paste and `files` finds copied files, drops the paste (it would
+/// only insert the file names as text) and returns them.
+fn take_pasted_files(
+    events: &mut Vec<egui::Event>,
+    files: impl FnOnce() -> Option<Vec<PathBuf>>,
+) -> Option<Vec<PathBuf>> {
+    let is_paste =
+        |e: &egui::Event| matches!(e, egui::Event::Paste(_) | egui::Event::PasteImage(_));
+    if !events.iter().any(is_paste) {
+        return None;
+    }
+    let files = files()?;
+    events.retain(|e| !is_paste(e));
+    Some(files)
+}
+
+/// When the events hold a pasted image, drops them and returns the image.
+fn take_pasted_image(events: &mut Vec<egui::Event>) -> Option<std::sync::Arc<egui::ColorImage>> {
+    let mut image = None;
+    events.retain(|e| match e {
+        egui::Event::PasteImage(img) => {
+            image = Some(img.clone());
+            false
+        }
+        _ => true,
     });
+    image
+}
+
+/// How long a refused-attachment note stays above the input.
+const ATTACH_NOTE_TTL: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Shows `message` above the input for a while.
+pub fn set_attach_note(vm: &mut SessionVm, message: String) {
+    vm.attach_note = Some((message, std::time::Instant::now()));
+}
+
+/// Appends a mention per attachable path to the input, separated by spaces. Files refused
+/// (binary, over the size limit, unreadable) are explained in a note above the input.
+pub fn insert_mentions(vm: &mut SessionVm, paths: &[PathBuf]) {
+    let mut rejected = Vec::new();
+    for path in paths {
+        if let Err(why) = attach::check(path) {
+            rejected.push((path.clone(), why));
+            continue;
+        }
+        if !vm.input.is_empty() && !vm.input.ends_with(char::is_whitespace) {
+            vm.input.push(' ');
+        }
+        vm.input.push_str(&mention(&vm.cwd, path));
+        vm.input.push(' ');
+    }
+    if !rejected.is_empty() {
+        set_attach_note(vm, attach::rejected_message(&rejected));
+    }
 }
 
 /// `Default` plus the levels of the model with this exact id; `fallback` when the id is unknown.
@@ -432,7 +697,161 @@ mod tests {
             window_rect: None,
             apply_rect: None,
             sync: Default::default(),
+            mention: Default::default(),
+            attach_note: None,
         }
+    }
+
+    #[test]
+    fn mentions_are_relative_inside_the_folder_and_quoted_with_spaces() {
+        let cwd = Path::new("/p");
+        assert_eq!(mention(cwd, Path::new("/p/src/a.rs")), "@src/a.rs");
+        assert_eq!(
+            mention(cwd, Path::new("/elsewhere/b.txt")),
+            "@/elsewhere/b.txt"
+        );
+        assert_eq!(
+            mention(cwd, Path::new("/p/my notes.txt")),
+            "@\"my notes.txt\""
+        );
+    }
+
+    #[test]
+    fn pasting_copied_files_replaces_the_text_paste() {
+        let files = || Some(vec![PathBuf::from("/p/a.rs")]);
+        let typed = egui::Event::Text("x".into());
+        let paste = egui::Event::Paste("a.rs".into());
+
+        let mut events = vec![typed.clone(), paste.clone()];
+        assert_eq!(
+            take_pasted_files(&mut events, files),
+            Some(vec![PathBuf::from("/p/a.rs")])
+        );
+        assert_eq!(events.len(), 1, "the text paste is dropped");
+        assert!(matches!(events[0], egui::Event::Text(_)));
+
+        // Plain text on the clipboard keeps its normal paste.
+        let mut events = vec![paste.clone()];
+        assert_eq!(take_pasted_files(&mut events, || None), None);
+        assert_eq!(events, [paste]);
+
+        // Without a paste the clipboard is not even read.
+        let mut events = vec![typed];
+        assert_eq!(take_pasted_files(&mut events, || panic!("read")), None);
+    }
+
+    #[test]
+    fn inserted_mentions_are_space_separated_and_keep_the_typed_text() {
+        let dir = std::env::temp_dir().join(format!("xade-ins-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["a.rs", "b c.rs", "d.rs"] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        let mut v = vm("look at".into());
+        v.cwd = dir.clone();
+        insert_mentions(&mut v, &[dir.join("a.rs"), dir.join("b c.rs")]);
+        assert!(v.attach_note.is_none());
+        assert_eq!(v.input, "look at @a.rs @\"b c.rs\" ");
+        insert_mentions(&mut v, &[dir.join("d.rs")]);
+        assert_eq!(v.input, "look at @a.rs @\"b c.rs\" @d.rs ");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn binary_and_missing_files_are_refused_with_a_message_and_the_rest_attached() {
+        let dir = std::env::temp_dir().join(format!("xade-ins-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("ok.rs"), "x").unwrap();
+        std::fs::write(dir.join("blob.bin"), [0u8, 1, 2]).unwrap();
+        let mut v = vm(String::new());
+        v.cwd = dir.clone();
+        insert_mentions(
+            &mut v,
+            &[
+                dir.join("blob.bin"),
+                dir.join("ok.rs"),
+                dir.join("gone.txt"),
+            ],
+        );
+        assert_eq!(v.input, "@ok.rs ");
+        let (note, _) = v.attach_note.clone().unwrap();
+        assert!(note.contains("blob.bin (binary)"), "{note}");
+        assert!(note.contains("gone.txt (unreadable)"), "{note}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Height of the composer after a frame, plus where the note's text sits relative to the
+    /// input box.
+    fn height_with_note(note: Option<(String, std::time::Instant)>) -> f32 {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            vscode: None,
+            maximized: None,
+            send_mode: crate::config::SendMode::Queue,
+        };
+        let mut v = vm(String::new());
+        v.attach_note = note;
+        let mut height = 0.0;
+        for _ in 0..3 {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(700.0, 900.0),
+                )),
+                ..Default::default()
+            };
+            ctx.run_ui(raw, |ui| {
+                height = ui.scope(|ui| show(ui, &mut v, &env)).response.rect.height();
+            })
+            .drop_without_applying_deltas();
+        }
+        assert_eq!(
+            v.attach_note.is_some(),
+            height > 0.0 && v.attach_note.is_some()
+        );
+        height
+    }
+
+    #[test]
+    fn a_refused_attachment_note_adds_a_row_above_the_input_and_expires() {
+        let plain = height_with_note(None);
+        let now = std::time::Instant::now();
+        let noted = height_with_note(Some(("Not attached: a.zip (binary).".into(), now)));
+        assert!(noted > plain + 10.0, "note row: {plain} -> {noted}");
+        let old = now - ATTACH_NOTE_TTL - std::time::Duration::from_secs(1);
+        let expired = height_with_note(Some(("stale".into(), old)));
+        assert!((expired - plain).abs() < 1.0, "expired note is gone");
+    }
+
+    #[test]
+    fn sending_clears_the_note() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            vscode: None,
+            maximized: None,
+            send_mode: crate::config::SendMode::Queue,
+        };
+        let mut v = vm("hi".into());
+        set_attach_note(&mut v, "x".into());
+        send_now(&mut v, &env, "hi".into(), None);
+        assert!(v.attach_note.is_none());
+    }
+
+    #[test]
+    fn a_pasted_image_event_is_taken_and_other_events_stay() {
+        let img = std::sync::Arc::new(egui::ColorImage::example());
+        let typed = egui::Event::Text("x".into());
+        let mut events = vec![typed, egui::Event::PasteImage(img.clone())];
+        let got = take_pasted_image(&mut events).unwrap();
+        assert!(std::sync::Arc::ptr_eq(&got, &img));
+        assert_eq!(events.len(), 1);
+        assert_eq!(take_pasted_image(&mut events), None);
     }
 
     /// The composer's rect after a few frames at this input.
@@ -463,6 +882,103 @@ mod tests {
             .drop_without_applying_deltas();
         }
         out
+    }
+
+    /// One frame of the composer with `events` fed in; returns what it asked of the app.
+    fn frame(
+        ctx: &egui::Context,
+        v: &mut SessionVm,
+        events: Vec<egui::Event>,
+        focus: bool,
+    ) -> ComposerOut {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            vscode: None,
+            maximized: None,
+            send_mode: crate::config::SendMode::Queue,
+        };
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(700.0, 900.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut out = ComposerOut::default();
+        ctx.run_ui(raw, |ui| {
+            if focus {
+                let id = ui.scope_id().with("composer_input");
+                ui.memory_mut(|m| m.request_focus(id));
+            }
+            out = show(ui, v, &env);
+        })
+        .drop_without_applying_deltas();
+        out
+    }
+
+    fn press(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn typing_at_opens_the_popup_and_enter_inserts_the_file() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut v = vm(String::new());
+        v.mention
+            .set_files(vec!["README.md".into(), "src/main.rs".into()]);
+        frame(&ctx, &mut v, vec![], true);
+        frame(&ctx, &mut v, vec![egui::Event::Text("@ma".into())], false);
+        let out = frame(&ctx, &mut v, vec![], false);
+        assert!(!out.index, "the list is already loaded");
+        assert_eq!(v.input, "@ma");
+        assert_eq!(v.mention.matches, ["src/main.rs"]);
+        assert!(v.mention.popup_rect.is_some(), "popup drawn");
+
+        // Enter picks the row and does not add a newline.
+        frame(&ctx, &mut v, vec![press(egui::Key::Enter)], false);
+        assert_eq!(v.input, "@src/main.rs ");
+        assert!(v.mention.popup_rect.is_none());
+
+        // Typing on continues after the inserted mention.
+        frame(&ctx, &mut v, vec![egui::Event::Text("ok".into())], false);
+        assert_eq!(v.input, "@src/main.rs ok");
+    }
+
+    #[test]
+    fn escape_dismisses_the_popup_until_a_new_mention_starts() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut v = vm(String::new());
+        v.mention.set_files(vec!["src/main.rs".into()]);
+        frame(&ctx, &mut v, vec![], true);
+        frame(&ctx, &mut v, vec![egui::Event::Text("@m".into())], false);
+        frame(&ctx, &mut v, vec![], false);
+        assert!(v.mention.popup_rect.is_some());
+        frame(&ctx, &mut v, vec![press(egui::Key::Escape)], false);
+        frame(&ctx, &mut v, vec![], false);
+        assert!(v.mention.popup_rect.is_none());
+        assert_eq!(v.input, "@m");
+    }
+
+    #[test]
+    fn an_unloaded_list_is_requested_when_the_popup_opens() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut v = vm(String::new());
+        frame(&ctx, &mut v, vec![], true);
+        frame(&ctx, &mut v, vec![egui::Event::Text("@".into())], false);
+        let out = frame(&ctx, &mut v, vec![], false);
+        assert!(out.index);
     }
 
     #[test]

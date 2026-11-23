@@ -12,8 +12,8 @@ use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use xade_core::{
-    AgentProvider, Message, ProviderEvent, QuotaKind, QuotaWindow, Role, RunningSession, Session,
-    SessionId, SessionStatus, Workspace, WorkspaceId,
+    AgentProvider, Delivery, Message, ProviderEvent, QuotaKind, QuotaWindow, Role, RunningSession,
+    Session, SessionId, SessionStatus, Workspace, WorkspaceId,
 };
 use xade_runtime::git::{git_status, GitState};
 use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
@@ -32,7 +32,7 @@ use crate::widgets::keymaps_modal;
 use crate::widgets::path_links::PathLinks;
 use crate::widgets::session_picker::{self, PickerState};
 use crate::workspace::{Tiling, WindowKind};
-use crate::{home, logging, status_bar, theme, workspace};
+use crate::{composer, home, logging, status_bar, theme, workspace};
 
 const GIT_REFRESH: Duration = Duration::from_secs(5);
 /// A running-set change re-imports at most this often.
@@ -69,6 +69,21 @@ pub enum UiMsg {
     Running {
         list: Vec<RunningSession>,
         transcripts: Vec<running::TranscriptStat>,
+    },
+    /// A session folder's file list for `@` autocomplete.
+    Files {
+        session: SessionId,
+        files: Vec<String>,
+    },
+    /// A pasted image could not be saved; shown above the session's input.
+    AttachFailed {
+        session: SessionId,
+        message: String,
+    },
+    /// Files picked with a session's attach button, or a saved pasted image.
+    Attached {
+        session: SessionId,
+        paths: Vec<PathBuf>,
     },
     /// A file picked with Open File, read off the UI thread.
     FileOpened {
@@ -129,6 +144,10 @@ pub struct SessionVm {
     pub apply_rect: Option<egui::Rect>,
     /// Whether another process shares or has changed this live session's transcript.
     pub sync: running::SessionSync,
+    /// `@` file autocomplete of the composer.
+    pub mention: crate::mention::MentionState,
+    /// Why an attachment was refused, shown above the input until it expires or a send.
+    pub attach_note: Option<(String, std::time::Instant)>,
 }
 
 pub struct DiffState {
@@ -212,6 +231,7 @@ pub struct App {
     /// Awaiting confirmation to delete a session forever.
     pub pending_delete: Option<PendingDelete>,
     running_checked: Option<Instant>,
+    tree_checked: Option<Instant>,
     running_inflight: bool,
     running_polled: bool,
     running_import_due: bool,
@@ -291,6 +311,7 @@ impl App {
             pending_open: None,
             pending_delete: None,
             running_checked: None,
+            tree_checked: None,
             running_inflight: false,
             running_polled: false,
             running_import_due: false,
@@ -356,6 +377,7 @@ impl App {
             pending_open: None,
             pending_delete: None,
             running_checked: None,
+            tree_checked: None,
             running_inflight: false,
             running_polled: false,
             running_import_due: false,
@@ -528,6 +550,25 @@ impl App {
             let result = file_tree::read_listing(&path);
             bridge.send(UiMsg::DirListed { path, result });
         });
+    }
+
+    /// Re-reads every expanded folder (at most once per `running::POLL`) so files and folders
+    /// created outside the tree show up; the old listing stays visible until the new one lands.
+    fn refresh_tree(&mut self) {
+        if self
+            .tree_checked
+            .is_some_and(|t| t.elapsed() < running::POLL)
+        {
+            return;
+        }
+        self.tree_checked = Some(Instant::now());
+        for path in self.tree.expanded() {
+            let bridge = self.bridge.clone();
+            self.rt.spawn_blocking(move || {
+                let result = file_tree::read_listing(&path);
+                bridge.send(UiMsg::DirListed { path, result });
+            });
+        }
     }
 
     pub fn tree_action(&mut self, action: TreeAction) {
@@ -781,10 +822,35 @@ impl App {
                 root_path,
                 display_name,
                 last_opened_at: OffsetDateTime::now_utc(),
-                is_pinned: false,
+                is_open: true,
             }));
             if let Err(e) = added {
                 let report = ErrorReport::new("Could not add the folder", e.to_string());
+                return bridge.send(UiMsg::Report(report));
+            }
+            xade_runtime::flush(&writer).await;
+            match reader.list_workspaces().await {
+                Ok(ws) => bridge.send(UiMsg::Workspaces(ws)),
+                Err(e) => read_failed(&bridge, "workspaces", &e),
+            }
+        });
+    }
+
+    /// Takes a workspace out of the sidebar; its sessions stay on Home.
+    pub fn close_workspace(&mut self, id: WorkspaceId) {
+        if self.home.scope == Some(id) {
+            self.home.scope = None;
+            self.home.page = 0;
+            self.refresh_cards();
+        }
+        let (writer, reader, bridge) = (
+            self.writer.clone(),
+            self.reader.clone(),
+            self.bridge.clone(),
+        );
+        self.rt.spawn(async move {
+            if let Err(e) = writer.send(WriteOp::CloseWorkspace(id)) {
+                let report = ErrorReport::new("Could not close the workspace", e.to_string());
                 return bridge.send(UiMsg::Report(report));
             }
             xade_runtime::flush(&writer).await;
@@ -820,13 +886,27 @@ impl App {
         let Some(ws) = self.home.workspaces.iter().find(|w| w.id == ws_id) else {
             return;
         };
-        let _ = self.cmd_tx.send(ManagerCmd::Create {
-            workspace_id: ws_id,
-            cwd: ws.root_path.clone(),
-            provider: provider.id(),
-            model_id: provider.default_model(),
-            effort: xade_core::Effort::Default,
-            auto_mode: false,
+        // New sessions start with the model and effort of the last one, across restarts.
+        let (cmd_tx, reader) = (self.cmd_tx.clone(), self.reader.clone());
+        let (cwd, provider_id, default_model) = (
+            ws.root_path.clone(),
+            provider.id(),
+            provider.default_model(),
+        );
+        self.rt.spawn(async move {
+            let last = reader.last_model_choice().await.unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "could not read the last model choice");
+                None
+            });
+            let (model_id, effort) = last.unwrap_or((default_model, xade_core::Effort::Default));
+            let _ = cmd_tx.send(ManagerCmd::Create {
+                workspace_id: ws_id,
+                cwd,
+                provider: provider_id,
+                model_id,
+                effort,
+                auto_mode: false,
+            });
         });
     }
 
@@ -930,6 +1010,70 @@ impl App {
             })
             .or_else(dirs::home_dir)
             .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    /// Lists the session folder's files in the background for `@` autocomplete.
+    pub fn index_files(&mut self, session: SessionId) {
+        let Some(vm) = self.sessions.get_mut(&session) else {
+            return;
+        };
+        vm.mention.files = crate::mention::Files::Loading;
+        let (root, bridge) = (vm.cwd.clone(), self.bridge.clone());
+        self.rt.spawn(async move {
+            let listed =
+                tokio::task::spawn_blocking(move || crate::mention::list_files(&root)).await;
+            match listed {
+                Ok(files) => bridge.send(UiMsg::Files { session, files }),
+                Err(e) => {
+                    let report = ErrorReport::new("Could not list files", e.to_string());
+                    bridge.send(UiMsg::Report(report));
+                    bridge.send(UiMsg::Files {
+                        session,
+                        files: Vec::new(),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Encodes and saves a pasted clipboard image off the UI thread; it comes back as an
+    /// `Attached` mention.
+    pub fn attach_image(&self, session: SessionId, image: std::sync::Arc<egui::ColorImage>) {
+        let bridge = self.bridge.clone();
+        self.rt.spawn(async move {
+            let saved =
+                tokio::task::spawn_blocking(move || crate::attach::save_pasted_image(&image)).await;
+            match saved {
+                Ok(Ok(path)) => bridge.send(UiMsg::Attached {
+                    session,
+                    paths: vec![path],
+                }),
+                Ok(Err(message)) => bridge.send(UiMsg::AttachFailed { session, message }),
+                Err(e) => bridge.send(UiMsg::AttachFailed {
+                    session,
+                    message: format!("Could not save the image: {e}"),
+                }),
+            }
+        });
+    }
+
+    /// A multi-file dialog starting in the session's folder; the picks become mentions.
+    pub fn attach_dialog(&self, session: SessionId) {
+        let Some(vm) = self.sessions.get(&session) else {
+            return;
+        };
+        let (dir, bridge) = (vm.cwd.clone(), self.bridge.clone());
+        self.rt.spawn(async move {
+            let Some(files) = rfd::AsyncFileDialog::new()
+                .set_directory(dir)
+                .pick_files()
+                .await
+            else {
+                return;
+            };
+            let paths = files.iter().map(|f| f.path().to_path_buf()).collect();
+            bridge.send(UiMsg::Attached { session, paths });
+        });
     }
 
     pub fn new_editor(&mut self) {
@@ -1138,7 +1282,7 @@ impl App {
         let ws = &self.home.workspaces;
         match self.home.scope {
             Some(id) => ws.iter().find(|w| w.id == id),
-            None => ws.first(),
+            None => ws.iter().find(|w| w.is_open),
         }
         .map(|w| w.root_path.clone())
     }
@@ -1312,6 +1456,21 @@ impl App {
                 }
             }
             UiMsg::Running { list, transcripts } => self.on_running(list, transcripts),
+            UiMsg::Files { session, files } => {
+                if let Some(vm) = self.sessions.get_mut(&session) {
+                    vm.mention.set_files(files);
+                }
+            }
+            UiMsg::AttachFailed { session, message } => {
+                if let Some(vm) = self.sessions.get_mut(&session) {
+                    composer::set_attach_note(vm, message);
+                }
+            }
+            UiMsg::Attached { session, paths } => {
+                if let Some(vm) = self.sessions.get_mut(&session) {
+                    composer::insert_mentions(vm, &paths);
+                }
+            }
             UiMsg::FileOpened { path, text } => self.on_file_opened(path, text),
             UiMsg::DirListed { path, result } => self.tree.loaded(&path, result),
             UiMsg::Saved {
@@ -1323,7 +1482,7 @@ impl App {
                 if self
                     .home
                     .scope
-                    .is_some_and(|s| !ws.iter().any(|w| w.id == s))
+                    .is_some_and(|s| !ws.iter().any(|w| w.id == s && w.is_open))
                 {
                     self.home.scope = None;
                 }
@@ -1379,6 +1538,8 @@ impl App {
                 window_rect: None,
                 apply_rect: None,
                 sync: Default::default(),
+                mention: Default::default(),
+                attach_note: None,
             },
         );
         if self.background.remove(&id) {
@@ -1446,11 +1607,13 @@ impl App {
                     vm.status = status;
                     if vm.status == SessionStatus::Idle {
                         if let Some(text) = vm.queued.pop_front() {
-                            push_user_message(vm, text.clone());
+                            let delivery = Some(Delivery::Queued);
+                            push_user_message(vm, text.clone(), delivery);
                             vm.error = None;
                             let _ = self.cmd_tx.send(ManagerCmd::Send {
                                 session_id: id,
                                 text,
+                                delivery,
                             });
                         }
                     }
@@ -1579,8 +1742,9 @@ fn new_message(vm: &SessionVm, role: Role, text: String, tool_use_id: Option<Str
 }
 
 /// Appends the user's prompt to the local transcript.
-pub fn push_user_message(vm: &mut SessionVm, text: String) {
-    let m = new_message(vm, Role::User, text, None);
+pub fn push_user_message(vm: &mut SessionVm, text: String, delivery: Option<Delivery>) {
+    let mut m = new_message(vm, Role::User, text, None);
+    m.tool_name = delivery.map(|d| d.tag().to_string());
     vm.messages.push(m);
 }
 
@@ -1613,6 +1777,17 @@ impl eframe::App for App {
     }
 }
 
+/// The session window under `pointer`, else `fallback`.
+fn drop_target(
+    pointer: Option<egui::Pos2>,
+    rects: &[(SessionId, egui::Rect)],
+    fallback: Option<SessionId>,
+) -> Option<SessionId> {
+    pointer
+        .and_then(|p| rects.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id))
+        .or(fallback)
+}
+
 impl App {
     /// Drains the bridge and runs timers; no painting here.
     fn update(&mut self, ctx: &egui::Context) {
@@ -1632,9 +1807,11 @@ impl App {
             self.on_msg(msg);
         }
         self.handle_shortcuts(ctx);
+        self.handle_drops(ctx);
         self.reload_config(ctx);
         self.check_editors(ctx, false);
         self.poll_running();
+        self.refresh_tree();
         self.run_due_import();
         ctx.request_repaint_after(running::POLL);
         if let Some(changed) = self.home.search_changed_at {
@@ -1656,6 +1833,40 @@ impl App {
                 self.refresh_git(d);
             }
             ctx.request_repaint_after(GIT_REFRESH);
+        }
+    }
+
+    /// Files dropped on the window become mentions in a session's input. macOS reports no
+    /// pointer position while a file is dragged in, so the target falls back to the focused
+    /// (or only) session.
+    fn handle_drops(&mut self, ctx: &egui::Context) {
+        let (dropped, pointer): (Vec<PathBuf>, _) = ctx.input(|i| {
+            let files = i.raw.dropped_files.iter();
+            (
+                files.map(|f| f.path().to_path_buf()).collect(),
+                i.pointer.latest_pos(),
+            )
+        });
+        if dropped.is_empty() {
+            return;
+        }
+        let rects: Vec<(SessionId, egui::Rect)> = self
+            .open_windows
+            .iter()
+            .filter_map(|k| k.session())
+            .filter_map(|id| Some((id, self.sessions.get(&id)?.window_rect?)))
+            .collect();
+        let only = (self.sessions.len() == 1)
+            .then(|| self.sessions.keys().next().copied())
+            .flatten();
+        let target = if self.view == View::Workspace {
+            drop_target(pointer, &rects, self.focused_session().or(only))
+        } else {
+            None
+        };
+        match target.and_then(|id| self.sessions.get_mut(&id)) {
+            Some(vm) => composer::insert_mentions(vm, &dropped),
+            None => self.warn("Drop files on a session window to mention them."),
         }
     }
 
@@ -1794,6 +2005,92 @@ mod tests {
         app.drop_window(b);
         assert!(app.tiling.auto && app.open_windows == vec![a, c]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[derive(Debug)]
+    struct Dropped(PathBuf);
+
+    impl egui::DroppedFile for Dropped {
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+        fn bytes(&self) -> Result<Vec<u8>, String> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn new_session_row() -> Session {
+        let now = OffsetDateTime::now_utc();
+        Session {
+            origin: xade_core::SessionOrigin::default(),
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new(),
+            provider_id: xade_core::ProviderId::Claude,
+            provider_session_id: None,
+            title: "t".into(),
+            preview_snippet: String::new(),
+            model_id: "opus".into(),
+            effort: xade_core::Effort::Default,
+            auto_mode: false,
+            usage: xade_core::UsageTotals::default(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    #[test]
+    fn dropped_files_become_mentions_without_a_pointer_position() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let session = new_session_row();
+        let id = session.id;
+        app.insert_vm(session, Vec::new());
+        app.sessions.get_mut(&id).unwrap().cwd = dir.clone();
+        app.add_window(WindowKind::Session(id));
+        app.focus(WindowKind::Session(id));
+        app.view = View::Workspace;
+        std::fs::write(dir.join("a.rs"), "x").unwrap();
+        std::fs::write(dir.join("b.rs"), "x").unwrap();
+
+        // A drag from Finder on macOS carries no pointer position.
+        let ctx = egui::Context::default();
+        let raw = egui::RawInput {
+            dropped_files: vec![std::sync::Arc::new(Dropped(dir.join("a.rs")))],
+            ..Default::default()
+        };
+        ctx.run_pass(raw, |ctx| app.handle_drops(ctx))
+            .drop_without_applying_deltas();
+        assert_eq!(app.sessions[&id].input, "@a.rs ");
+        assert!(app.warning_text().is_none());
+
+        // On Home there is no session window to receive it.
+        app.view = View::Home;
+        let raw = egui::RawInput {
+            dropped_files: vec![std::sync::Arc::new(Dropped(dir.join("b.rs")))],
+            ..Default::default()
+        };
+        ctx.run_pass(raw, |ctx| app.handle_drops(ctx))
+            .drop_without_applying_deltas();
+        assert_eq!(app.sessions[&id].input, "@a.rs ");
+        assert!(app.warning_text().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drop_target_prefers_the_window_under_the_pointer() {
+        let (a, b) = (SessionId::new(), SessionId::new());
+        let rect = |x: f32| egui::Rect::from_min_size(egui::pos2(x, 0.0), egui::vec2(100.0, 100.0));
+        let rects = [(a, rect(0.0)), (b, rect(100.0))];
+        assert_eq!(
+            drop_target(Some(egui::pos2(150.0, 5.0)), &rects, Some(a)),
+            Some(b)
+        );
+        assert_eq!(
+            drop_target(Some(egui::pos2(500.0, 5.0)), &rects, Some(a)),
+            Some(a)
+        );
+        assert_eq!(drop_target(None, &rects, Some(b)), Some(b));
+        assert_eq!(drop_target(None, &rects, None), None);
     }
 
     fn test_app(rt: &tokio::runtime::Runtime) -> (App, std::path::PathBuf) {
@@ -2038,7 +2335,7 @@ mod tests {
             root_path: dir.clone(),
             display_name: "w".into(),
             last_opened_at: OffsetDateTime::now_utc(),
-            is_pinned: false,
+            is_open: true,
         };
         app.home.scope = Some(ws.id);
         app.home.workspaces = vec![ws];

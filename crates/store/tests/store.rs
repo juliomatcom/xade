@@ -91,7 +91,7 @@ fn workspace(id: WorkspaceId, root: &str) -> Workspace {
         root_path: root.into(),
         display_name: root.rsplit('/').next().unwrap().to_string(),
         last_opened_at: OffsetDateTime::now_utc(),
-        is_pinned: false,
+        is_open: false,
     }
 }
 
@@ -210,16 +210,16 @@ fn workspaces_sorted_by_last_opened() {
 
     f.writer.send(WriteOp::TouchWorkspace(f.ws)).unwrap();
     f.writer
-        .send(WriteOp::UpsertWorkspace(w_pinned(second)))
+        .send(WriteOp::UpsertWorkspace(w_open(second)))
         .unwrap();
     f.writer.flush().unwrap();
     let list = block_on(f.reader.list_workspaces()).unwrap();
     assert_eq!(list.len(), 2, "same root_path upserts in place");
 }
 
-fn w_pinned(id: WorkspaceId) -> Workspace {
+fn w_open(id: WorkspaceId) -> Workspace {
     Workspace {
-        is_pinned: true,
+        is_open: true,
         ..workspace(id, "/tmp/second")
     }
 }
@@ -597,6 +597,49 @@ fn import_op(
             workspace_root: "/tmp/imported".into(),
         },
     )
+}
+
+#[test]
+fn workspaces_are_open_only_when_added_or_touched_and_close_on_request() {
+    let f = Fixture::new();
+    let open = |f: &Fixture| -> Vec<bool> {
+        f.writer.flush().unwrap();
+        block_on(f.reader.list_workspaces())
+            .unwrap()
+            .into_iter()
+            .map(|w| w.is_open)
+            .collect()
+    };
+    // Import brings in a closed workspace.
+    let (_, op) = import_op(&f, "p1", "t", &["x"], 1);
+    f.writer.send(op).unwrap();
+    let list = {
+        f.writer.flush().unwrap();
+        block_on(f.reader.list_workspaces()).unwrap()
+    };
+    let imported = list
+        .iter()
+        .find(|w| w.root_path.ends_with("imported"))
+        .unwrap()
+        .id;
+    assert_eq!(list.iter().filter(|w| w.is_open).count(), 0);
+
+    // Opening a session in it lists it; closing removes it and keeps the sessions.
+    f.writer.send(WriteOp::TouchWorkspace(imported)).unwrap();
+    assert_eq!(open(&f).into_iter().filter(|o| *o).count(), 1);
+    f.writer.send(WriteOp::CloseWorkspace(imported)).unwrap();
+    assert!(open(&f).iter().all(|o| !o));
+    assert_eq!(
+        block_on(f.reader.list_sessions(None, None, 0, 24))
+            .unwrap()
+            .total,
+        1
+    );
+
+    // Re-importing never reopens it.
+    let (_, op) = import_op(&f, "p1", "t2", &["y"], 0);
+    f.writer.send(op).unwrap();
+    assert!(open(&f).iter().all(|o| !o));
 }
 
 #[test]

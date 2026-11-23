@@ -45,6 +45,24 @@ SCENARIOS = {
     "steer": (["--model", "haiku"], [
         ("send_during", "Use the Bash tool to run `sleep 4`, then write one sentence about a lighthouse.",
          "Also, end your answer with the word BANANA.")]),
+    # cwd must hold notes.txt containing the word "kumquat7".
+    "at_mention": (["--model", "haiku"], [
+        ("send", "What is the secret word in @notes.txt? Reply with just the word.", "deny")]),
+    # cwd must hold "my notes.txt" containing the word "kumquat7".
+    "at_mention_spaces": (["--model", "haiku"], [
+        ("send", 'What is the secret word in @"my notes.txt"? Reply with just the word.', "deny")]),
+    # cwd must hold red.png (a solid red image).
+    "at_image": (["--model", "haiku"], [
+        ("send", "What color is the image @red.png? Reply with just the color word.", "deny")]),
+    # $XADE_ATTACH_DIR must hold red.png and sit outside cwd (where pasted images are saved).
+    "at_image_outside": (["--model", "haiku"], [
+        ("send", "What color is the image @{ATTACH_DIR}/red.png? Reply with just the color word.", "deny")]),
+    # cwd must hold doc.pdf containing the word "kumquat7".
+    "at_pdf": (["--model", "haiku"], [
+        ("send", "What is the secret word in @doc.pdf? Reply with just the word.", "deny")]),
+    # cwd must hold data.bin (random bytes).
+    "at_binary": (["--model", "haiku"], [
+        ("send", "In five words, what does @data.bin contain?", "deny")]),
     "interrupt": (["--model", "haiku"], [
         ("send_interrupt", "Write a 600-word story about a lighthouse keeper."),
         ("send", "Reply with exactly: still alive", "allow")]),
@@ -218,7 +236,7 @@ def main():
         if step[0] == "init":
             rec.init()
         elif step[0] == "send":
-            rec.user(step[1]); rec.run_turn(step[2])
+            rec.user(step[1].replace("{ATTACH_DIR}", os.environ.get("XADE_ATTACH_DIR", ""))); rec.run_turn(step[2])
         elif step[0] == "send_during":
             rec.user(step[1]); rec.run_turn("allow", steer=step[2])
         elif step[0] == "send_interrupt":

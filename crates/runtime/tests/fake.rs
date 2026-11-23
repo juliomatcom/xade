@@ -120,6 +120,7 @@ async fn create_send_close_open_resume() {
     h.tx.send(ManagerCmd::Send {
         session_id: id,
         text: "Say pong\nsecond line".into(),
+        delivery: None,
     })
     .unwrap();
     let ev = h.until_status(5, SessionStatus::Idle).await;
@@ -187,6 +188,7 @@ async fn create_send_close_open_resume() {
     h.tx.send(ManagerCmd::Send {
         session_id: id,
         text: "again".into(),
+        delivery: None,
     })
     .unwrap();
     h.until_status(5, SessionStatus::Idle).await;

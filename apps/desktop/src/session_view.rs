@@ -21,6 +21,12 @@ pub struct ViewOut {
     pub reload: bool,
     /// A file path clicked in the transcript, to open in Xade's editor.
     pub open_file: Option<std::path::PathBuf>,
+    /// The attach button was clicked: pick files to mention.
+    pub attach: bool,
+    /// The `@` popup needs the folder's file list built.
+    pub index_files: bool,
+    /// A clipboard image to save and mention.
+    pub pasted_image: Option<std::sync::Arc<egui::ColorImage>>,
 }
 
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
@@ -40,7 +46,10 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
         )
         .show(ui, |ui| {
             banner(ui, vm, env);
-            composer::show(ui, vm, env);
+            let c = composer::show(ui, vm, env);
+            out.attach = c.attach;
+            out.index_files = c.index;
+            out.pasted_image = c.pasted_image;
         });
     let chat = egui::CentralPanel::default()
         .frame(egui::Frame::NONE)

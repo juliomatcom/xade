@@ -187,7 +187,7 @@ mod tests {
             root_path: root.clone(),
             display_name: name.into(),
             last_opened_at: time::OffsetDateTime::now_utc(),
-            is_pinned: false,
+            is_open: true,
         });
         app.git.insert(root, parse_porcelain_v2(porcelain));
         if provider {
