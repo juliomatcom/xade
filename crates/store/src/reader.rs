@@ -109,7 +109,7 @@ impl StoreReader {
 }
 
 pub(crate) const CARD_COLS: &str =
-    "id, workspace_id, title, preview_snippet, model_id, updated_at, origin";
+    "id, workspace_id, title, preview_snippet, model_id, updated_at, origin, provider_session_id";
 
 pub(crate) fn card_from_row(r: &Row) -> rusqlite::Result<SessionCard> {
     Ok(SessionCard {
@@ -121,6 +121,7 @@ pub(crate) fn card_from_row(r: &Row) -> rusqlite::Result<SessionCard> {
         updated_at: schema::parse_ts(5, &r.get::<_, String>(5)?)?,
         origin: schema::parse_origin(6, &r.get::<_, String>(6)?)?,
         excerpt: None,
+        provider_session_id: r.get(7)?,
     })
 }
 

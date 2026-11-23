@@ -50,6 +50,8 @@ pub struct SessionCard {
     pub updated_at: OffsetDateTime,
     pub origin: SessionOrigin,
     pub excerpt: Option<String>,
+    /// Provider-side id; matches running processes.
+    pub provider_session_id: Option<String>,
 }
 
 /// Slices `all` to the requested page; `page_size` of 0 is treated as 1.

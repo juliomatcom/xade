@@ -5,6 +5,7 @@ use xade_store::SessionCard;
 
 use crate::app::App;
 use crate::home;
+use crate::running;
 use crate::theme;
 
 /// Rows the picker asks the reader for.
@@ -40,7 +41,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     }
     st.selected = st.selected.min(last);
     let mut open = enter
-        .then(|| st.results.get(st.selected).map(|c| c.id))
+        .then(|| st.results.get(st.selected).cloned())
         .flatten();
     let mut changed = false;
     let resp = egui::Modal::new(egui::Id::unique("session_picker")).show(ctx, |ui| {
@@ -70,14 +71,14 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         r.scroll_to_me(None);
                     }
                     if r.clicked() {
-                        open = Some(card.id);
+                        open = Some(card.clone());
                     }
                 }
             });
     });
     if open.is_some() || resp.should_close() {
-        if let Some(id) = open {
-            app.open_session(id);
+        if let Some(card) = open {
+            app.request_open(&card, false);
         }
         return;
     }
@@ -108,6 +109,10 @@ fn row(app: &App, ui: &mut egui::Ui, card: &SessionCard, selected: bool) -> egui
                         .small()
                         .color(theme::TEXT_MUTED),
                 );
+                let running = app.running_for(card);
+                if running.is_none() {
+                    ui.label(running::cache_text(card.updated_at));
+                }
                 if app.open_windows.contains(&card.id) {
                     ui.label(RichText::new("open").small().color(theme::OK));
                 }
@@ -117,6 +122,12 @@ fn row(app: &App, ui: &mut egui::Ui, card: &SessionCard, selected: bool) -> egui
                         .color(theme::TEXT_MUTED),
                 );
                 home::origin_badge(ui, card.origin);
+                if let Some(r) = running {
+                    let (rect, resp) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    running::paint_dot(ui, rect.center(), 4.0, r.state);
+                    resp.on_hover_text(running::tooltip(r));
+                }
                 let title = if card.title.is_empty() {
                     "New session"
                 } else {
@@ -147,6 +158,7 @@ mod tests {
             origin: xade_core::SessionOrigin::default(),
             updated_at: now,
             model_id: String::new(),
+            provider_session_id: None,
         }
     }
 

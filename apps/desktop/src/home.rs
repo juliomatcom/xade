@@ -9,7 +9,7 @@ use xade_store::SessionCard;
 
 use crate::app::{App, View};
 use crate::keymap::{self, Action};
-use crate::{icons, theme};
+use crate::{icons, running, theme};
 
 /// The home grid is `GRID` x `GRID` tiles per page.
 const GRID: usize = 3;
@@ -456,7 +456,7 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
         });
     ui.add_space(CARD_GAP);
     let area = ui.available_rect_before_wrap();
-    let mut open = None;
+    let mut open: Option<SessionCard> = None;
     if app.home.cards.is_empty() {
         let msg = if !app.home.search.trim().is_empty() {
             "No sessions match your search."
@@ -471,15 +471,15 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
     }
     for (card, rect) in app.home.cards.iter().zip(tile_rects(area)) {
         if card_ui(app, ui, card, rect) {
-            open = Some(card.id);
+            open = Some(card.clone());
         }
     }
-    if let Some(id) = open {
+    if let Some(card) = open {
         // Cmd+click keeps Home and just adds the window.
         if ui.input(|i| i.modifiers.command) {
-            app.open_session_background(id);
+            app.request_open(&card, true);
         } else {
-            app.open_session(id);
+            app.request_open(&card, false);
         }
     }
 }
@@ -536,6 +536,23 @@ fn card_ui(app: &App, ui: &mut egui::Ui, card: &SessionCard, rect: egui::Rect) -
     let inner = rect.shrink(CARD_PAD);
     if inner.width() <= 0.0 || inner.height() <= 0.0 {
         return resp.clicked();
+    }
+    let running = app.running_for(card);
+    if let Some(r) = running {
+        let dot = egui::Rect::from_center_size(
+            egui::pos2(
+                rect.right() - CARD_PAD / 2.0 - 1.0,
+                rect.top() + CARD_PAD / 2.0 + 1.0,
+            ),
+            egui::Vec2::splat(CARD_PAD),
+        );
+        ui.interact(
+            dot,
+            ui.make_persistent_id(("run_dot", card.id)),
+            egui::Sense::hover(),
+        )
+        .on_hover_text(running::tooltip(r));
+        running::paint_dot(ui, dot.center(), 4.0, r.state);
     }
     let status = app
         .sessions
@@ -624,6 +641,9 @@ fn card_ui(app: &App, ui: &mut egui::Ui, card: &SessionCard, rect: egui::Rect) -
                 .small()
                 .color(theme::TEXT_MUTED),
         );
+        if running.is_none() {
+            ui.label(running::cache_text(card.updated_at));
+        }
         let (text, color) = status_badge(&status);
         ui.label(RichText::new(text).small().color(color));
     });
@@ -763,6 +783,106 @@ mod tests {
         for width in [crate::MIN_WINDOW_SIZE[0], 1400.0, 1600.0, 2000.0, 3000.0] {
             assert_no_overlaps(width);
         }
+    }
+
+    fn test_card(provider_session_id: Option<&str>, age_secs: i64) -> SessionCard {
+        SessionCard {
+            id: xade_core::SessionId::new(),
+            workspace_id: xade_core::WorkspaceId::new(),
+            title: "t".into(),
+            preview_snippet: String::new(),
+            excerpt: None,
+            origin: SessionOrigin::default(),
+            updated_at: OffsetDateTime::now_utc() - time::Duration::seconds(age_secs),
+            model_id: String::new(),
+            provider_session_id: provider_session_id.map(Into::into),
+        }
+    }
+
+    /// `(texts, circle count)` drawn for `card` by a headless frame.
+    fn render_card(app: &App, ctx: &egui::Context, card: &SessionCard) -> (Vec<String>, usize) {
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        let rect = egui::Rect::from_min_size(egui::pos2(20.0, 20.0), egui::vec2(300.0, 180.0));
+        let mut out = ctx.run_ui(input(), |ui| {
+            card_ui(app, ui, card, rect);
+        });
+        out.textures_delta.clear();
+        let (mut texts, mut circles) = (Vec::new(), 0);
+        fn walk(s: &egui::Shape, t: &mut Vec<String>, c: &mut usize) {
+            match s {
+                egui::Shape::Text(x) => t.push(x.galley.text().to_string()),
+                egui::Shape::Circle(_) => *c += 1,
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, t, c)),
+                _ => {}
+            }
+        }
+        for c in &out.shapes {
+            walk(&c.shape, &mut texts, &mut circles);
+        }
+        (texts, circles)
+    }
+
+    #[test]
+    fn card_shows_cache_label_or_running_dot() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-card-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let idle = test_card(Some("p-idle"), 10 * 60);
+        let busy = test_card(Some("p-busy"), 10 * 60);
+        let plain = test_card(Some("p-none"), 10 * 60);
+        let old = test_card(None, 2 * 3600);
+        for (id, state) in [
+            ("p-idle", xade_core::RunState::Idle),
+            ("p-busy", xade_core::RunState::Busy),
+        ] {
+            app.running.insert(
+                id.into(),
+                xade_core::RunningSession {
+                    provider_session_id: id.into(),
+                    state,
+                    location: "VS Code".into(),
+                    pid: 1,
+                },
+            );
+        }
+        let has = |t: &[String], s: &str| t.iter().any(|x| x.contains(s));
+
+        let (texts, circles) = render_card(&app, &ctx, &plain);
+        assert!(has(&texts, "Cache \u{b7} 50m left"), "{texts:?}");
+        assert_eq!(circles, 0);
+        let (texts, circles) = render_card(&app, &ctx, &old);
+        assert!(has(&texts, "Expired") && circles == 0, "{texts:?}");
+        for card in [&idle, &busy] {
+            let (texts, circles) = render_card(&app, &ctx, card);
+            assert_eq!(circles, 1);
+            assert!(!has(&texts, "Cache"), "{texts:?}");
+        }
+        assert_eq!(
+            running::tooltip(&app.running["p-busy"]),
+            "Running in VS Code \u{b7} busy"
+        );
+
+        // Confirm before opening a session running elsewhere; open directly otherwise.
+        app.request_open(&plain, false);
+        assert!(app.pending_open.is_none());
+        app.request_open(&idle, true);
+        let p = app.pending_open.take().unwrap();
+        assert_eq!(
+            (p.id, p.location.as_str(), p.background),
+            (idle.id, "VS Code", true)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

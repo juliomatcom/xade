@@ -5,6 +5,7 @@ mod diff;
 mod home;
 mod icons;
 mod keymap;
+mod running;
 mod session_view;
 mod status_bar;
 mod theme;

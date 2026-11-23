@@ -12,8 +12,8 @@ use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use xade_core::{
-    AgentProvider, Message, ProviderEvent, QuotaKind, QuotaWindow, Role, Session, SessionId,
-    SessionStatus, Workspace, WorkspaceId,
+    AgentProvider, Message, ProviderEvent, QuotaKind, QuotaWindow, Role, RunningSession, Session,
+    SessionId, SessionStatus, Workspace, WorkspaceId,
 };
 use xade_runtime::git::{git_status, GitState};
 use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
@@ -22,12 +22,15 @@ use xade_store::{Page, SessionCard, StoreReader, WriteOp, WriterHandle};
 use crate::diff::{is_code_change, DiffData};
 use crate::home::HomeState;
 use crate::keymap::{self, Action, Chord};
+use crate::running::{self, PendingOpen};
 use crate::widgets::keymaps_modal;
 use crate::widgets::session_picker::{self, PickerState};
 use crate::workspace::Tiling;
 use crate::{home, icons, status_bar, theme, workspace};
 
 const GIT_REFRESH: Duration = Duration::from_secs(5);
+/// A running-set change re-imports at most this often.
+const RUNNING_IMPORT_GAP: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum View {
@@ -50,6 +53,8 @@ pub enum UiMsg {
         generation: u64,
         page: Page<SessionCard>,
     },
+    /// One `running_sessions` poll.
+    Running(Vec<RunningSession>),
 }
 
 /// Sends to the UI thread and wakes it.
@@ -154,6 +159,15 @@ pub struct App {
     /// The session picker, when open.
     pub picker: Option<PickerState>,
     picker_generation: u64,
+    /// Sessions running outside Xade, by provider session id.
+    pub running: HashMap<String, RunningSession>,
+    /// Awaiting confirmation to open a session that is running elsewhere.
+    pub pending_open: Option<PendingOpen>,
+    running_checked: Option<Instant>,
+    running_inflight: bool,
+    running_polled: bool,
+    running_import_due: bool,
+    running_import_at: Option<Instant>,
     /// Sessions being opened from Home with Cmd+click: they get a window but no view switch.
     background: HashSet<SessionId>,
     events_rx: Receiver<UiMsg>,
@@ -214,6 +228,13 @@ impl App {
             keymaps_open: false,
             picker: None,
             picker_generation: 0,
+            running: HashMap::new(),
+            pending_open: None,
+            running_checked: None,
+            running_inflight: false,
+            running_polled: false,
+            running_import_due: false,
+            running_import_at: None,
             background: HashSet::new(),
             events_rx,
             bridge,
@@ -260,6 +281,13 @@ impl App {
             keymaps_open: false,
             picker: None,
             picker_generation: 0,
+            running: HashMap::new(),
+            pending_open: None,
+            running_checked: None,
+            running_inflight: false,
+            running_polled: false,
+            running_import_due: false,
+            running_import_at: None,
             background: HashSet::new(),
             events_rx,
             bridge: Bridge {
@@ -350,6 +378,94 @@ impl App {
             return;
         }
         self.home.importing = self.cmd_tx.send(ManagerCmd::Import).is_ok();
+    }
+
+    /// Polls running sessions every `running::POLL`; one poll in flight at a time.
+    fn poll_running(&mut self) {
+        let due = self
+            .running_checked
+            .is_none_or(|t| t.elapsed() >= running::POLL);
+        if !due || self.running_inflight {
+            return;
+        }
+        let Some(provider) = self.providers.first().cloned() else {
+            return;
+        };
+        self.running_checked = Some(Instant::now());
+        self.running_inflight = true;
+        let bridge = self.bridge.clone();
+        self.rt.spawn_blocking(move || {
+            bridge.send(UiMsg::Running(provider.running_sessions()));
+        });
+    }
+
+    /// Stores a poll without Xade's own live sessions and queues a re-import when the set changed.
+    fn on_running(&mut self, list: Vec<RunningSession>) {
+        self.running_inflight = false;
+        let own: HashSet<&str> = self
+            .sessions
+            .values()
+            .filter(|vm| !matches!(vm.status, SessionStatus::Error(_)))
+            .filter_map(|vm| vm.session.provider_session_id.as_deref())
+            .collect();
+        let next: HashMap<String, RunningSession> = list
+            .into_iter()
+            .filter(|r| !own.contains(r.provider_session_id.as_str()))
+            .map(|r| (r.provider_session_id.clone(), r))
+            .collect();
+        let changed =
+            next.len() != self.running.len() || next.keys().any(|k| !self.running.contains_key(k));
+        // The first poll is the baseline; startup already imports.
+        if changed {
+            tracing::info!(running = next.len(), "running sessions changed");
+        }
+        if changed && self.running_polled {
+            self.running_import_due = true;
+        }
+        self.running_polled = true;
+        self.running = next;
+    }
+
+    /// Runs the queued re-import once the 30 s gap has passed and no import is in flight.
+    fn run_due_import(&mut self) {
+        let gap_over = self
+            .running_import_at
+            .is_none_or(|t| t.elapsed() >= RUNNING_IMPORT_GAP);
+        if self.running_import_due && !self.home.importing && gap_over {
+            self.running_import_due = false;
+            self.running_import_at = Some(Instant::now());
+            self.start_import();
+        }
+    }
+
+    /// The process running this session outside Xade, unless Xade has it live itself.
+    pub fn running_for(&self, card: &SessionCard) -> Option<&RunningSession> {
+        if self.is_live(card.id) {
+            return None;
+        }
+        self.running.get(card.provider_session_id.as_deref()?)
+    }
+
+    /// Opens a card's session, asking first when it is running elsewhere.
+    pub fn request_open(&mut self, card: &SessionCard, background: bool) {
+        match self.running_for(card) {
+            Some(r) => {
+                self.pending_open = Some(PendingOpen {
+                    id: card.id,
+                    location: r.location.clone(),
+                    background,
+                });
+            }
+            None => self.open_confirmed(card.id, background),
+        }
+    }
+
+    pub fn open_confirmed(&mut self, id: SessionId, background: bool) {
+        if background {
+            self.open_session_background(id);
+        } else {
+            self.open_session(id);
+        }
     }
 
     pub fn retry_preflight(&self) {
@@ -648,6 +764,7 @@ impl App {
                     p.selected = p.selected.min(p.results.len().saturating_sub(1));
                 }
             }
+            UiMsg::Running(list) => self.on_running(list),
             UiMsg::Workspaces(ws) => {
                 if self
                     .home
@@ -877,6 +994,9 @@ impl eframe::App for App {
             self.on_msg(msg);
         }
         self.handle_shortcuts(ctx);
+        self.poll_running();
+        self.run_due_import();
+        ctx.request_repaint_after(running::POLL);
         if let Some(changed) = self.home.search_changed_at {
             let wait = home::SEARCH_DEBOUNCE.saturating_sub(changed.elapsed());
             if wait.is_zero() {
@@ -927,6 +1047,7 @@ impl eframe::App for App {
         });
         let ctx = ui.ctx().clone();
         session_picker::show(self, &ctx);
+        running::confirm_modal(self, &ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {
             self.keymaps_open = false;
         }
