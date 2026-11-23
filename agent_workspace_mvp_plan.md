@@ -669,6 +669,14 @@ flowchart TD
 
 ---
 
+## 10e. Phase 10 — File tree explorer (Sonnet; last MVP feature)
+- Lives in the sidebar, under each workspace row. Clicking a workspace selects it (as today) and toggles its expansion, one level; folders expand the same way, recursively.
+- Lazy loading: `read_dir` runs only on expand, on a background task, and the result is cached until the folder is collapsed and re-expanded. Entries are sorted folders first, then case-insensitive by name. Dotfiles are shown; `.` and `..` never are (`read_dir` doesn't return them). At most 2,000 entries per folder, then a "… N more" row. Symlinked folders are shown but not followed.
+- Generic icons: folder closed or open, and one file icon. Rows indent per level. Long names truncate inside the resizable sidebar's scroll area.
+- Clicking a file opens it in the editor (an existing editor gets focus). Errors such as permission denied appear as a muted row.
+
+---
+
 ## 11. Wiki (`wiki-llm/`): structure and initial content
 
 Principles, from `AGENTS.md`: it orients, the code is the detail. One line per fact, each page under ~40 lines. No field lists, styling or history.
