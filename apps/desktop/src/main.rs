@@ -12,6 +12,7 @@ mod icons;
 mod keymap;
 mod logging;
 mod running;
+mod send_anim;
 mod session_view;
 mod status_bar;
 mod theme;

@@ -174,17 +174,15 @@ async fn create_send_close_open_resume() {
         &e.kind,
         AppEventKind::SessionOpened { messages, .. } if messages.len() == 4
     )));
-    assert_eq!(
-        provider
-            .spawns
-            .lock()
-            .unwrap()
-            .last()
-            .unwrap()
-            .resume
-            .as_deref(),
-        Some("fake-session")
-    );
+    // Opening starts no process; settings changed meanwhile apply to the first spawn.
+    let spawned_before = provider.spawns.lock().unwrap().len();
+    h.tx.send(ManagerCmd::SetModel {
+        session_id: id,
+        model_id: "haiku".into(),
+    })
+    .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(provider.spawns.lock().unwrap().len(), spawned_before);
 
     h.tx.send(ManagerCmd::Send {
         session_id: id,
@@ -192,6 +190,13 @@ async fn create_send_close_open_resume() {
     })
     .unwrap();
     h.until_status(5, SessionStatus::Idle).await;
+    {
+        let spawns = provider.spawns.lock().unwrap();
+        assert_eq!(spawns.len(), spawned_before + 1);
+        let last = spawns.last().unwrap();
+        assert_eq!(last.resume.as_deref(), Some("fake-session"));
+        assert_eq!(last.model_id, "haiku");
+    }
     xade_runtime::flush(&h.writer).await;
     let (_, msgs) = h.reader.load_session(id).await.unwrap();
     assert_eq!(msgs.len(), 8);

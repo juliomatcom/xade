@@ -24,9 +24,20 @@ pub struct SessionManager {
     reader: StoreReader,
     events: UnboundedSender<AppEvent>,
     live: HashMap<SessionId, UnboundedSender<ActorCmd>>,
+    /// Opened sessions whose provider process starts on their first `Send`.
+    dormant: HashMap<SessionId, Dormant>,
     tasks: Vec<JoinHandle<()>>,
     /// Parsed histories coming back from the blocking import tasks.
     import_tx: UnboundedSender<Vec<(ProviderId, Vec<ImportedSession>)>>,
+}
+
+/// An opened session with no provider process yet: resuming one is how the CLI touches the
+/// transcript, so it waits for the user to send something.
+struct Dormant {
+    session: Session,
+    cwd: std::path::PathBuf,
+    provider: Arc<dyn AgentProvider>,
+    next_seq: i64,
 }
 
 impl SessionManager {
@@ -46,6 +57,7 @@ impl SessionManager {
             reader,
             events,
             live: HashMap::new(),
+            dormant: HashMap::new(),
             tasks: Vec::new(),
             import_tx,
         };
@@ -134,6 +146,12 @@ impl SessionManager {
                     self.forward(session_id, ActorCmd::SetEffort(effort));
                 }
                 ManagerCmd::Close { session_id } => {
+                    if self.dormant.remove(&session_id).is_some() {
+                        self.emit(
+                            Some(session_id),
+                            AppEventKind::Status(SessionStatus::Closed),
+                        );
+                    }
                     if let Some(tx) = self.live.remove(&session_id) {
                         let _ = tx.send(ActorCmd::Close);
                     }
@@ -160,12 +178,105 @@ impl SessionManager {
     }
 
     fn forward(&mut self, id: SessionId, cmd: ActorCmd) {
+        if self.dormant.contains_key(&id) {
+            match cmd {
+                ActorCmd::Send(_) => {
+                    if !self.wake(id) {
+                        return;
+                    }
+                }
+                ActorCmd::SetAutoMode(_) | ActorCmd::SetModel(_) | ActorCmd::SetEffort(_) => {
+                    return self.configure_dormant(id, cmd);
+                }
+                // Nothing runs, so there is nothing to interrupt or approve.
+                ActorCmd::Interrupt | ActorCmd::Respond { .. } | ActorCmd::Close => return,
+            }
+        }
         let sent = self.live.get(&id).map(|tx| tx.send(cmd).is_ok());
         if sent != Some(true) {
             self.emit(
                 Some(id),
                 AppEventKind::Error("session is not running".into()),
             );
+        }
+    }
+
+    /// Starts the provider process of a dormant session; false (after reporting) on failure.
+    fn wake(&mut self, id: SessionId) -> bool {
+        let Some(d) = self.dormant.remove(&id) else {
+            return true;
+        };
+        let spawned = d.provider.spawn(SpawnConfig {
+            cwd: d.cwd.clone(),
+            model_id: d.session.model_id.clone(),
+            effort: d.session.effort,
+            auto_mode: d.session.auto_mode,
+            resume: d.session.provider_session_id.clone(),
+        });
+        match spawned {
+            Ok(handle) => {
+                let actor = Actor::new(
+                    d.session,
+                    d.cwd,
+                    d.provider,
+                    self.writer.clone(),
+                    self.events.clone(),
+                    handle,
+                    d.next_seq,
+                );
+                self.start_actor(actor);
+                true
+            }
+            Err(e) => {
+                self.emit(
+                    Some(id),
+                    AppEventKind::Status(SessionStatus::Error(e.to_string())),
+                );
+                false
+            }
+        }
+    }
+
+    /// Stores a model, effort or auto-mode change for the first spawn.
+    fn configure_dormant(&mut self, id: SessionId, cmd: ActorCmd) {
+        let Some(d) = self.dormant.get_mut(&id) else {
+            return;
+        };
+        let mut op = WriteOp::UpdateSession {
+            id,
+            title: None,
+            provider_session_id: None,
+            model_id: None,
+            effort: None,
+            auto_mode: None,
+            preview_snippet: None,
+            usage: None,
+        };
+        if let WriteOp::UpdateSession {
+            model_id,
+            effort,
+            auto_mode,
+            ..
+        } = &mut op
+        {
+            match cmd {
+                ActorCmd::SetAutoMode(on) => {
+                    d.session.auto_mode = on;
+                    *auto_mode = Some(on);
+                }
+                ActorCmd::SetModel(m) => {
+                    d.session.model_id = m.clone();
+                    *model_id = Some(m);
+                }
+                ActorCmd::SetEffort(e) => {
+                    d.session.effort = e;
+                    *effort = Some(e);
+                }
+                _ => return,
+            }
+        }
+        if let Err(e) = self.writer.send(op) {
+            tracing::error!(error = %e, "store write dropped");
         }
     }
 
@@ -239,6 +350,7 @@ impl SessionManager {
                 }
                 let id = match index.get(&imp.provider_session_id) {
                     Some(r) if r.origin == SessionOrigin::Xade => continue,
+                    Some(r) if self.dormant.contains_key(&r.id) => continue,
                     Some(r) if self.live.get(&r.id).is_some_and(|tx| !tx.is_closed()) => continue,
                     Some(r) if r.updated_at >= imp.updated_at => continue,
                     Some(r) => {
@@ -319,6 +431,7 @@ impl SessionManager {
                 "Only sessions created in Xade can be deleted here.".into(),
             );
         }
+        self.dormant.remove(&id);
         if let Some(tx) = self.live.remove(&id) {
             let _ = tx.send(ActorCmd::Close);
             // The actor drops its receiver when it ends, after its child exited.
@@ -355,7 +468,7 @@ impl SessionManager {
     }
 
     async fn open(&mut self, id: SessionId) {
-        if self.live.get(&id).is_some_and(|tx| !tx.is_closed()) {
+        if self.dormant.contains_key(&id) || self.live.get(&id).is_some_and(|tx| !tx.is_closed()) {
             return;
         }
         self.live.remove(&id);
@@ -390,35 +503,27 @@ impl SessionManager {
                 messages,
             },
         );
-        let spawned = match (cwd, self.provider(session.provider_id)) {
-            (Some(cwd), Some(provider)) => provider
-                .spawn(SpawnConfig {
-                    cwd: cwd.clone(),
-                    model_id: session.model_id.clone(),
-                    effort: session.effort,
-                    auto_mode: session.auto_mode,
-                    resume: session.provider_session_id.clone(),
-                })
-                .map(|h| (cwd, provider, h))
-                .map_err(|e| e.to_string()),
-            (None, _) => Err("workspace not found".to_string()),
-            (_, None) => Err("unknown provider".to_string()),
-        };
-        match spawned {
-            Ok((cwd, provider, handle)) => {
-                let actor = Actor::new(
-                    session,
-                    cwd,
-                    provider,
-                    self.writer.clone(),
-                    self.events.clone(),
-                    handle,
-                    next_seq,
+        match (cwd, self.provider(session.provider_id)) {
+            (Some(cwd), Some(provider)) => {
+                self.dormant.insert(
+                    id,
+                    Dormant {
+                        session,
+                        cwd,
+                        provider,
+                        next_seq,
+                    },
                 );
-                self.start_actor(actor);
                 self.emit(Some(id), AppEventKind::Status(SessionStatus::Idle));
             }
-            Err(msg) => self.emit(Some(id), AppEventKind::Status(SessionStatus::Error(msg))),
+            (None, _) => self.emit(
+                Some(id),
+                AppEventKind::Status(SessionStatus::Error("workspace not found".into())),
+            ),
+            (_, None) => self.emit(
+                Some(id),
+                AppEventKind::Status(SessionStatus::Error("unknown provider".into())),
+            ),
         }
     }
 }

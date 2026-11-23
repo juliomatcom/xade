@@ -239,7 +239,7 @@ async fn xade_sessions_and_live_sessions_are_never_overwritten() {
     );
     assert_eq!(msgs.len(), 2);
 
-    // Open the imported session: it resumes by its provider session id and becomes live.
+    // Open the imported session: it is live for import purposes but starts no process yet.
     let cc = h
         .reader
         .list_sessions(None, Some(SessionOrigin::ClaudeCode), 0, 24)
@@ -247,18 +247,13 @@ async fn xade_sessions_and_live_sessions_are_never_overwritten() {
         .unwrap()
         .items
         .remove(0);
+    let spawned_before = provider.spawns.lock().unwrap().len();
     h.tx.send(ManagerCmd::Open { session_id: cc.id }).unwrap();
     h.until_status(5, SessionStatus::Idle).await;
     assert_eq!(
-        provider
-            .spawns
-            .lock()
-            .unwrap()
-            .last()
-            .unwrap()
-            .resume
-            .as_deref(),
-        Some("cc")
+        provider.spawns.lock().unwrap().len(),
+        spawned_before,
+        "opening spawns nothing"
     );
     provider.import.lock().unwrap()[1] = imported("cc", "cc newer", &h.cwd, 0);
     assert_eq!(import(&mut h).await, (0, 0), "live session is skipped");

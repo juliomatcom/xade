@@ -8,7 +8,7 @@ use crate::app::{push_user_message, SessionVm};
 use crate::config::SendMode;
 use crate::running::{self, CacheKind};
 use crate::workspace::Env;
-use crate::{icons, theme};
+use crate::{icons, send_anim, theme};
 
 /// The input grows with its text between these row counts, then scrolls.
 const INPUT_MIN_ROWS: usize = 2;
@@ -137,6 +137,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
             });
         });
     if let Some(other) = send {
+        send_anim::trigger(ui.ctx(), id);
         let text = std::mem::take(&mut vm.input);
         let mode = if other {
             env.send_mode.other()

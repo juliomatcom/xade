@@ -7,7 +7,7 @@ use xade_runtime::ManagerCmd;
 use crate::app::SessionVm;
 use crate::diff::is_code_change;
 use crate::workspace::Env;
-use crate::{chrome, composer, conversation, home, icons, running, theme};
+use crate::{chrome, composer, conversation, home, icons, running, send_anim, theme};
 
 pub const HEADER_HEIGHT: f32 = 34.0;
 
@@ -42,9 +42,10 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
             banner(ui, vm, env);
             composer::show(ui, vm, env);
         });
-    egui::CentralPanel::default()
+    let chat = egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
         .show(ui, |ui| out.open_file = conversation::show(ui, vm));
+    send_anim::show(ui, vm.session.id, chat.response.rect);
     out
 }
 
