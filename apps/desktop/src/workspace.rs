@@ -1,4 +1,4 @@
-//! Workspace view: one `egui::Window` per open session, auto-tiled into a grid.
+//! Workspace view: one `egui::Window` per open session or editor, auto-tiled into a grid.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -8,7 +8,8 @@ use tokio::sync::mpsc::UnboundedSender;
 use xade_core::{AgentProvider, SessionId};
 use xade_runtime::ManagerCmd;
 
-use crate::app::App;
+use crate::app::{App, SessionVm};
+use crate::editor::{self, EditorId, EditorVm};
 use crate::session_view;
 use crate::theme;
 use crate::widgets::diff_modal::{self, ModalAction};
@@ -21,6 +22,58 @@ const MIN_TILE: [f32; 2] = [380.0, 300.0];
 /// How far a window may drift from its tile before auto-tiling turns off.
 const MOVE_TOLERANCE: f32 = 3.0;
 
+/// An open window: a session or an editor, tiled alike in open order.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub enum WindowKind {
+    Session(SessionId),
+    Editor(EditorId),
+}
+
+impl WindowKind {
+    pub fn session(self) -> Option<SessionId> {
+        match self {
+            WindowKind::Session(id) => Some(id),
+            WindowKind::Editor(_) => None,
+        }
+    }
+}
+
+pub fn win_id(kind: WindowKind) -> Id {
+    Id::unique(kind)
+}
+
+/// A window's state while it is taken out of `App` for drawing.
+enum Taken {
+    Session(Box<SessionVm>),
+    Editor(Box<EditorVm>),
+}
+
+type Geom<'a> = (&'a mut bool, &'a mut Option<Rect>, &'a mut Option<Rect>);
+
+impl Taken {
+    /// `(collapsed, window_rect, apply_rect)` of either kind.
+    fn geom(&mut self) -> Geom<'_> {
+        match self {
+            Taken::Session(vm) => (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect),
+            Taken::Editor(vm) => (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect),
+        }
+    }
+}
+
+fn geom_of(app: &mut App, kind: WindowKind) -> Option<Geom<'_>> {
+    match kind {
+        WindowKind::Session(id) => app
+            .sessions
+            .get_mut(&id)
+            .map(|vm| (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect)),
+        WindowKind::Editor(id) => app
+            .editors
+            .map
+            .get_mut(&id)
+            .map(|vm| (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect)),
+    }
+}
+
 /// What session views need from `App` while their `SessionVm` is borrowed out of it.
 pub struct Env<'a> {
     pub cmd_tx: &'a UnboundedSender<ManagerCmd>,
@@ -32,7 +85,7 @@ pub struct Env<'a> {
 /// Auto-tiling state: windows are re-tiled while `auto` and the set of windows or the area changes.
 pub struct Tiling {
     pub auto: bool,
-    ids: Vec<SessionId>,
+    ids: Vec<WindowKind>,
     area: Rect,
 }
 
@@ -162,33 +215,33 @@ fn differs(a: Rect, b: Rect) -> bool {
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
     let area = ui.available_rect_before_wrap();
-    let ids: Vec<SessionId> = app
+    let kinds: Vec<WindowKind> = app
         .open_windows
         .iter()
         .copied()
-        .filter(|id| app.sessions.contains_key(id))
+        .filter(|k| app.window_exists(*k))
         .collect();
-    if ids.is_empty() {
+    if kinds.is_empty() {
         ui.label(egui::RichText::new("Opening session…").color(theme::TEXT_MUTED));
         return;
     }
     let tiles = layout(
         area,
-        ids.len(),
+        kinds.len(),
         app.maximized
-            .and_then(|m| ids.iter().position(|id| *id == m)),
+            .and_then(|m| kinds.iter().position(|k| *k == m)),
     );
     let retile = app.tiling.auto
-        && (app.tiling.ids != ids
+        && (app.tiling.ids != kinds
             || differs(app.tiling.area, area)
             || app.tiling.area.is_negative());
     if retile {
-        app.tiling.ids = ids.clone();
+        app.tiling.ids = kinds.clone();
         app.tiling.area = area;
-        for (id, (rect, collapsed)) in ids.iter().zip(&tiles) {
-            if let Some(vm) = app.sessions.get_mut(id) {
-                vm.apply_rect = Some(*rect);
-                vm.collapsed = *collapsed;
+        for (kind, (rect, collapsed)) in kinds.iter().zip(&tiles) {
+            if let Some((c, _, apply)) = geom_of(app, *kind) {
+                *apply = Some(*rect);
+                *c = *collapsed;
             }
         }
     }
@@ -198,100 +251,149 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut user_moved = false;
     let mut pressed = None;
     let mut prev_min = area.min;
+    let mut errors = Vec::new();
     let pointer_down = ctx.input(|i| i.pointer.any_pressed());
     let press_layer = ctx
         .pointer_interact_pos()
         .filter(|_| pointer_down)
         .and_then(|p| ctx.layer_id_at(p));
-    for (i, id) in ids.iter().enumerate() {
-        let Some(mut vm) = app.sessions.remove(id) else {
+    for (i, kind) in kinds.iter().enumerate() {
+        let taken = match *kind {
+            WindowKind::Session(id) => app
+                .sessions
+                .remove(&id)
+                .map(|vm| Taken::Session(Box::new(vm))),
+            WindowKind::Editor(id) => app
+                .editors
+                .map
+                .remove(&id)
+                .map(|vm| Taken::Editor(Box::new(vm))),
+        };
+        let Some(mut taken) = taken else {
             continue;
         };
         let env = Env {
             cmd_tx: &app.cmd_tx,
             providers: &app.providers,
             vscode: app.vscode.as_deref(),
-            maximized: app.maximized,
+            maximized: app.maximized.and_then(WindowKind::session),
         };
-        let applying = vm.apply_rect.take();
+        let editor_maximized = app.maximized == Some(*kind);
+        let collapsed = *taken.geom().0;
+        let applying = taken.geom().2.take();
         let default_pos = if i > 0 {
             prev_min + egui::vec2(CASCADE, CASCADE)
         } else {
             prev_min
         };
-        let win = window(*id, vm.collapsed, area, applying, default_pos);
+        let win = window(win_id(*kind), collapsed, area, applying, default_pos);
         let mut out = session_view::ViewOut::default();
-        let resp = win.show(&ctx, |ui| out = session_view::show(ui, &mut vm, &env));
+        let resp = win.show(&ctx, |ui| match &mut taken {
+            Taken::Session(vm) => out = session_view::show(ui, vm, &env),
+            Taken::Editor(vm) => {
+                let o = editor::show(ui, vm, editor_maximized);
+                out = o.view;
+                errors.extend(o.error);
+            }
+        });
+        let mut collapsed = collapsed;
+        let mut window_rect = *taken.geom().1;
         if let Some(resp) = &resp {
             let rect = resp.response.rect;
             prev_min = rect.min;
-            if applying.is_none() && !vm.collapsed {
-                vm.window_rect = Some(rect);
+            if applying.is_none() && !collapsed {
+                window_rect = Some(rect);
                 if app.tiling.auto && !retile && differs(rect, tiles[i].0) {
                     user_moved = true;
                 }
             }
             if press_layer == Some(resp.response.layer_id) {
-                pressed = Some(*id);
+                pressed = Some(*kind);
             }
         }
+        let mut apply_rect = None;
         if out.maximize {
-            toggle_max = Some(*id);
-        } else if out.collapse && app.maximized.is_some_and(|m| m != *id) {
+            toggle_max = Some(*kind);
+        } else if out.collapse && app.maximized.is_some_and(|m| m != *kind) {
             // Expanding a minimized window while another is maximized hands the maximize over.
-            toggle_max = Some(*id);
+            toggle_max = Some(*kind);
         } else if out.collapse {
-            let rect = vm.window_rect.unwrap_or(tiles[i].0);
-            if vm.collapsed {
-                vm.apply_rect = Some(rect);
+            let rect = window_rect.unwrap_or(tiles[i].0);
+            apply_rect = Some(if collapsed {
+                rect
             } else {
-                vm.apply_rect = Some(Rect::from_min_size(
+                Rect::from_min_size(
                     rect.min,
                     egui::vec2(rect.width(), session_view::HEADER_HEIGHT),
-                ));
-            }
-            vm.collapsed = !vm.collapsed;
+                )
+            });
+            collapsed = !collapsed;
         }
         if out.close {
-            closes.push(*id);
+            closes.push(*kind);
         }
-        diff_modal_for(&ctx, *id, &mut vm, &env);
-        app.sessions.insert(*id, vm);
+        {
+            let (c, w, a) = taken.geom();
+            *c = collapsed;
+            *w = window_rect;
+            if apply_rect.is_some() {
+                *a = apply_rect;
+            }
+        }
+        match taken {
+            Taken::Session(mut vm) => {
+                if let WindowKind::Session(id) = *kind {
+                    diff_modal_for(&ctx, id, &mut vm, &env);
+                    app.sessions.insert(id, *vm);
+                }
+            }
+            Taken::Editor(vm) => {
+                if let WindowKind::Editor(id) = *kind {
+                    app.editors.map.insert(id, *vm);
+                }
+            }
+        }
+    }
+    if let Some(e) = errors.pop() {
+        app.error = Some(e);
     }
 
-    if let Some(id) = toggle_max {
-        app.maximized = if app.maximized == Some(id) {
+    if let Some(kind) = toggle_max {
+        app.maximized = if app.maximized == Some(kind) {
             None
         } else {
-            Some(id)
+            Some(kind)
         };
         app.tiling.retile();
-        app.raise = Some(id);
+        app.raise = Some(kind);
     }
     if user_moved && toggle_max.is_none() {
         app.tiling.auto = false;
     }
-    if let Some(id) = pressed {
-        app.focused = Some(id);
+    if let Some(kind) = pressed {
+        app.focused = Some(kind);
     }
-    if let Some(id) = app.raise.take() {
-        ctx.move_to_top(egui::LayerId::new(Order::Middle, Id::unique(id)));
+    if let Some(kind) = app.raise.take() {
+        ctx.move_to_top(egui::LayerId::new(Order::Middle, win_id(kind)));
     }
-    for id in closes {
-        app.close_session(id);
+    for kind in closes {
+        match kind {
+            WindowKind::Session(id) => app.close_session(id),
+            WindowKind::Editor(id) => app.request_close_editor(id),
+        }
     }
 }
 
 /// One session window; `applying` forces its rect for this frame only.
 fn window<'a>(
-    id: SessionId,
+    id: Id,
     collapsed: bool,
     area: Rect,
     applying: Option<Rect>,
     default_pos: egui::Pos2,
 ) -> egui::Window<'a> {
     let win = egui::Window::new("session")
-        .id(Id::unique(id))
+        .id(id)
         .title_bar(false)
         // While the size is being forced the window's previous size may still be wrong, and
         // constraining against it would shove the window off its tile.
@@ -573,7 +675,13 @@ mod tests {
             frame(&ctx, |ctx| {
                 for (i, vm) in vms.iter_mut().enumerate() {
                     let applying = (f == 0).then_some(tiles[i]);
-                    let win = window(vm.session.id, false, area, applying, area.min);
+                    let win = window(
+                        win_id(WindowKind::Session(vm.session.id)),
+                        false,
+                        area,
+                        applying,
+                        area.min,
+                    );
                     let resp = win.show(ctx, |ui| {
                         session_view::show(ui, vm, &env);
                     });
@@ -606,12 +714,68 @@ mod tests {
         for f in 0..4 {
             v.collapsed = f == 3;
             frame(&ctx, |ctx| {
-                let win = window(v.session.id, v.collapsed, area, None, area.min);
+                let win = window(
+                    win_id(WindowKind::Session(v.session.id)),
+                    v.collapsed,
+                    area,
+                    None,
+                    area.min,
+                );
                 win.show(ctx, |ui| {
                     session_view::show(ui, &mut v, &env);
                 });
                 diff_modal_for(ctx, v.session.id, &mut v, &env);
             });
         }
+    }
+
+    #[test]
+    fn sessions_and_editors_share_the_grid_in_open_order() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-ws-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let (s1, s2) = (vm(), vm());
+        let (id1, id2) = (s1.session.id, s2.session.id);
+        app.sessions.insert(id1, s1);
+        app.sessions.insert(id2, s2);
+        let e = app.editors.create(None, "# hi\n".into());
+        app.focus(WindowKind::Session(id1));
+        app.focus(WindowKind::Editor(e));
+        app.focus(WindowKind::Session(id2));
+        let order = [
+            WindowKind::Session(id1),
+            WindowKind::Editor(e),
+            WindowKind::Session(id2),
+        ];
+        assert_eq!(app.open_windows, order);
+        let screen = Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1400.0, 900.0));
+        for _ in 0..6 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| show(&mut app, ui))
+                .drop_without_applying_deltas();
+        }
+        let tiles = tile_rects(screen, 3);
+        let rects = [
+            app.sessions[&id1].window_rect,
+            app.editors.map[&e].window_rect,
+            app.sessions[&id2].window_rect,
+        ];
+        for (i, r) in rects.iter().enumerate() {
+            let r = r.expect("drawn");
+            assert!(!differs(r, tiles[i]), "window {i}: {r:?} vs {:?}", tiles[i]);
+        }
+        // Closing the editor re-tiles the sessions into two tiles.
+        app.request_close_editor(e);
+        assert_eq!(app.open_windows.len(), 2);
+        assert!(app.tiling.auto);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

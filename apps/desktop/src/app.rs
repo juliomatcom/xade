@@ -21,12 +21,13 @@ use xade_store::{Page, SessionCard, StoreReader, WriteOp, WriterHandle};
 
 use crate::config::{self, Config};
 use crate::diff::{is_code_change, DiffData};
+use crate::editor::{self, CloseChoice, EditorId, Editors, SaveOutcome};
 use crate::home::HomeState;
 use crate::keymap::{self, Action, Chord};
 use crate::running::{self, PendingOpen};
 use crate::widgets::keymaps_modal;
 use crate::widgets::session_picker::{self, PickerState};
-use crate::workspace::Tiling;
+use crate::workspace::{Tiling, WindowKind};
 use crate::{home, icons, status_bar, theme, workspace};
 
 const GIT_REFRESH: Duration = Duration::from_secs(5);
@@ -56,6 +57,17 @@ pub enum UiMsg {
     },
     /// One `running_sessions` poll.
     Running(Vec<RunningSession>),
+    /// A file picked with Open File, read off the UI thread.
+    FileOpened {
+        path: PathBuf,
+        text: Result<String, String>,
+    },
+    /// A save finished; `revision` is the text version that was written.
+    Saved {
+        id: EditorId,
+        revision: u64,
+        outcome: SaveOutcome,
+    },
 }
 
 /// Sends to the UI thread and wakes it.
@@ -138,8 +150,9 @@ pub struct App {
     pub view: View,
     pub home: HomeState,
     pub sessions: HashMap<SessionId, SessionVm>,
-    pub open_windows: Vec<SessionId>,
-    pub focused: Option<SessionId>,
+    pub open_windows: Vec<WindowKind>,
+    pub focused: Option<WindowKind>,
+    pub editors: Editors,
     pub quota: Vec<QuotaWindow>,
     pub cmd_tx: UnboundedSender<ManagerCmd>,
     pub rt: Handle,
@@ -150,9 +163,9 @@ pub struct App {
     pub reader: StoreReader,
     pub tiling: Tiling,
     /// The session window filling the central area; the others are collapsed.
-    pub maximized: Option<SessionId>,
+    pub maximized: Option<WindowKind>,
     /// Window to bring to the front on the next frame.
-    pub raise: Option<SessionId>,
+    pub raise: Option<WindowKind>,
     pub vscode: Option<PathBuf>,
     config: Config,
     /// Live-reload watcher of `config.json`; absent in headless tests.
@@ -217,6 +230,7 @@ impl App {
             sessions: HashMap::new(),
             open_windows: Vec::new(),
             focused: None,
+            editors: Editors::default(),
             quota: Vec::new(),
             cmd_tx,
             rt,
@@ -274,6 +288,7 @@ impl App {
             sessions: HashMap::new(),
             open_windows: Vec::new(),
             focused: None,
+            editors: Editors::default(),
             quota: Vec::new(),
             cmd_tx: tokio::sync::mpsc::unbounded_channel().0,
             rt,
@@ -623,7 +638,7 @@ impl App {
         if !self.is_live(id) {
             let _ = self.cmd_tx.send(ManagerCmd::Open { session_id: id });
         }
-        self.focus(id);
+        self.focus(WindowKind::Session(id));
     }
 
     /// Opens a stored session as a window without leaving the current view (Cmd+click on Home).
@@ -632,7 +647,7 @@ impl App {
             return;
         }
         if self.is_live(id) {
-            self.add_window(id);
+            self.add_window(WindowKind::Session(id));
         } else if self.background.insert(id) {
             let _ = self.cmd_tx.send(ManagerCmd::Open { session_id: id });
         }
@@ -644,19 +659,33 @@ impl App {
             .is_some_and(|vm| !matches!(vm.status, SessionStatus::Error(_)))
     }
 
-    fn add_window(&mut self, id: SessionId) {
-        if !self.open_windows.contains(&id) {
-            self.open_windows.push(id);
+    pub fn window_exists(&self, kind: WindowKind) -> bool {
+        match kind {
+            WindowKind::Session(id) => self.sessions.contains_key(&id),
+            WindowKind::Editor(id) => self.editors.map.contains_key(&id),
+        }
+    }
+
+    fn add_window(&mut self, kind: WindowKind) {
+        if !self.open_windows.contains(&kind) {
+            self.open_windows.push(kind);
             self.maximized = None;
             self.tiling.retile();
         }
     }
 
-    fn focus(&mut self, id: SessionId) {
-        self.add_window(id);
-        self.focused = Some(id);
-        self.raise = Some(id);
+    pub fn focus(&mut self, kind: WindowKind) {
+        self.add_window(kind);
+        self.focused = Some(kind);
+        self.raise = Some(kind);
         self.view = View::Workspace;
+    }
+
+    /// The focused window when it is a live session.
+    fn focused_session(&self) -> Option<SessionId> {
+        self.focused
+            .and_then(WindowKind::session)
+            .filter(|id| self.sessions.contains_key(id))
     }
 
     pub fn close_session(&mut self, id: SessionId) {
@@ -666,12 +695,16 @@ impl App {
 
     fn drop_session(&mut self, id: SessionId) {
         self.sessions.remove(&id);
-        self.open_windows.retain(|s| *s != id);
-        if self.maximized == Some(id) {
+        self.drop_window(WindowKind::Session(id));
+    }
+
+    fn drop_window(&mut self, kind: WindowKind) {
+        self.open_windows.retain(|k| *k != kind);
+        if self.maximized == Some(kind) {
             self.maximized = None;
         }
         self.tiling.retile();
-        if self.focused == Some(id) {
+        if self.focused == Some(kind) {
             self.focused = self.open_windows.last().copied();
         }
         if self.open_windows.is_empty() {
@@ -679,11 +712,222 @@ impl App {
         }
     }
 
+    // ----- editors -----
+
+    /// Where file dialogs start: the selected workspace, else the focused session, else home.
+    pub fn target_dir(&self) -> PathBuf {
+        let selected = self
+            .home
+            .scope
+            .and_then(|id| self.home.workspaces.iter().find(|w| w.id == id))
+            .map(|w| w.root_path.clone());
+        selected
+            .or_else(|| {
+                self.focused_session()
+                    .and_then(|id| self.sessions.get(&id))
+                    .map(|vm| vm.cwd.clone())
+            })
+            .or_else(dirs::home_dir)
+            .unwrap_or_else(|| PathBuf::from("."))
+    }
+
+    pub fn new_editor(&mut self) {
+        let id = self.editors.create(None, String::new());
+        self.focus(WindowKind::Editor(id));
+    }
+
+    /// Cmd+O: a file dialog, then the read, both off the UI thread.
+    pub fn open_file_dialog(&self) {
+        let (dir, bridge) = (self.target_dir(), self.bridge.clone());
+        self.rt.spawn(async move {
+            let Some(file) = rfd::AsyncFileDialog::new()
+                .set_directory(dir)
+                .pick_file()
+                .await
+            else {
+                return;
+            };
+            let path = file.path().to_path_buf();
+            let read = path.clone();
+            let text = tokio::task::spawn_blocking(move || editor::read_file(&read))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()));
+            bridge.send(UiMsg::FileOpened { path, text });
+        });
+    }
+
+    fn on_file_opened(&mut self, path: PathBuf, text: Result<String, String>) {
+        match text {
+            Err(e) => self.error = Some(e),
+            Ok(text) => {
+                let id = match self.editors.find_path(&path) {
+                    Some(id) => id,
+                    None => self.editors.create(Some(path), text),
+                };
+                self.focus(WindowKind::Editor(id));
+            }
+        }
+    }
+
+    /// Writes the editor's text, asking for a path first when it has none or `as_new`.
+    pub fn save_editor(&mut self, id: EditorId, as_new: bool, close_after: bool) {
+        let dir = self.target_dir();
+        let Some(vm) = self.editors.map.get_mut(&id).filter(|vm| !vm.busy) else {
+            return;
+        };
+        vm.busy = true;
+        vm.close_after_save = close_after;
+        let (text, revision, name) = (vm.text.clone(), vm.revision, vm.title());
+        let known = vm.path.clone().filter(|_| !as_new);
+        let start = vm
+            .path
+            .as_deref()
+            .and_then(|p| p.parent())
+            .map_or(dir, |p| p.to_path_buf());
+        let bridge = self.bridge.clone();
+        self.rt.spawn(async move {
+            let path = match known {
+                Some(p) => p,
+                None => {
+                    let picked = rfd::AsyncFileDialog::new()
+                        .set_directory(start)
+                        .set_file_name(name)
+                        .save_file()
+                        .await;
+                    match picked {
+                        Some(f) => f.path().to_path_buf(),
+                        None => {
+                            let outcome = SaveOutcome::Cancelled;
+                            bridge.send(UiMsg::Saved {
+                                id,
+                                revision,
+                                outcome,
+                            });
+                            return;
+                        }
+                    }
+                }
+            };
+            let target = path.clone();
+            let written =
+                tokio::task::spawn_blocking(move || editor::write_atomic(&target, &text)).await;
+            let outcome = match written {
+                Ok(Ok(())) => SaveOutcome::Saved(path),
+                Ok(Err(e)) => SaveOutcome::Failed(e.to_string()),
+                Err(e) => SaveOutcome::Failed(e.to_string()),
+            };
+            bridge.send(UiMsg::Saved {
+                id,
+                revision,
+                outcome,
+            });
+        });
+    }
+
+    fn on_saved(&mut self, id: EditorId, revision: u64, outcome: SaveOutcome) {
+        let Some(vm) = self.editors.map.get_mut(&id) else {
+            return;
+        };
+        vm.busy = false;
+        let close = std::mem::take(&mut vm.close_after_save);
+        match outcome {
+            SaveOutcome::Saved(path) => {
+                if vm.revision == revision {
+                    vm.dirty = false;
+                }
+                vm.disk_mtime = editor::mtime(&path);
+                vm.disk_changed = false;
+                vm.path = Some(path);
+                if close && !vm.dirty {
+                    self.close_editor(id);
+                }
+            }
+            SaveOutcome::Cancelled => {}
+            SaveOutcome::Failed(e) => self.error = Some(format!("Save failed: {e}")),
+        }
+    }
+
+    /// Closes at once when clean; a dirty editor asks first.
+    pub fn request_close_editor(&mut self, id: EditorId) {
+        match self.editors.map.get(&id) {
+            Some(vm) if vm.dirty => {
+                self.editors.pending_close = Some(id);
+                self.focus(WindowKind::Editor(id));
+            }
+            Some(_) => self.close_editor(id),
+            None => {}
+        }
+    }
+
+    fn close_editor(&mut self, id: EditorId) {
+        self.editors.map.remove(&id);
+        if self.editors.pending_close == Some(id) {
+            self.editors.pending_close = None;
+        }
+        self.drop_window(WindowKind::Editor(id));
+    }
+
+    /// Draws the "Save changes?" modal while an editor waits to close.
+    fn editor_modal(&mut self, ctx: &egui::Context) {
+        let Some(id) = self.editors.pending_close else {
+            return;
+        };
+        match self.editors.map.get(&id).map(|vm| vm.title()) {
+            Some(name) => {
+                if let Some(choice) = editor::close_modal(ctx, &name) {
+                    self.resolve_close(id, choice);
+                }
+            }
+            None => self.editors.pending_close = None,
+        }
+    }
+
+    fn resolve_close(&mut self, id: EditorId, choice: CloseChoice) {
+        self.editors.pending_close = None;
+        match choice {
+            CloseChoice::Save => self.save_editor(id, false, true),
+            CloseChoice::DontSave => self.close_editor(id),
+            CloseChoice::Cancel => {}
+        }
+    }
+
+    /// Compares open files with disk every `DISK_POLL`, or at once when `force`.
+    fn check_editors(&mut self, ctx: &egui::Context, force: bool) {
+        if self.editors.map.is_empty() {
+            return;
+        }
+        ctx.request_repaint_after(editor::DISK_POLL);
+        let due = self
+            .editors
+            .checked
+            .is_none_or(|t| t.elapsed() >= editor::DISK_POLL);
+        if !(due || force) {
+            return;
+        }
+        self.editors.checked = Some(Instant::now());
+        for vm in self.editors.map.values_mut() {
+            if let Err(e) = vm.check_disk() {
+                self.error = Some(e);
+            }
+        }
+    }
+
     /// The directory the status bar describes.
     pub fn active_dir(&self) -> Option<PathBuf> {
         if self.view == View::Workspace {
-            if let Some(vm) = self.focused.and_then(|id| self.sessions.get(&id)) {
-                return Some(vm.cwd.clone());
+            match self.focused {
+                Some(WindowKind::Session(id)) => {
+                    if let Some(vm) = self.sessions.get(&id) {
+                        return Some(vm.cwd.clone());
+                    }
+                }
+                Some(WindowKind::Editor(id)) => {
+                    if let Some(vm) = self.editors.map.get(&id) {
+                        let parent = vm.path.as_deref().and_then(|p| p.parent());
+                        return Some(parent.map_or_else(|| self.target_dir(), PathBuf::from));
+                    }
+                }
+                None => {}
             }
         }
         let ws = &self.home.workspaces;
@@ -713,7 +957,11 @@ impl App {
 
     /// Runs one shortcut. Actions that need a focused session do nothing without one.
     pub fn run_action(&mut self, action: Action) {
-        let focused = self.focused.filter(|id| self.sessions.contains_key(id));
+        let focused = self.focused_session();
+        let focused_editor = match self.focused {
+            Some(WindowKind::Editor(id)) if self.editors.map.contains_key(&id) => Some(id),
+            _ => None,
+        };
         let in_workspace = self.view == View::Workspace;
         match action {
             Action::NewSession => {
@@ -721,6 +969,13 @@ impl App {
                     self.error = Some("Select a workspace in the sidebar first.".into());
                 } else {
                     self.new_session();
+                }
+            }
+            Action::NewFile => self.new_editor(),
+            Action::OpenFile => self.open_file_dialog(),
+            Action::Save | Action::SaveAs => {
+                if let Some(id) = focused_editor {
+                    self.save_editor(id, action == Action::SaveAs, false);
                 }
             }
             Action::OpenPicker => {
@@ -741,15 +996,17 @@ impl App {
             Action::CloseWindow => {
                 if let (true, Some(id)) = (in_workspace, focused) {
                     self.close_session(id);
+                } else if let (true, Some(id)) = (in_workspace, focused_editor) {
+                    self.request_close_editor(id);
                 }
             }
             Action::FocusWindow(n) => {
-                let id = self
+                let kind = self
                     .open_windows
                     .get(usize::from(n).saturating_sub(1))
                     .copied();
-                if let Some(id) = id.filter(|id| self.sessions.contains_key(id)) {
-                    self.focus(id);
+                if let Some(kind) = kind.filter(|k| self.window_exists(*k)) {
+                    self.focus(kind);
                 }
             }
             Action::NextWindow | Action::PrevWindow => {
@@ -767,10 +1024,13 @@ impl App {
                 }
             }
             Action::Maximize => {
-                if let (true, Some(id)) = (in_workspace, focused) {
-                    self.maximized = (self.maximized != Some(id)).then_some(id);
+                if let (true, Some(kind)) = (
+                    in_workspace,
+                    self.focused.filter(|k| self.window_exists(*k)),
+                ) {
+                    self.maximized = (self.maximized != Some(kind)).then_some(kind);
                     self.tiling.retile();
-                    self.raise = Some(id);
+                    self.raise = Some(kind);
                 }
             }
             Action::ToggleSidebar => self.sidebar_visible = !self.sidebar_visible,
@@ -841,6 +1101,12 @@ impl App {
                 }
             }
             UiMsg::Running(list) => self.on_running(list),
+            UiMsg::FileOpened { path, text } => self.on_file_opened(path, text),
+            UiMsg::Saved {
+                id,
+                revision,
+                outcome,
+            } => self.on_saved(id, revision, outcome),
             UiMsg::Workspaces(ws) => {
                 if self
                     .home
@@ -900,9 +1166,9 @@ impl App {
             },
         );
         if self.background.remove(&id) {
-            self.add_window(id);
+            self.add_window(WindowKind::Session(id));
         } else {
-            self.focus(id);
+            self.focus(WindowKind::Session(id));
         }
     }
 
@@ -997,6 +1263,8 @@ impl App {
                 m.is_error = is_error;
                 vm.messages.push(m);
                 refresh_git = true;
+                // An agent edit may have changed an open file.
+                self.editors.checked = None;
             }
             ProviderEvent::PermissionRequest {
                 request_id,
@@ -1071,6 +1339,7 @@ impl eframe::App for App {
         }
         self.handle_shortcuts(ctx);
         self.reload_config(ctx);
+        self.check_editors(ctx, false);
         self.poll_running();
         self.run_due_import();
         ctx.request_repaint_after(running::POLL);
@@ -1125,6 +1394,7 @@ impl eframe::App for App {
         let ctx = ui.ctx().clone();
         session_picker::show(self, &ctx);
         running::confirm_modal(self, &ctx);
+        self.editor_modal(&ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {
             self.keymaps_open = false;
         }
@@ -1133,6 +1403,10 @@ impl eframe::App for App {
     /// eframe calls this on the window close button and on Cmd+Q (via `exiting`),
     /// possibly twice; a repeat `ShutdownAll` returns at once.
     fn on_exit(&mut self) {
+        let dirty = self.editors.map.values().filter(|vm| vm.dirty).count();
+        if dirty > 0 {
+            tracing::warn!(dirty, "exiting with unsaved editors");
+        }
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self.cmd_tx.send(ManagerCmd::ShutdownAll(tx)).is_ok() {
             let _ = self
@@ -1194,7 +1468,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let ctx = egui::Context::default();
         let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
-        let (a, b, c) = (SessionId::new(), SessionId::new(), SessionId::new());
+        let (a, b, c) = (
+            WindowKind::Session(SessionId::new()),
+            WindowKind::Session(SessionId::new()),
+            WindowKind::Session(SessionId::new()),
+        );
         app.add_window(a);
         app.maximized = Some(a);
         app.tiling.auto = false;
@@ -1206,8 +1484,143 @@ mod tests {
         app.add_window(c);
         assert!(app.tiling.auto);
         app.tiling.auto = false;
-        app.drop_session(b);
+        app.drop_window(b);
         assert!(app.tiling.auto && app.open_windows == vec![a, c]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn test_app(rt: &tokio::runtime::Runtime) -> (App, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("xade-app-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        (app, dir)
+    }
+
+    /// Waits for the next bridge message and folds it in.
+    fn pump(app: &mut App) {
+        let msg = app
+            .events_rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("bridge message");
+        app.on_msg(msg);
+    }
+
+    #[test]
+    fn save_writes_atomically_and_clears_dirty() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let path = dir.join("note.md");
+        let id = app.editors.create(Some(path.clone()), String::new());
+        {
+            let vm = app.editors.map.get_mut(&id).unwrap();
+            vm.text = "hello".into();
+            vm.dirty = true;
+            vm.revision = 1;
+        }
+        app.save_editor(id, false, false);
+        pump(&mut app);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello");
+        assert!(!app.editors.map[&id].dirty && !app.editors.map[&id].busy);
+        assert!(app.error.is_none());
+        let names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.iter().all(|n| !n.ends_with(".tmp")), "{names:?}");
+        // An edit made while a save is in flight keeps the editor dirty.
+        {
+            let vm = app.editors.map.get_mut(&id).unwrap();
+            vm.text = "hello!".into();
+            vm.dirty = true;
+            vm.revision = 2;
+        }
+        app.save_editor(id, false, false);
+        app.editors.map.get_mut(&id).unwrap().revision = 3;
+        pump(&mut app);
+        assert!(app.editors.map[&id].dirty);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dirty_close_asks_and_each_choice_acts() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let path = dir.join("a.md");
+        let make = |app: &mut App, dirty: bool| {
+            let id = app.editors.create(Some(path.clone()), "x".into());
+            app.editors.map.get_mut(&id).unwrap().dirty = dirty;
+            app.focus(WindowKind::Editor(id));
+            id
+        };
+        // Clean: closes at once.
+        let id = make(&mut app, false);
+        app.request_close_editor(id);
+        assert!(app.editors.map.is_empty() && app.open_windows.is_empty());
+        // Dirty: asks; Cancel keeps it.
+        let id = make(&mut app, true);
+        app.request_close_editor(id);
+        assert_eq!(app.editors.pending_close, Some(id));
+        app.resolve_close(id, CloseChoice::Cancel);
+        assert!(app.editors.pending_close.is_none() && app.editors.map.contains_key(&id));
+        // Don't Save: closes without writing.
+        app.request_close_editor(id);
+        app.resolve_close(id, CloseChoice::DontSave);
+        assert!(app.editors.map.is_empty() && !path.exists());
+        // Save: writes, then closes.
+        let id = make(&mut app, true);
+        app.request_close_editor(id);
+        app.resolve_close(id, CloseChoice::Save);
+        pump(&mut app);
+        assert!(app.editors.map.is_empty() && app.open_windows.is_empty());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "x");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dirty_close_modal_draws_for_the_pending_editor() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let id = app.editors.create(None, "x".into());
+        app.editors.map.get_mut(&id).unwrap().dirty = true;
+        app.focus(WindowKind::Editor(id));
+        app.request_close_editor(id);
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            ctx.run_pass(input, |ctx| app.editor_modal(ctx))
+                .drop_without_applying_deltas();
+        }
+        assert_eq!(app.editors.pending_close, Some(id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn target_folder_prefers_workspace_then_session_then_home() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, dir) = test_app(&rt);
+        assert_eq!(app.target_dir(), dirs::home_dir().unwrap());
+        let ws = Workspace {
+            id: WorkspaceId::new(),
+            root_path: dir.clone(),
+            display_name: "w".into(),
+            last_opened_at: OffsetDateTime::now_utc(),
+            is_pinned: false,
+        };
+        app.home.scope = Some(ws.id);
+        app.home.workspaces = vec![ws];
+        assert_eq!(app.target_dir(), dir);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

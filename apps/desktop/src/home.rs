@@ -118,6 +118,10 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                         .fill(theme::ACCENT),
                     )
                     .on_disabled_hover_text("Select a workspace in the sidebar first");
+                let new = new.on_hover_text(format!(
+                    "New session ({})",
+                    keymap::shortcut_text(Action::NewSession)
+                ));
                 if new.clicked() {
                     app.new_session();
                 }

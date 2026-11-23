@@ -4,9 +4,11 @@ use egui::{Align, Key, Layout, Modifiers, RichText};
 use xade_store::SessionCard;
 
 use crate::app::App;
+use crate::editor::EditorId;
 use crate::home;
 use crate::running;
 use crate::theme;
+use crate::workspace::WindowKind;
 
 /// Rows the picker asks the reader for.
 pub const PAGE_SIZE: u32 = 20;
@@ -23,6 +25,18 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(mut st) = app.picker.take() else {
         return;
     };
+    // Open files that match the query are listed under the sessions.
+    let needle = st.query.trim().to_lowercase();
+    let mut files: Vec<(EditorId, String)> = app
+        .open_windows
+        .iter()
+        .filter_map(|k| match k {
+            WindowKind::Editor(id) => app.editors.map.get(id).map(|vm| (*id, vm.title())),
+            WindowKind::Session(_) => None,
+        })
+        .filter(|(_, name)| name.to_lowercase().contains(&needle))
+        .collect();
+    files.sort_by_key(|(id, _)| id.0);
     // Consumed before the search field draws, which would otherwise take Up/Down/Enter.
     let (down, up, enter) = ctx.input_mut(|i| {
         (
@@ -31,7 +45,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
             i.consume_key(Modifiers::NONE, Key::Enter),
         )
     });
-    let last = st.results.len().saturating_sub(1);
+    let sessions = st.results.len();
+    let last = (sessions + files.len()).saturating_sub(1);
     let moved = down || up;
     if down {
         st.selected = (st.selected + 1).min(last);
@@ -42,6 +57,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     st.selected = st.selected.min(last);
     let mut open = enter
         .then(|| st.results.get(st.selected).cloned())
+        .flatten();
+    let mut open_file = (enter && st.selected >= sessions)
+        .then(|| files.get(st.selected - sessions).map(|f| f.0))
         .flatten();
     let mut changed = false;
     let resp = egui::Modal::new(egui::Id::unique("session_picker")).show(ctx, |ui| {
@@ -57,7 +75,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         }
         changed = edit.changed();
         ui.add_space(4.0);
-        if st.results.is_empty() {
+        if st.results.is_empty() && files.is_empty() {
             ui.label(RichText::new("No sessions found.").color(theme::TEXT_MUTED));
         }
         egui::ScrollArea::vertical()
@@ -74,11 +92,23 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         open = Some(card.clone());
                     }
                 }
+                for (i, (id, name)) in files.iter().enumerate() {
+                    let selected = sessions + i == st.selected;
+                    let r = file_row(ui, name, selected);
+                    if selected && moved {
+                        r.scroll_to_me(None);
+                    }
+                    if r.clicked() {
+                        open_file = Some(*id);
+                    }
+                }
             });
     });
-    if open.is_some() || resp.should_close() {
+    if open.is_some() || open_file.is_some() || resp.should_close() {
         if let Some(card) = open {
             app.request_open(&card, false);
+        } else if let Some(id) = open_file {
+            app.focus(WindowKind::Editor(id));
         }
         return;
     }
@@ -89,6 +119,28 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         }
         app.refresh_picker();
     }
+}
+
+fn file_row(ui: &mut egui::Ui, name: &str, selected: bool) -> egui::Response {
+    let fill = if selected {
+        theme::BG_HOVER
+    } else {
+        theme::BG_RAISED
+    };
+    egui::Frame::new()
+        .fill(fill)
+        .corner_radius(4)
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                crate::chrome::file_badge(ui);
+                ui.add(egui::Label::new(name).truncate());
+            });
+        })
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 fn row(app: &App, ui: &mut egui::Ui, card: &SessionCard, selected: bool) -> egui::Response {
@@ -113,7 +165,7 @@ fn row(app: &App, ui: &mut egui::Ui, card: &SessionCard, selected: bool) -> egui
                 if running.is_none() {
                     ui.label(running::cache_text(card.updated_at));
                 }
-                if app.open_windows.contains(&card.id) {
+                if app.open_windows.contains(&WindowKind::Session(card.id)) {
                     ui.label(RichText::new("open").small().color(theme::OK));
                 }
                 ui.label(
@@ -178,7 +230,7 @@ mod tests {
             card(""),
         ];
         let (first, second) = (cards[0].id, cards[1].id);
-        app.open_windows.push(first);
+        app.open_windows.push(WindowKind::Session(first));
         app.picker = Some(PickerState {
             results: cards,
             ..PickerState::default()
@@ -209,7 +261,7 @@ mod tests {
         // Enter opens the selection and closes the picker.
         frame(&mut app, vec![key(Key::Enter)]);
         assert!(app.picker.is_none());
-        assert_eq!(app.focused, Some(second));
+        assert_eq!(app.focused, Some(WindowKind::Session(second)));
         // Esc closes without opening.
         app.picker = Some(PickerState::default());
         frame(&mut app, vec![]);

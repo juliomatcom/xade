@@ -1,8 +1,10 @@
 mod app;
+mod chrome;
 mod composer;
 mod config;
 mod conversation;
 mod diff;
+mod editor;
 mod home;
 mod icons;
 mod keymap;

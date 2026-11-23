@@ -11,6 +11,10 @@ pub const CHORD_TIMEOUT: Duration = Duration::from_millis(1500);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     NewSession,
+    NewFile,
+    OpenFile,
+    Save,
+    SaveAs,
     OpenPicker,
     Send,
     Stop,
@@ -38,13 +42,15 @@ impl Action {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Group {
     Sessions,
+    Files,
     Chat,
     Layout,
     General,
 }
 
-pub const GROUPS: [(Group, &str); 4] = [
+pub const GROUPS: [(Group, &str); 5] = [
     (Group::Sessions, "Sessions"),
+    (Group::Files, "Files"),
     (Group::Chat, "Chat"),
     (Group::Layout, "Layout"),
     (Group::General, "General"),
@@ -100,7 +106,7 @@ const fn focus(n: u8, keys: &'static [Stroke]) -> Binding {
     Binding {
         action: Action::FocusWindow(n),
         group: Group::Layout,
-        title: "Focus session window 1-9",
+        title: "Focus window 1-9",
         keys,
         show: if n == 1 {
             Show::Through(k(CMD, Key::Num9))
@@ -115,7 +121,26 @@ pub static BINDINGS: &[Binding] = &[
         Action::NewSession,
         Group::Sessions,
         "New session in the selected workspace",
-        &[k(CMD, Key::N)],
+        &[k(CMD_SHIFT, Key::N)],
+    ),
+    row(Action::NewFile, Group::Files, "New file", &[k(CMD, Key::N)]),
+    row(
+        Action::OpenFile,
+        Group::Files,
+        "Open file",
+        &[k(CMD, Key::O)],
+    ),
+    row(
+        Action::Save,
+        Group::Files,
+        "Save the focused file",
+        &[k(CMD, Key::S)],
+    ),
+    row(
+        Action::SaveAs,
+        Group::Files,
+        "Save the focused file as",
+        &[k(CMD_SHIFT, Key::S)],
     ),
     row(
         Action::OpenPicker,
@@ -126,7 +151,7 @@ pub static BINDINGS: &[Binding] = &[
     row(
         Action::CloseWindow,
         Group::Sessions,
-        "Close the focused session window",
+        "Close the focused window",
         &[k(CMD, Key::W)],
     ),
     row(
@@ -159,13 +184,13 @@ pub static BINDINGS: &[Binding] = &[
     row(
         Action::NextWindow,
         Group::Layout,
-        "Next session window",
+        "Next window",
         &[k(Modifiers::CTRL, Key::Tab)],
     ),
     row(
         Action::PrevWindow,
         Group::Layout,
-        "Previous session window",
+        "Previous window",
         &[k(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab)],
     ),
     row(
@@ -421,6 +446,25 @@ mod tests {
     }
 
     #[test]
+    fn file_and_session_shortcuts_are_distinct() {
+        let now = Instant::now();
+        let mut c = Chord::default();
+        assert_eq!(
+            press(&mut c, now, CMD, Key::N),
+            Feed::Fired(Action::NewFile)
+        );
+        assert_eq!(
+            press(&mut c, now, CMD_SHIFT, Key::N),
+            Feed::Fired(Action::NewSession)
+        );
+        assert_eq!(press(&mut c, now, CMD, Key::S), Feed::Fired(Action::Save));
+        assert_eq!(
+            press(&mut c, now, CMD_SHIFT, Key::S),
+            Feed::Fired(Action::SaveAs)
+        );
+    }
+
+    #[test]
     fn every_binding_fires_its_action() {
         let now = Instant::now();
         for b in BINDINGS.iter().filter(|b| !b.action.is_local()) {
@@ -453,16 +497,16 @@ mod tests {
             Feed::Fired(Action::Shortcuts)
         );
 
-        // Timeout: the late key is a fresh press, not the chord's second key.
+        // Timeout: the late key is a fresh press (plain Cmd+S saves), not the chord's second key.
         press(&mut c, t0, CMD, Key::K);
         let late = t0 + CHORD_TIMEOUT + Duration::from_millis(1);
         assert!(!c.armed(late));
-        assert_eq!(press(&mut c, late, CMD, Key::S), Feed::Ignored);
+        assert_eq!(press(&mut c, late, CMD, Key::S), Feed::Fired(Action::Save));
 
         // Another key cancels.
         press(&mut c, t0, CMD, Key::K);
         assert_eq!(press(&mut c, soon, CMD, Key::Q), Feed::Cancelled);
-        assert_eq!(press(&mut c, soon, CMD, Key::S), Feed::Ignored);
+        assert_eq!(press(&mut c, soon, CMD, Key::S), Feed::Fired(Action::Save));
 
         // expire() drops a stale chord.
         press(&mut c, t0, CMD, Key::K);
@@ -497,7 +541,11 @@ mod tests {
     #[test]
     fn labels_read_naturally() {
         let find = |a| BINDINGS.iter().find(|b| b.action == a).expect("binding");
-        assert_eq!(binding_label(find(Action::NewSession), true), "\u{2318}N");
+        assert_eq!(binding_label(find(Action::NewFile), true), "\u{2318}N");
+        assert_eq!(
+            binding_label(find(Action::NewSession), true),
+            "Shift+\u{2318}N"
+        );
         assert_eq!(
             binding_label(find(Action::Shortcuts), true),
             "\u{2318}K \u{2318}S"
