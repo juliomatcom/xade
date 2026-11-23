@@ -39,6 +39,17 @@ impl Effort {
 pub struct ModelOption {
     pub id: String,
     pub label: String,
+    pub description: String,
+    /// Levels the model accepts, excluding `Effort::Default` (always available).
+    pub effort_levels: Vec<Effort>,
+}
+
+/// Where a session was created.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SessionOrigin {
+    #[default]
+    Xade,
+    ClaudeCode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -88,6 +99,7 @@ pub struct Session {
     pub workspace_id: WorkspaceId,
     pub provider_id: ProviderId,
     pub provider_session_id: Option<String>,
+    pub origin: SessionOrigin,
     pub title: String,
     pub preview_snippet: String,
     pub model_id: String,
@@ -134,6 +146,31 @@ pub struct Message {
     pub tool_payload_json: Option<String>,
     pub is_error: bool,
     pub created_at: OffsetDateTime,
+}
+
+/// A message read from a provider's own history; the runtime assigns ids and `seq`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedMessage {
+    pub role: Role,
+    pub content_text: String,
+    pub tool_name: Option<String>,
+    pub tool_use_id: Option<String>,
+    pub tool_payload_json: Option<String>,
+    pub is_error: bool,
+    pub created_at: OffsetDateTime,
+}
+
+/// A session found in a provider's own history (e.g. Claude Code transcripts).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportedSession {
+    pub provider_session_id: String,
+    pub cwd: PathBuf,
+    pub title: String,
+    pub model_id: String,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+    pub usage: UsageTotals,
+    pub messages: Vec<ImportedMessage>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

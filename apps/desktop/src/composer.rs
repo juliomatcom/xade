@@ -5,8 +5,8 @@ use xade_core::{Effort, SessionStatus, UsageTotals};
 use xade_runtime::ManagerCmd;
 
 use crate::app::{push_user_message, SessionVm};
-use crate::theme;
 use crate::workspace::Env;
+use crate::{icons, theme};
 
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     let id = vm.session.id;
@@ -34,14 +34,17 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
                 );
                 let can_send = idle && !vm.input.trim().is_empty();
                 if streaming {
-                    let stop = egui::Button::new(RichText::new("Stop").color(theme::TEXT))
-                        .fill(theme::DANGER);
+                    let stop = egui::Button::new(
+                        RichText::new(icons::with(icons::STOP, "Stop")).color(theme::TEXT),
+                    )
+                    .fill(theme::DANGER);
                     if ui.add(stop).clicked() {
                         let _ = env.cmd_tx.send(ManagerCmd::Interrupt { session_id: id });
                     }
                 } else {
-                    let btn = egui::Button::new(RichText::new("↑").strong().color(theme::TEXT))
-                        .fill(theme::ACCENT);
+                    let btn =
+                        egui::Button::new(RichText::new(icons::SEND).strong().color(theme::TEXT))
+                            .fill(theme::ACCENT);
                     send = ui.add_enabled(can_send, btn).clicked();
                 }
                 send |= hotkey && can_send;
@@ -126,9 +129,9 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
             });
         let on = vm.session.auto_mode;
         let (text, fill) = if on {
-            ("Auto: ON", theme::OK)
+            (icons::with(icons::AUTO, "Auto: ON"), theme::OK)
         } else {
-            ("Auto: OFF", theme::BG_HOVER)
+            (icons::with(icons::AUTO, "Auto: OFF"), theme::BG_HOVER)
         };
         let pill = egui::Button::new(RichText::new(text).small().color(theme::TEXT))
             .fill(fill)

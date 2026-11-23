@@ -8,7 +8,7 @@ use xade_core::Message;
 
 use super::markdown::markdown;
 use crate::diff::is_code_change;
-use crate::theme;
+use crate::{icons, theme};
 
 const OUTPUT_LIMIT: usize = 4096;
 const SUMMARY_LIMIT: usize = 80;
@@ -191,7 +191,13 @@ pub fn show(
                 } else {
                     "Review changes"
                 };
-                review = ui.small_button(label).clicked();
+                review = ui
+                    .add(
+                        egui::Button::new(icons::with(icons::REVIEW, label))
+                            .small()
+                            .wrap(),
+                    )
+                    .clicked();
                 return;
             }
             let state = CollapsingState::load_with_default_open(ui.ctx(), id, false);

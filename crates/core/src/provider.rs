@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 use crate::error::ProviderError;
 use crate::events::{ProviderEvent, SessionCommand};
 use crate::ids::ProviderId;
-use crate::model::{Effort, ModelOption, SpawnConfig};
+use crate::model::{Effort, ImportedSession, ModelOption, SpawnConfig};
 
 /// Not `Clone`: it owns the single receiver of the session's events.
 #[derive(Debug)]
@@ -22,4 +22,8 @@ pub trait AgentProvider: Send + Sync {
     fn preflight(&self) -> Result<(), ProviderError>;
     /// Must be called inside a tokio runtime: starts a task and returns its channels.
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError>;
+    /// Sessions found in the provider's own history. Blocking; callers use `spawn_blocking`.
+    fn import_sessions(&self) -> Vec<ImportedSession> {
+        Vec::new()
+    }
 }

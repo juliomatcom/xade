@@ -5,7 +5,7 @@ use std::hash::Hash;
 
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
 
-const CODE_BLOCK_OVERSHOOT: f32 = 10.0;
+const CODE_BLOCK_OVERSHOOT: f32 = 16.0;
 
 /// Renders `text` as markdown. An unclosed fence renders as code to the end of the text.
 pub fn markdown(ui: &mut egui::Ui, cache: &mut CommonMarkCache, id: impl Hash + Debug, text: &str) {

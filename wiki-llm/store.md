@@ -6,4 +6,6 @@
 - FTS5 trigram `search_index` is filled only by triggers: session titles, and message text for user/assistant roles.
 - Search: empty lists; under 3 chars is `LIKE` on title and preview; otherwise FTS plus a nucleo title fuzzy pass. Rank: exact title substring, FTS bm25, fuzzy-only score; ties by `updated_at` newest.
 - Pages are zero-based; `max_seq` is 0 for a session with no messages. Timestamps are fixed-width UTC RFC3339 text.
+- `sessions.origin` is `xade` or `claude_code`; `(provider_id, provider_session_id)` is unique. `quota` holds the last window per kind; the actor writes it on every `Quota` event.
+- Import (`WriteOp::ImportSession`) upserts the workspace by path and the session by provider id in one transaction, never touches an `xade` origin row, replaces messages (and their search rows), and keeps effort, cost and a known context max.
 - Deltas and session status are never stored; there is no attachments table yet.

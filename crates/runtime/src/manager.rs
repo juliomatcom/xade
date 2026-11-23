@@ -8,8 +8,10 @@ use time::OffsetDateTime;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+use uuid::Uuid;
 use xade_core::{
-    AgentProvider, ProviderId, Session, SessionId, SessionStatus, SpawnConfig, UsageTotals,
+    AgentProvider, Effort, ImportedSession, Message, ProviderId, Session, SessionId, SessionOrigin,
+    SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
 };
 use xade_store::{StoreReader, WriteOp, WriterHandle};
 
@@ -23,6 +25,8 @@ pub struct SessionManager {
     events: UnboundedSender<AppEvent>,
     live: HashMap<SessionId, UnboundedSender<ActorCmd>>,
     tasks: Vec<JoinHandle<()>>,
+    /// Parsed histories coming back from the blocking import tasks.
+    import_tx: UnboundedSender<Vec<(ProviderId, Vec<ImportedSession>)>>,
 }
 
 impl SessionManager {
@@ -34,6 +38,7 @@ impl SessionManager {
     ) -> (UnboundedSender<ManagerCmd>, UnboundedReceiver<AppEvent>) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (events, event_rx) = mpsc::unbounded_channel();
+        let (import_tx, import_rx) = mpsc::unbounded_channel();
         let manager = SessionManager {
             providers,
             writer,
@@ -41,13 +46,29 @@ impl SessionManager {
             events,
             live: HashMap::new(),
             tasks: Vec::new(),
+            import_tx,
         };
-        tokio::spawn(manager.run(cmd_rx));
+        tokio::spawn(manager.run(cmd_rx, import_rx));
         (cmd_tx, event_rx)
     }
 
-    async fn run(mut self, mut rx: UnboundedReceiver<ManagerCmd>) {
-        while let Some(cmd) = rx.recv().await {
+    async fn run(
+        mut self,
+        mut rx: UnboundedReceiver<ManagerCmd>,
+        mut imports: UnboundedReceiver<Vec<(ProviderId, Vec<ImportedSession>)>>,
+    ) {
+        loop {
+            let cmd = tokio::select! {
+                cmd = rx.recv() => match cmd {
+                    Some(c) => c,
+                    None => break,
+                },
+                // `self` holds a sender, so this never yields `None`.
+                Some(batches) = imports.recv() => {
+                    self.apply_import(batches).await;
+                    continue;
+                }
+            };
             match cmd {
                 ManagerCmd::Create {
                     workspace_id,
@@ -63,6 +84,7 @@ impl SessionManager {
                         workspace_id,
                         provider_id: provider,
                         provider_session_id: None,
+                        origin: SessionOrigin::Xade,
                         title: String::new(),
                         preview_snippet: String::new(),
                         model_id,
@@ -109,6 +131,7 @@ impl SessionManager {
                         let _ = tx.send(ActorCmd::Close);
                     }
                 }
+                ManagerCmd::Import => self.start_import(),
                 ManagerCmd::ShutdownAll(done) => {
                     for (_, tx) in self.live.drain() {
                         let _ = tx.send(ActorCmd::Close);
@@ -146,6 +169,64 @@ impl SessionManager {
         self.live.insert(id, tx);
         self.tasks.retain(|t| !t.is_finished());
         self.tasks.push(tokio::spawn(actor.run(rx)));
+    }
+
+    /// Parses histories off the manager task; `apply_import` runs when they arrive.
+    fn start_import(&self) {
+        let providers = self.providers.clone();
+        let tx = self.import_tx.clone();
+        tokio::spawn(async move {
+            let mut batches = Vec::new();
+            for p in providers {
+                let id = p.id();
+                match tokio::task::spawn_blocking(move || p.import_sessions()).await {
+                    Ok(sessions) => batches.push((id, sessions)),
+                    Err(e) => tracing::error!(error = %e, "import task failed"),
+                }
+            }
+            let _ = tx.send(batches);
+        });
+    }
+
+    /// Skips sessions Xade owns or runs, and transcripts not newer than the stored row.
+    async fn apply_import(&mut self, batches: Vec<(ProviderId, Vec<ImportedSession>)>) {
+        let (mut imported, mut updated) = (0u32, 0u32);
+        for (provider_id, sessions) in batches {
+            let Some(provider) = self.provider(provider_id) else {
+                continue;
+            };
+            let index = match self.reader.import_index(provider_id).await {
+                Ok(i) => i,
+                Err(e) => {
+                    self.emit(None, AppEventKind::Error(e.to_string()));
+                    continue;
+                }
+            };
+            let default_model = provider.default_model();
+            for imp in sessions {
+                let id = match index.get(&imp.provider_session_id) {
+                    Some(r) if r.origin == SessionOrigin::Xade => continue,
+                    Some(r) if self.live.get(&r.id).is_some_and(|tx| !tx.is_closed()) => continue,
+                    Some(r) if r.updated_at >= imp.updated_at => continue,
+                    Some(r) => {
+                        updated += 1;
+                        r.id
+                    }
+                    None => {
+                        imported += 1;
+                        SessionId::new()
+                    }
+                };
+                let (session, messages, root) = imported_rows(id, provider_id, &default_model, imp);
+                let _ = self.writer.send(WriteOp::ImportSession {
+                    session,
+                    messages,
+                    workspace_root: root,
+                });
+            }
+        }
+        flush(&self.writer).await;
+        self.emit(None, AppEventKind::ImportDone { imported, updated });
     }
 
     async fn create(&mut self, session: Session, cwd: std::path::PathBuf) {
@@ -241,4 +322,51 @@ impl SessionManager {
             Err(msg) => self.emit(Some(id), AppEventKind::Status(SessionStatus::Error(msg))),
         }
     }
+}
+
+/// Rows for `WriteOp::ImportSession`; the writer resolves the real workspace id from the path.
+fn imported_rows(
+    id: SessionId,
+    provider_id: ProviderId,
+    default_model: &str,
+    imp: ImportedSession,
+) -> (Session, Vec<Message>, std::path::PathBuf) {
+    let messages = imp
+        .messages
+        .into_iter()
+        .zip(1..)
+        .map(|(m, seq)| Message {
+            id: Uuid::new_v4(),
+            session_id: id,
+            seq,
+            role: m.role,
+            content_text: m.content_text,
+            thinking_text: None,
+            tool_name: m.tool_name,
+            tool_use_id: m.tool_use_id,
+            tool_payload_json: m.tool_payload_json,
+            is_error: m.is_error,
+            created_at: m.created_at,
+        })
+        .collect();
+    let session = Session {
+        id,
+        workspace_id: WorkspaceId::new(),
+        provider_id,
+        provider_session_id: Some(imp.provider_session_id),
+        origin: SessionOrigin::ClaudeCode,
+        title: imp.title,
+        preview_snippet: String::new(),
+        model_id: if imp.model_id.is_empty() {
+            default_model.to_string()
+        } else {
+            imp.model_id
+        },
+        effort: Effort::Default,
+        auto_mode: false,
+        usage: imp.usage,
+        created_at: imp.created_at,
+        updated_at: imp.updated_at,
+    };
+    (session, messages, imp.cwd)
 }

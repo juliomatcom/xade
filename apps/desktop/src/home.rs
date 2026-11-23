@@ -8,7 +8,7 @@ use xade_core::{QuotaKind, QuotaWindow, SessionStatus, Workspace, WorkspaceId};
 use xade_store::SessionCard;
 
 use crate::app::{App, View};
-use crate::theme;
+use crate::{icons, theme};
 
 pub const PAGE_SIZE: u32 = 24;
 pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
@@ -52,17 +52,23 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let can_tile = app.view == View::Workspace && !app.open_windows.is_empty();
                 if ui
-                    .add_enabled(can_tile, egui::Button::new("Tile"))
+                    .add_enabled(
+                        can_tile,
+                        egui::Button::new(icons::with(icons::TILE, "Tile")),
+                    )
                     .on_hover_text("Re-tile windows into equal columns")
                     .clicked()
                 {
                     app.tiling.retile();
                 }
                 let to_ws = ui
-                    .selectable_label(app.view == View::Workspace, "Workspace")
+                    .selectable_label(
+                        app.view == View::Workspace,
+                        icons::with(icons::WORKSPACE, "Workspace"),
+                    )
                     .clicked();
                 let to_home = ui
-                    .selectable_label(app.view == View::Home, "Home")
+                    .selectable_label(app.view == View::Home, icons::with(icons::HOME, "Home"))
                     .clicked();
                 if to_home {
                     app.view = View::Home;
@@ -73,15 +79,18 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 let new = ui
                     .add_enabled(
                         enabled,
-                        egui::Button::new(RichText::new("New Session").color(theme::TEXT))
-                            .fill(theme::ACCENT),
+                        egui::Button::new(
+                            RichText::new(icons::with(icons::NEW_SESSION, "New Session"))
+                                .color(theme::TEXT),
+                        )
+                        .fill(theme::ACCENT),
                     )
                     .on_disabled_hover_text("Select a workspace in the sidebar first");
                 if new.clicked() {
                     app.new_session();
                 }
-                for q in app.quota.iter().rev() {
-                    quota_meter(ui, q);
+                for kind in [QuotaKind::SevenDay, QuotaKind::FiveHour] {
+                    quota_meter(ui, kind, app.quota.iter().find(|q| q.kind == kind));
                 }
             });
         });
@@ -134,28 +143,32 @@ fn provider_dropdown(ui: &mut egui::Ui) {
         });
 }
 
-fn quota_meter(ui: &mut egui::Ui, q: &QuotaWindow) {
-    let label = match q.kind {
+/// Always drawn; `q` is `None` until the first quota report arrives.
+fn quota_meter(ui: &mut egui::Ui, kind: QuotaKind, q: Option<&QuotaWindow>) {
+    let label = match kind {
         QuotaKind::FiveHour => "5h Session Use",
         QuotaKind::SevenDay => "Weekly Quota",
     };
-    ui.vertical(|ui| {
+    // A fixed-size slot: inside the right-to-left top bar, an unsized `vertical`
+    // lets both meters land on the same rect.
+    let size = egui::vec2(150.0, ui.available_height());
+    ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.horizontal(|ui| {
             ui.label(RichText::new(label).small().color(theme::TEXT_MUTED));
-            ui.label(
-                RichText::new(format!("{:.0}% Used", q.utilization_pct))
-                    .small()
-                    .color(theme::TEXT_MUTED),
-            );
+            let used = q.map_or("\u{2014}".to_string(), |q| {
+                format!("{:.0}% Used", q.utilization_pct)
+            });
+            ui.label(RichText::new(used).small().color(theme::TEXT_MUTED));
         });
+        let fraction = q.map_or(0.0, |q| (q.utilization_pct / 100.0).clamp(0.0, 1.0));
         ui.add(
-            egui::ProgressBar::new((q.utilization_pct / 100.0).clamp(0.0, 1.0))
-                .desired_width(120.0)
+            egui::ProgressBar::new(fraction)
+                .desired_width(140.0)
                 .desired_height(4.0)
-                .fill(theme::ACCENT),
+                .fill(theme::usage_color(fraction)),
         );
-        if let Some(at) = q.resets_at {
+        if let Some(at) = q.and_then(|q| q.resets_at) {
             let secs = (at - OffsetDateTime::now_utc()).whole_seconds().max(0);
             ui.label(
                 RichText::new(format!("Resets in {}", duration_text(secs)))
@@ -190,7 +203,7 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                 if ui
                     .add_sized(
                         [ui.available_width(), 28.0],
-                        egui::Button::new("+ Add Directory"),
+                        egui::Button::new(icons::with(icons::ADD_DIR, "Add Directory")),
                     )
                     .clicked()
                 {
@@ -246,7 +259,7 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
                 ui.label(
                     RichText::new(format!("Claude is not available: {err}")).color(theme::DANGER),
                 );
-                if ui.button("Retry").clicked() {
+                if ui.button(icons::with(icons::RETRY, "Retry")).clicked() {
                     app.retry_preflight();
                 }
             });
@@ -261,7 +274,10 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
                 let page = app.home.page;
                 let mut next_page = None;
                 if ui
-                    .add_enabled(page > 0, egui::Button::new("Prev"))
+                    .add_enabled(
+                        page > 0,
+                        egui::Button::new(icons::with(icons::PREV, "Prev")),
+                    )
                     .clicked()
                 {
                     next_page = Some(page.saturating_sub(1));
@@ -271,7 +287,10 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
                         .color(theme::TEXT_MUTED),
                 );
                 if ui
-                    .add_enabled(u64::from(page) + 1 < pages, egui::Button::new("Next"))
+                    .add_enabled(
+                        u64::from(page) + 1 < pages,
+                        egui::Button::new(icons::with(icons::NEXT, "Next")),
+                    )
                     .clicked()
                 {
                     next_page = Some(page + 1);

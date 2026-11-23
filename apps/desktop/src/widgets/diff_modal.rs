@@ -7,7 +7,7 @@ use egui::{Align, Color32, Layout, RichText, TextStyle};
 use egui_extras::syntax_highlighting::{highlight, CodeTheme};
 
 use crate::diff::{Cell, DiffData, Kind, Row};
-use crate::theme;
+use crate::{icons, theme};
 
 const GUTTER: f32 = 44.0;
 
@@ -74,8 +74,11 @@ pub fn show(
             ui.label(RichText::new(format!("Review File Changes: {rel_path}")).strong());
             let link = ui.add_enabled(
                 vscode.is_some(),
-                egui::Button::new(RichText::new("Open in VS Code").color(theme::ACCENT))
-                    .frame(false),
+                egui::Button::new(
+                    RichText::new(icons::with(icons::VSCODE, "Open in VS Code"))
+                        .color(theme::ACCENT),
+                )
+                .frame(false),
             );
             let link = link.on_disabled_hover_text("VS Code `code` command not found");
             if let (true, Some(code)) = (link.clicked(), vscode) {
@@ -83,19 +86,25 @@ pub fn show(
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if can_decide {
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(icons::with(icons::CANCEL, "Cancel")).clicked() {
                         action = ModalAction::Cancel;
                     }
                     let accept = |t: &str| {
                         egui::Button::new(RichText::new(t).color(theme::TEXT)).fill(theme::ACCENT)
                     };
-                    if ui.add(accept("Accept")).clicked() {
+                    if ui
+                        .add(accept(&icons::with(icons::ACCEPT, "Accept")))
+                        .clicked()
+                    {
                         action = ModalAction::Accept;
                     }
-                    if ui.add(accept("Accept & Enable Auto")).clicked() {
+                    if ui
+                        .add(accept(&icons::with(icons::ACCEPT, "Accept & Enable Auto")))
+                        .clicked()
+                    {
                         action = ModalAction::AcceptAuto;
                     }
-                } else if ui.button("Close").clicked() {
+                } else if ui.button(icons::with(icons::CLOSE, "Close")).clicked() {
                     action = ModalAction::Close;
                 }
             });

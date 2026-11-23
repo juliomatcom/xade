@@ -7,9 +7,9 @@ mod writer;
 
 use thiserror::Error;
 use time::OffsetDateTime;
-use xade_core::{SessionId, WorkspaceId};
+use xade_core::{SessionId, SessionOrigin, WorkspaceId};
 
-pub use reader::StoreReader;
+pub use reader::{ImportRef, StoreReader};
 pub use schema::SCHEMA_VERSION;
 pub use writer::{StoreWriter, WriteOp, WriterHandle};
 
@@ -47,6 +47,7 @@ pub struct SessionCard {
     pub preview_snippet: String,
     pub model_id: String,
     pub updated_at: OffsetDateTime,
+    pub origin: SessionOrigin,
     pub excerpt: Option<String>,
 }
 

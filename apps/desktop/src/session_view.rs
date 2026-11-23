@@ -7,7 +7,7 @@ use xade_runtime::ManagerCmd;
 use crate::app::SessionVm;
 use crate::diff::is_code_change;
 use crate::workspace::Env;
-use crate::{composer, conversation, theme};
+use crate::{composer, conversation, icons, theme};
 
 pub const HEADER_HEIGHT: f32 = 34.0;
 
@@ -15,6 +15,8 @@ pub const HEADER_HEIGHT: f32 = 34.0;
 pub struct ViewOut {
     pub close: bool,
     pub collapse: bool,
+    /// Toggles maximize for this window.
+    pub maximize: bool,
 }
 
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
@@ -27,7 +29,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
         .resizable(false)
         .frame(
             egui::Frame::new()
-                .fill(theme::BG_PANEL)
+                .fill(theme::BG_WINDOW)
                 .stroke(egui::Stroke::new(1.0, theme::BORDER))
                 .inner_margin(egui::Margin::same(8)),
         )
@@ -63,23 +65,34 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
             ui.set_height(HEADER_HEIGHT - 12.0);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
-                    .small_button("×")
+                    .small_button(icons::CLOSE)
                     .on_hover_text("Close session")
                     .clicked()
                 {
                     out.close = true;
                 }
                 let (glyph, tip) = if vm.collapsed {
-                    ("+", "Expand")
+                    (icons::RESTORE, "Expand")
                 } else {
-                    ("–", "Collapse")
+                    (icons::COLLAPSE, "Collapse")
                 };
                 if ui.small_button(glyph).on_hover_text(tip).clicked() {
                     out.collapse = true;
                 }
+                let (glyph, tip) = if env.maximized == Some(vm.session.id) {
+                    (icons::RESTORE, "Restore")
+                } else {
+                    (icons::MAXIMIZE, "Maximize")
+                };
+                if ui.small_button(glyph).on_hover_text(tip).clicked() {
+                    out.maximize = true;
+                }
                 ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                     status_dot(ui, &vm.status);
-                    ui.label(RichText::new(format!("{title} • {provider}")).strong());
+                    ui.add(
+                        egui::Label::new(RichText::new(format!("{title} • {provider}")).strong())
+                            .truncate(),
+                    );
                     if !cwd.is_empty() {
                         ui.label(RichText::new(cwd).small().color(theme::TEXT_MUTED))
                             .on_hover_text(vm.cwd.display().to_string());
@@ -131,15 +144,20 @@ fn banner(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
             ui.add(egui::Label::new(RichText::new(summary).color(theme::TEXT_MUTED)).truncate());
             ui.horizontal_wrapped(|ui| {
                 if p.reviewable && is_code_change(&p.tool_name) {
-                    review = ui.button("Review changes").clicked();
+                    review = ui
+                        .button(icons::with(icons::REVIEW, "Review changes"))
+                        .clicked();
                 } else {
-                    if ui.button("Approve").clicked() {
+                    if ui.button(icons::with(icons::APPROVE, "Approve")).clicked() {
                         respond = Some((true, false));
                     }
-                    if ui.button("Approve & Enable Auto").clicked() {
+                    if ui
+                        .button(icons::with(icons::APPROVE, "Approve & Enable Auto"))
+                        .clicked()
+                    {
                         respond = Some((true, true));
                     }
-                    if ui.button("Deny").clicked() {
+                    if ui.button(icons::with(icons::DENY, "Deny")).clicked() {
                         respond = Some((false, false));
                     }
                 }

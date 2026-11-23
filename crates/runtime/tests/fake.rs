@@ -136,8 +136,15 @@ async fn create_send_close_open_resume() {
         .any(|e| matches!(&e.kind, AppEventKind::Provider(ProviderEvent::TextDelta(_)))));
 
     xade_runtime::flush(&h.writer).await;
+    let quota = h.reader.load_quota().await.unwrap();
+    assert_eq!(quota.len(), 1);
+    assert_eq!(
+        (quota[0].kind, quota[0].utilization_pct),
+        (QuotaKind::FiveHour, 42.0)
+    );
     let (row, msgs) = h.reader.load_session(id).await.unwrap();
     assert_eq!(row.title, "Say pong");
+    assert_eq!(row.origin, xade_core::SessionOrigin::Xade);
     assert_eq!(row.provider_session_id.as_deref(), Some("fake-session"));
     assert_eq!(row.usage.input_tokens, 10);
     assert_eq!(row.usage.context_window_max, 1000);

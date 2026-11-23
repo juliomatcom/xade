@@ -167,7 +167,7 @@ fn tool_results(u: UserFrame) -> Vec<ProviderEvent> {
 }
 
 /// Tool result content is a string or an array of `{type:"text", text}` parts.
-fn result_text(content: Option<&Value>) -> String {
+pub(crate) fn result_text(content: Option<&Value>) -> String {
     match content {
         Some(Value::String(s)) => s.clone(),
         Some(Value::Array(parts)) => parts

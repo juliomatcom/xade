@@ -24,6 +24,7 @@ pub struct Env<'a> {
     pub cmd_tx: &'a UnboundedSender<ManagerCmd>,
     pub providers: &'a [Arc<dyn AgentProvider>],
     pub vscode: Option<&'a Path>,
+    pub maximized: Option<SessionId>,
 }
 
 /// Auto-tiling state: windows are re-tiled while `auto` and the set of windows or the area changes.
@@ -65,6 +66,35 @@ pub fn tile_rects(area: Rect, n: usize) -> Vec<Rect> {
         .collect()
 }
 
+/// Rect and collapsed flag per window. A maximized window fills the area below a strip of the
+/// other windows' collapsed headers.
+pub fn layout(area: Rect, n: usize, maximized: Option<usize>) -> Vec<(Rect, bool)> {
+    let Some(m) = maximized.filter(|m| *m < n) else {
+        return tile_rects(area, n)
+            .into_iter()
+            .map(|r| (r, false))
+            .collect();
+    };
+    if n == 1 {
+        return vec![(area, false)];
+    }
+    let strip = Rect::from_min_size(
+        area.min,
+        egui::vec2(area.width(), session_view::HEADER_HEIGHT),
+    );
+    let mut heads = tile_rects(strip, n - 1).into_iter();
+    let body = Rect::from_min_max(egui::pos2(area.left(), strip.bottom() + GAP), area.max);
+    (0..n)
+        .map(|i| {
+            if i == m {
+                (body, false)
+            } else {
+                (heads.next().unwrap_or(strip), true)
+            }
+        })
+        .collect()
+}
+
 fn differs(a: Rect, b: Rect) -> bool {
     (a.min - b.min).abs().max_elem() > MOVE_TOLERANCE
         || (a.size() - b.size()).abs().max_elem() > MOVE_TOLERANCE
@@ -83,7 +113,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.label(egui::RichText::new("Opening session…").color(theme::TEXT_MUTED));
         return;
     }
-    let tiles = tile_rects(area, ids.len());
+    let tiles = layout(
+        area,
+        ids.len(),
+        app.maximized
+            .and_then(|m| ids.iter().position(|id| *id == m)),
+    );
     let retile = app.tiling.auto
         && (app.tiling.ids != ids
             || differs(app.tiling.area, area)
@@ -91,15 +126,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if retile {
         app.tiling.ids = ids.clone();
         app.tiling.area = area;
-        for (id, rect) in ids.iter().zip(&tiles) {
+        for (id, (rect, collapsed)) in ids.iter().zip(&tiles) {
             if let Some(vm) = app.sessions.get_mut(id) {
                 vm.apply_rect = Some(*rect);
-                vm.collapsed = false;
+                vm.collapsed = *collapsed;
             }
         }
     }
 
     let mut closes = Vec::new();
+    let mut toggle_max = None;
     let mut user_moved = false;
     let mut pressed = None;
     let mut prev_min = area.min;
@@ -116,6 +152,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             cmd_tx: &app.cmd_tx,
             providers: &app.providers,
             vscode: app.vscode.as_deref(),
+            maximized: app.maximized,
         };
         let applying = vm.apply_rect.take();
         let default_pos = if i > 0 {
@@ -131,7 +168,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             prev_min = rect.min;
             if applying.is_none() && !vm.collapsed {
                 vm.window_rect = Some(rect);
-                if app.tiling.auto && !retile && differs(rect, tiles[i]) {
+                if app.tiling.auto && !retile && differs(rect, tiles[i].0) {
                     user_moved = true;
                 }
             }
@@ -139,8 +176,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 pressed = Some(*id);
             }
         }
-        if out.collapse {
-            let rect = vm.window_rect.unwrap_or(tiles[i]);
+        if out.maximize {
+            toggle_max = Some(*id);
+        } else if out.collapse && app.maximized.is_some_and(|m| m != *id) {
+            // Expanding a minimized window while another is maximized hands the maximize over.
+            toggle_max = Some(*id);
+        } else if out.collapse {
+            let rect = vm.window_rect.unwrap_or(tiles[i].0);
             if vm.collapsed {
                 vm.apply_rect = Some(rect);
             } else {
@@ -158,7 +200,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.sessions.insert(*id, vm);
     }
 
-    if user_moved {
+    if let Some(id) = toggle_max {
+        app.maximized = if app.maximized == Some(id) {
+            None
+        } else {
+            Some(id)
+        };
+        app.tiling.retile();
+        app.raise = Some(id);
+    }
+    if user_moved && toggle_max.is_none() {
         app.tiling.auto = false;
     }
     if let Some(id) = pressed {
@@ -190,7 +241,7 @@ fn window<'a>(
         .resizable(!collapsed)
         .frame(
             egui::Frame::new()
-                .fill(theme::BG_PANEL)
+                .fill(theme::BG_WINDOW)
                 .stroke(egui::Stroke::new(1.0, theme::BORDER))
                 .corner_radius(8),
         );
@@ -281,6 +332,7 @@ mod tests {
     fn vm() -> SessionVm {
         let now = OffsetDateTime::now_utc();
         let session = Session {
+            origin: xade_core::SessionOrigin::default(),
             id: SessionId::new(),
             workspace_id: WorkspaceId::new(),
             provider_id: ProviderId::Claude,
@@ -366,6 +418,18 @@ mod tests {
     }
 
     #[test]
+    fn maximized_window_fills_the_area_below_collapsed_headers() {
+        let area = Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(900.0, 600.0));
+        let l = layout(area, 3, Some(1));
+        assert!(l[0].1 && !l[1].1 && l[2].1);
+        assert_eq!(l[1].0.right_bottom(), area.right_bottom());
+        assert_eq!(l[1].0.left(), area.left());
+        assert!(l[1].0.top() >= l[0].0.bottom());
+        assert_eq!(layout(area, 1, Some(0)), vec![(area, false)]);
+        assert!(layout(area, 2, None).iter().all(|(_, c)| !c));
+    }
+
+    #[test]
     fn tiled_windows_land_on_their_tiles_and_stay_there() {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
@@ -374,6 +438,7 @@ mod tests {
             cmd_tx: &tx,
             providers: &[],
             vscode: None,
+            maximized: None,
         };
         let area = Rect::from_min_size(egui::pos2(20.0, 50.0), egui::vec2(1200.0, 700.0));
         let tiles = tile_rects(area, 3);
@@ -408,6 +473,7 @@ mod tests {
             cmd_tx: &tx,
             providers: &[],
             vscode: None,
+            maximized: None,
         };
         let mut v = vm();
         let area = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 700.0));

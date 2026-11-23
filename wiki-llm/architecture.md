@@ -5,3 +5,4 @@
 - Data flow: UI → `ManagerCmd` → SessionManager → session actor → provider; the actor emits `AppEvent`s to the UI and `WriteOp`s to the store writer, and the UI reads the store through `StoreReader`.
 - The session actor is the only producer of message `WriteOp`s; the UI never writes messages.
 - `XADE_DATA_DIR` overrides the data directory (the DB lives at `$XADE_DATA_DIR/workspace.db`).
+- Import: `ManagerCmd::Import` runs each provider's `import_sessions` via `spawn_blocking`, then the manager skips Xade-origin, live and not-newer sessions, sends `WriteOp::ImportSession` for the rest and emits `ImportDone`.

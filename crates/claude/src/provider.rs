@@ -2,16 +2,53 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{RwLock, RwLockReadGuard};
+use std::time::Duration;
 
 use serde::Deserialize;
 use xade_core::{
-    AgentProvider, Effort, ModelOption, ProviderError, ProviderId, SessionHandle, SpawnConfig,
+    AgentProvider, Effort, ImportedSession, ModelOption, ProviderError, ProviderId, SessionHandle,
+    SpawnConfig,
 };
 
+use crate::models::{fetch_catalog, Catalog};
 use crate::process::spawn_session;
+use crate::transcript;
+
+const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
+const FALLBACK_DEFAULT: &str = "sonnet";
 
 pub struct ClaudeProvider {
     binary: Option<PathBuf>,
+    /// Static aliases until `preflight` replaces them with the CLI's versioned list.
+    catalog: RwLock<Catalog>,
+}
+
+fn fallback_catalog() -> Catalog {
+    let models = [
+        ("fable", "Fable"),
+        ("opus", "Opus"),
+        ("sonnet", "Sonnet"),
+        ("haiku", "Haiku"),
+    ]
+    .into_iter()
+    .map(|(id, label)| ModelOption {
+        id: id.into(),
+        label: label.into(),
+        description: String::new(),
+        effort_levels: vec![
+            Effort::Low,
+            Effort::Medium,
+            Effort::High,
+            Effort::XHigh,
+            Effort::Max,
+        ],
+    })
+    .collect();
+    Catalog {
+        models,
+        default_model: FALLBACK_DEFAULT.into(),
+    }
 }
 
 impl Default for ClaudeProvider {
@@ -23,13 +60,22 @@ impl Default for ClaudeProvider {
 impl ClaudeProvider {
     /// Resolves the `claude` binary now: `$PATH`, then the usual install locations.
     pub fn new() -> Self {
-        Self {
-            binary: resolve_binary(),
-        }
+        Self::with_optional_binary(resolve_binary())
     }
 
     pub fn with_binary(path: PathBuf) -> Self {
-        Self { binary: Some(path) }
+        Self::with_optional_binary(Some(path))
+    }
+
+    fn with_optional_binary(binary: Option<PathBuf>) -> Self {
+        Self {
+            binary,
+            catalog: RwLock::new(fallback_catalog()),
+        }
+    }
+
+    fn catalog(&self) -> RwLockReadGuard<'_, Catalog> {
+        self.catalog.read().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn binary(&self) -> Option<&Path> {
@@ -72,22 +118,11 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn models(&self) -> Vec<ModelOption> {
-        [
-            ("fable", "Fable"),
-            ("opus", "Opus"),
-            ("sonnet", "Sonnet"),
-            ("haiku", "Haiku"),
-        ]
-        .into_iter()
-        .map(|(id, label)| ModelOption {
-            id: id.into(),
-            label: label.into(),
-        })
-        .collect()
+        self.catalog().models.clone()
     }
 
     fn default_model(&self) -> String {
-        "sonnet".into()
+        self.catalog().default_model.clone()
     }
 
     fn effort_levels(&self) -> Vec<Effort> {
@@ -114,13 +149,26 @@ impl AgentProvider for ClaudeProvider {
             return Err(ProviderError::NotLoggedIn);
         }
         match serde_json::from_slice::<AuthStatus>(&out.stdout) {
-            Ok(a) if a.logged_in => Ok(()),
-            _ => Err(ProviderError::NotLoggedIn),
+            Ok(a) if a.logged_in => {}
+            _ => return Err(ProviderError::NotLoggedIn),
         }
+        // Best effort: on failure the static aliases stay.
+        match fetch_catalog(binary, MODELS_TIMEOUT) {
+            Some(c) => *self.catalog.write().unwrap_or_else(|e| e.into_inner()) = c,
+            None => tracing::debug!("model list unavailable; keeping static aliases"),
+        }
+        Ok(())
     }
 
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
         let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
         spawn_session(binary, cfg)
+    }
+
+    fn import_sessions(&self) -> Vec<ImportedSession> {
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+            return Vec::new();
+        };
+        transcript::scan_projects(&home.join(".claude/projects")).sessions
     }
 }

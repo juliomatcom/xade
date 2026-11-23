@@ -219,6 +219,7 @@ impl Actor {
     async fn on_event(&mut self, ev: ProviderEvent) -> bool {
         match &ev {
             ProviderEvent::Quota(q) => {
+                self.write(WriteOp::UpsertQuota(q.clone()));
                 let _ = self.out.send(AppEvent {
                     session_id: None,
                     kind: AppEventKind::Quota(q.clone()),

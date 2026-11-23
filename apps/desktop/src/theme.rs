@@ -4,6 +4,8 @@ use egui::{Color32, CornerRadius, FontId, Stroke, TextStyle, Theme, Visuals};
 
 pub const BG_APP: Color32 = Color32::from_rgb(0x0F, 0x12, 0x16);
 pub const BG_PANEL: Color32 = Color32::from_rgb(0x16, 0x1A, 0x20);
+/// Session window frame and body, one step above `BG_PANEL`.
+pub const BG_WINDOW: Color32 = Color32::from_rgb(0x1A, 0x1F, 0x26);
 pub const BG_RAISED: Color32 = Color32::from_rgb(0x1E, 0x23, 0x2B);
 /// Hover fill, one step above `BG_RAISED`.
 pub const BG_HOVER: Color32 = Color32::from_rgb(0x27, 0x2D, 0x37);
@@ -81,4 +83,31 @@ fn visuals() -> Visuals {
         s.corner_radius = r;
     }
     v
+}
+
+/// Usage bar color: green (OK) at 0%, amber (WARN) at 50%, red (DANGER) at 100%.
+pub fn usage_color(fraction: f32) -> Color32 {
+    fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
+        let ch = |x: u8, y: u8| (x as f32 + (y as f32 - x as f32) * t).round() as u8;
+        Color32::from_rgb(ch(a.r(), b.r()), ch(a.g(), b.g()), ch(a.b(), b.b()))
+    }
+    let f = fraction.clamp(0.0, 1.0);
+    if f < 0.5 {
+        lerp(OK, WARN, f * 2.0)
+    } else {
+        lerp(WARN, DANGER, (f - 0.5) * 2.0)
+    }
+}
+
+#[cfg(test)]
+mod usage_color_tests {
+    use super::*;
+
+    #[test]
+    fn endpoints_and_midpoint() {
+        assert_eq!(usage_color(0.0), OK);
+        assert_eq!(usage_color(0.5), WARN);
+        assert_eq!(usage_color(1.0), DANGER);
+        assert_eq!(usage_color(2.0), DANGER);
+    }
 }

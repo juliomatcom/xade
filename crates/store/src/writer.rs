@@ -1,12 +1,15 @@
 //! The only write path: one std thread owns the write connection.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 
-use rusqlite::{params, Connection, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use time::OffsetDateTime;
-use xade_core::{Effort, Message, Role, Session, SessionId, UsageTotals, Workspace, WorkspaceId};
+use xade_core::{
+    Effort, Message, QuotaWindow, Role, Session, SessionId, SessionOrigin, UsageTotals, Workspace,
+    WorkspaceId,
+};
 
 use crate::schema::{self, fmt_ts, to_i64};
 use crate::StoreError;
@@ -36,6 +39,18 @@ pub enum WriteOp {
     ApplyTurnUsage {
         session_id: SessionId,
         turn: UsageTotals,
+    },
+    /// Keeps the last known window per kind.
+    UpsertQuota(QuotaWindow),
+    /// Idempotent import of a session from a provider's own history, in one transaction:
+    /// upserts the workspace by `workspace_root` (`session.workspace_id` is ignored), then
+    /// upserts the session by `(provider_id, provider_session_id)` as `ClaudeCode` origin and
+    /// replaces its messages. A session with `Xade` origin is never touched. On update the
+    /// session id, effort, auto mode and cost are kept, and a zero context max keeps the old one.
+    ImportSession {
+        session: Session,
+        messages: Vec<Message>,
+        workspace_root: PathBuf,
     },
     /// Replies once every earlier op has been applied.
     Flush(mpsc::Sender<()>),
@@ -114,8 +129,9 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
                 "INSERT INTO sessions (id, workspace_id, provider_id, provider_session_id, title,
                     preview_snippet, model_id, effort, auto_mode, context_tokens_used,
                     context_window_max, input_tokens, output_tokens, cache_read_tokens, cost_usd,
-                    created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                    created_at, updated_at, origin)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+                    ?18)",
                 params![
                     s.id.0.to_string(),
                     s.workspace_id.0.to_string(),
@@ -134,6 +150,7 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
                     s.usage.cost_usd,
                     fmt_ts(s.created_at),
                     fmt_ts(s.updated_at),
+                    schema::origin_str(s.origin),
                 ],
             )?;
         }
@@ -233,9 +250,165 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
                 ],
             )?;
         }
+        WriteOp::UpsertQuota(q) => {
+            tx.execute(
+                "INSERT INTO quota (kind, utilization_pct, resets_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4)
+                 ON CONFLICT(kind) DO UPDATE SET
+                    utilization_pct = excluded.utilization_pct,
+                    resets_at = excluded.resets_at,
+                    updated_at = excluded.updated_at",
+                params![
+                    schema::quota_kind_str(q.kind),
+                    q.utilization_pct,
+                    q.resets_at.map(fmt_ts),
+                    now
+                ],
+            )?;
+        }
+        WriteOp::ImportSession {
+            session,
+            messages,
+            workspace_root,
+        } => import_session(&tx, session, messages, &workspace_root)?,
         WriteOp::Flush(_) => {}
     }
     tx.commit()
+}
+
+fn import_session(
+    tx: &Transaction,
+    s: Session,
+    messages: Vec<Message>,
+    root: &Path,
+) -> rusqlite::Result<()> {
+    let Some(provider_session_id) = s.provider_session_id.as_deref() else {
+        return Ok(());
+    };
+    let provider = schema::provider_str(s.provider_id);
+    let existing: Option<(String, String)> = tx
+        .query_row(
+            "SELECT id, origin FROM sessions WHERE provider_id = ?1 AND provider_session_id = ?2",
+            params![provider, provider_session_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if matches!(&existing, Some((_, o)) if o == schema::origin_str(SessionOrigin::Xade)) {
+        return Ok(());
+    }
+
+    let root_path = root.to_string_lossy();
+    let display_name = root.file_name().map_or_else(
+        || root_path.to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
+    tx.execute(
+        "INSERT INTO workspaces (id, root_path, display_name, last_opened_at, is_pinned)
+         VALUES (?1, ?2, ?3, ?4, 0) ON CONFLICT(root_path) DO NOTHING",
+        params![
+            WorkspaceId::new().0.to_string(),
+            root_path,
+            display_name,
+            fmt_ts(s.updated_at)
+        ],
+    )?;
+    let workspace_id: String = tx.query_row(
+        "SELECT id FROM workspaces WHERE root_path = ?1",
+        [&root_path],
+        |r| r.get(0),
+    )?;
+
+    let u = &s.usage;
+    let preview = messages
+        .iter()
+        .rev()
+        .find(|m| matches!(m.role, Role::User | Role::Assistant) && !m.content_text.is_empty())
+        .map(|m| tail_chars(&m.content_text, PREVIEW_CHARS))
+        .unwrap_or_default();
+    let session_id = match existing {
+        Some((id, _)) => {
+            tx.execute(
+                "UPDATE sessions SET
+                    workspace_id = ?2, title = ?3, preview_snippet = ?4, model_id = ?5,
+                    context_tokens_used = ?6,
+                    context_window_max = CASE WHEN ?7 > 0 THEN ?7 ELSE context_window_max END,
+                    input_tokens = ?8, output_tokens = ?9, cache_read_tokens = ?10,
+                    created_at = ?11, updated_at = ?12
+                 WHERE id = ?1",
+                params![
+                    id,
+                    workspace_id,
+                    s.title,
+                    preview,
+                    s.model_id,
+                    to_i64(u.context_tokens_used),
+                    to_i64(u.context_window_max),
+                    to_i64(u.input_tokens),
+                    to_i64(u.output_tokens),
+                    to_i64(u.cache_read_tokens),
+                    fmt_ts(s.created_at),
+                    fmt_ts(s.updated_at),
+                ],
+            )?;
+            // No delete trigger on messages: drop their search rows by hand.
+            tx.execute(
+                "DELETE FROM search_index WHERE session_id = ?1 AND source = 'msg'",
+                [&id],
+            )?;
+            tx.execute("DELETE FROM messages WHERE session_id = ?1", [&id])?;
+            id
+        }
+        None => {
+            let id = s.id.0.to_string();
+            tx.execute(
+                "INSERT INTO sessions (id, workspace_id, provider_id, provider_session_id, title,
+                    preview_snippet, model_id, effort, auto_mode, context_tokens_used,
+                    context_window_max, input_tokens, output_tokens, cache_read_tokens, cost_usd,
+                    created_at, updated_at, origin)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10, ?11, ?12, ?13, 0, ?14, ?15, ?16)",
+                params![
+                    id,
+                    workspace_id,
+                    provider,
+                    provider_session_id,
+                    s.title,
+                    preview,
+                    s.model_id,
+                    schema::effort_str(Effort::Default),
+                    to_i64(u.context_tokens_used),
+                    to_i64(u.context_window_max),
+                    to_i64(u.input_tokens),
+                    to_i64(u.output_tokens),
+                    to_i64(u.cache_read_tokens),
+                    fmt_ts(s.created_at),
+                    fmt_ts(s.updated_at),
+                    schema::origin_str(SessionOrigin::ClaudeCode),
+                ],
+            )?;
+            id
+        }
+    };
+    let mut insert = tx.prepare(
+        "INSERT INTO messages (id, session_id, seq, role, content_text, thinking_text,
+            tool_name, tool_use_id, tool_payload_json, is_error, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+    )?;
+    for m in messages {
+        insert.execute(params![
+            m.id.to_string(),
+            session_id,
+            m.seq,
+            schema::role_str(m.role),
+            m.content_text,
+            m.thinking_text,
+            m.tool_name,
+            m.tool_use_id,
+            m.tool_payload_json,
+            m.is_error,
+            fmt_ts(m.created_at),
+        ])?;
+    }
+    Ok(())
 }
 
 fn tail_chars(s: &str, n: usize) -> String {

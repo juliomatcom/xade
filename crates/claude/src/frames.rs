@@ -178,6 +178,14 @@ impl OutFrame {
         }))
     }
 
+    pub fn initialize(request_id: &str) -> Self {
+        Self(json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "initialize"},
+        }))
+    }
+
     pub fn interrupt(request_id: &str) -> Self {
         Self(json!({
             "type": "control_request",

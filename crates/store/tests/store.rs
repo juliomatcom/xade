@@ -8,7 +8,8 @@ use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 use xade_core::{
-    Effort, Message, ProviderId, Role, Session, SessionId, UsageTotals, Workspace, WorkspaceId,
+    Effort, Message, ProviderId, QuotaKind, QuotaWindow, Role, Session, SessionId, SessionOrigin,
+    UsageTotals, Workspace, WorkspaceId,
 };
 use xade_store::{StoreReader, StoreWriter, WriteOp, WriterHandle, SCHEMA_VERSION};
 
@@ -72,7 +73,7 @@ impl Fixture {
         q: &str,
     ) -> xade_store::Page<xade_store::SessionCard> {
         self.writer.flush().unwrap();
-        block_on(self.reader.search(scope, q.to_string(), 0, 24)).unwrap()
+        block_on(self.reader.search(scope, None, q.to_string(), 0, 24)).unwrap()
     }
 
     fn titles(&self, q: &str) -> Vec<String> {
@@ -100,6 +101,7 @@ fn session(ws: WorkspaceId, title: &str, at: OffsetDateTime) -> Session {
         workspace_id: ws,
         provider_id: ProviderId::Claude,
         provider_session_id: None,
+        origin: SessionOrigin::Xade,
         title: title.to_string(),
         preview_snippet: String::new(),
         model_id: "sonnet".into(),
@@ -140,14 +142,14 @@ fn migrations_are_idempotent_across_reopen() {
     f.add_session("first", 0);
     f.writer.flush().unwrap();
     assert_eq!(user_version(&f.path), SCHEMA_VERSION);
-    let before = block_on(f.reader.list_sessions(None, 0, 24)).unwrap();
+    let before = block_on(f.reader.list_sessions(None, None, 0, 24)).unwrap();
 
     for _ in 0..2 {
         let again = StoreWriter::spawn(&f.path).unwrap();
         again.flush().unwrap();
         assert_eq!(user_version(&f.path), SCHEMA_VERSION);
     }
-    let after = block_on(f.reader.list_sessions(None, 0, 24)).unwrap();
+    let after = block_on(f.reader.list_sessions(None, None, 0, 24)).unwrap();
     assert_eq!(before, after);
 }
 
@@ -169,8 +171,8 @@ fn pagination_returns_24_then_6_of_30() {
         f.add_message(id, 1, Role::User, "hello");
     }
     f.writer.flush().unwrap();
-    let p0 = block_on(f.reader.list_sessions(Some(f.ws), 0, 24)).unwrap();
-    let p1 = block_on(f.reader.list_sessions(Some(f.ws), 1, 24)).unwrap();
+    let p0 = block_on(f.reader.list_sessions(Some(f.ws), None, 0, 24)).unwrap();
+    let p1 = block_on(f.reader.list_sessions(Some(f.ws), None, 1, 24)).unwrap();
     assert_eq!((p0.items.len(), p0.total), (24, 30));
     assert_eq!((p1.items.len(), p1.total), (6, 30));
     assert_eq!((p1.page, p1.page_size), (1, 24));
@@ -187,10 +189,10 @@ fn sessions_list_newest_first_and_respect_scope() {
     f.add_session("new", 1);
     f.add_session_in(other, "elsewhere", 10);
     f.writer.flush().unwrap();
-    let all = block_on(f.reader.list_sessions(None, 0, 24)).unwrap();
+    let all = block_on(f.reader.list_sessions(None, None, 0, 24)).unwrap();
     let titles: Vec<_> = all.items.iter().map(|c| c.title.as_str()).collect();
     assert_eq!(titles, ["new", "elsewhere", "old"]);
-    let scoped = block_on(f.reader.list_sessions(Some(f.ws), 0, 24)).unwrap();
+    let scoped = block_on(f.reader.list_sessions(Some(f.ws), None, 0, 24)).unwrap();
     assert_eq!(scoped.total, 2);
 }
 
@@ -363,7 +365,7 @@ fn search_paginates() {
         f.add_session(&format!("deploy {i}"), i);
     }
     f.writer.flush().unwrap();
-    let p1 = block_on(f.reader.search(None, "deploy".into(), 1, 24)).unwrap();
+    let p1 = block_on(f.reader.search(None, None, "deploy".into(), 1, 24)).unwrap();
     assert_eq!((p1.items.len(), p1.total), (6, 30));
 }
 
@@ -491,7 +493,7 @@ fn bad_ops_are_logged_not_fatal() {
     f.add_message(SessionId::new(), 1, Role::User, "orphan");
     f.add_session("Still alive", 0);
     f.writer.flush().unwrap();
-    let all = block_on(f.reader.list_sessions(None, 0, 24)).unwrap();
+    let all = block_on(f.reader.list_sessions(None, None, 0, 24)).unwrap();
     assert_eq!(all.total, 2);
 }
 
@@ -529,10 +531,10 @@ fn concurrent_writes_and_reads_never_hit_busy() {
     block_on(async {
         while !producer.is_finished() || loops < 5 {
             loops += 1;
-            if let Err(e) = f.reader.list_sessions(None, 0, 24).await {
+            if let Err(e) = f.reader.list_sessions(None, None, 0, 24).await {
                 errors.push(e.to_string());
             }
-            if let Err(e) = f.reader.search(None, "streamed".into(), 0, 24).await {
+            if let Err(e) = f.reader.search(None, None, "streamed".into(), 0, 24).await {
                 errors.push(e.to_string());
             }
         }
@@ -542,4 +544,248 @@ fn concurrent_writes_and_reads_never_hit_busy() {
     assert_eq!(block_on(f.reader.max_seq(id)).unwrap(), 1000);
     let (_, msgs) = block_on(f.reader.load_session(id)).unwrap();
     assert_eq!(msgs.len(), 1000);
+}
+
+fn import_op(
+    f: &Fixture,
+    psid: &str,
+    title: &str,
+    texts: &[&str],
+    age: i64,
+) -> (SessionId, WriteOp) {
+    let mut s = session(WorkspaceId::new(), title, f.base - Duration::seconds(age));
+    s.provider_session_id = Some(psid.into());
+    s.origin = SessionOrigin::ClaudeCode;
+    s.usage.input_tokens = 7;
+    let messages = texts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| message(s.id, i as i64 + 1, Role::User, t))
+        .collect();
+    let id = s.id;
+    (
+        id,
+        WriteOp::ImportSession {
+            session: s,
+            messages,
+            workspace_root: "/tmp/imported".into(),
+        },
+    )
+}
+
+#[test]
+fn migration_v2_adds_origin_quota_and_unique_provider_session() {
+    let f = Fixture::new();
+    let a = f.add_session("a", 0);
+    f.writer.flush().unwrap();
+    let (s, _) = block_on(f.reader.load_session(a)).unwrap();
+    assert_eq!(s.origin, SessionOrigin::Xade);
+    let mut dup = session(f.ws, "dup1", f.base);
+    dup.provider_session_id = Some("same".into());
+    let mut dup2 = session(f.ws, "dup2", f.base);
+    dup2.provider_session_id = Some("same".into());
+    f.writer.send(WriteOp::InsertSession(dup)).unwrap();
+    f.writer.send(WriteOp::InsertSession(dup2)).unwrap();
+    f.writer.flush().unwrap();
+    // The second insert violates the unique index and is dropped (logged, not fatal).
+    assert_eq!(
+        block_on(f.reader.list_sessions(None, None, 0, 24))
+            .unwrap()
+            .total,
+        2
+    );
+}
+
+#[test]
+fn origin_filter_applies_to_list_and_search() {
+    let f = Fixture::new();
+    f.add_session("deploy from xade", 5);
+    let (_, op) = import_op(&f, "p1", "deploy from claude code", &["hello"], 1);
+    f.writer.send(op).unwrap();
+    f.writer.flush().unwrap();
+    let list = |o| block_on(f.reader.list_sessions(None, o, 0, 24)).unwrap();
+    assert_eq!(list(None).total, 2);
+    let cc = list(Some(SessionOrigin::ClaudeCode));
+    assert_eq!(cc.items.len(), 1);
+    assert_eq!(cc.items[0].origin, SessionOrigin::ClaudeCode);
+    assert_eq!(
+        list(Some(SessionOrigin::Xade)).items[0].title,
+        "deploy from xade"
+    );
+    for q in ["deploy", "de", "hello"] {
+        let search = |o| block_on(f.reader.search(None, o, q.into(), 0, 24)).unwrap();
+        assert!(search(None).total >= 1, "{q}");
+        assert!(search(Some(SessionOrigin::Xade))
+            .items
+            .iter()
+            .all(|c| c.origin == SessionOrigin::Xade));
+        assert!(search(Some(SessionOrigin::ClaudeCode))
+            .items
+            .iter()
+            .all(|c| c.origin == SessionOrigin::ClaudeCode));
+    }
+    let hello = block_on(
+        f.reader
+            .search(None, Some(SessionOrigin::Xade), "hello".into(), 0, 24),
+    )
+    .unwrap();
+    assert_eq!(hello.total, 0);
+}
+
+#[test]
+fn quota_upsert_keeps_last_window_per_kind() {
+    let f = Fixture::new();
+    assert!(block_on(f.reader.load_quota()).unwrap().is_empty());
+    let reset = f.base + Duration::hours(2);
+    let q = |kind, pct, resets_at| {
+        WriteOp::UpsertQuota(QuotaWindow {
+            kind,
+            utilization_pct: pct,
+            resets_at,
+        })
+    };
+    f.writer
+        .send(q(QuotaKind::FiveHour, 10.0, Some(reset)))
+        .unwrap();
+    f.writer.send(q(QuotaKind::SevenDay, 20.0, None)).unwrap();
+    f.writer
+        .send(q(QuotaKind::FiveHour, 55.5, Some(reset)))
+        .unwrap();
+    f.writer.flush().unwrap();
+    let got = block_on(f.reader.load_quota()).unwrap();
+    assert_eq!(got.len(), 2);
+    let five = got.iter().find(|w| w.kind == QuotaKind::FiveHour).unwrap();
+    assert_eq!(five.utilization_pct, 55.5);
+    assert_eq!(
+        five.resets_at.unwrap().unix_timestamp(),
+        reset.unix_timestamp()
+    );
+    let seven = got.iter().find(|w| w.kind == QuotaKind::SevenDay).unwrap();
+    assert_eq!((seven.utilization_pct, seven.resets_at), (20.0, None));
+}
+
+#[test]
+fn import_inserts_then_replaces_messages_and_search_rows() {
+    let f = Fixture::new();
+    let (id, op) = import_op(
+        &f,
+        "p1",
+        "first title",
+        &["alpha question", "beta question"],
+        10,
+    );
+    f.writer.send(op).unwrap();
+    f.writer.flush().unwrap();
+    let (s, msgs) = block_on(f.reader.load_session(id)).unwrap();
+    assert_eq!(
+        (s.origin, s.usage.input_tokens),
+        (SessionOrigin::ClaudeCode, 7)
+    );
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(s.preview_snippet, "beta question");
+    let ws = block_on(f.reader.list_workspaces()).unwrap();
+    let imported = ws
+        .iter()
+        .find(|w| w.root_path.ends_with("imported"))
+        .unwrap();
+    assert_eq!(
+        (imported.display_name.as_str(), s.workspace_id),
+        ("imported", imported.id)
+    );
+    assert_eq!(f.titles("alpha question"), ["first title"]);
+
+    // Re-import with a new id in the op: the stored id is kept, messages are replaced.
+    let (_, op) = import_op(&f, "p1", "second title", &["gamma question"], 1);
+    if let WriteOp::ImportSession { session, .. } = &op {
+        assert_ne!(session.id, id);
+    }
+    f.writer.send(op).unwrap();
+    f.writer.flush().unwrap();
+    let (s, msgs) = block_on(f.reader.load_session(id)).unwrap();
+    assert_eq!(s.title, "second title");
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(
+        block_on(f.reader.list_sessions(None, None, 0, 24))
+            .unwrap()
+            .total,
+        1
+    );
+    assert_eq!(f.titles("gamma question"), ["second title"]);
+    assert!(
+        f.titles("alpha question").is_empty(),
+        "stale search rows were removed"
+    );
+    let ws = block_on(f.reader.list_workspaces()).unwrap();
+    assert_eq!(
+        ws.iter()
+            .filter(|w| w.root_path.ends_with("imported"))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn import_never_touches_xade_origin_and_keeps_local_fields() {
+    let f = Fixture::new();
+    let mut own = session(f.ws, "mine", f.base);
+    own.provider_session_id = Some("shared".into());
+    let own_id = own.id;
+    f.writer.send(WriteOp::InsertSession(own)).unwrap();
+    let (_, op) = import_op(&f, "shared", "overwrite attempt", &["x"], 0);
+    f.writer.send(op).unwrap();
+    f.writer.flush().unwrap();
+    let (s, msgs) = block_on(f.reader.load_session(own_id)).unwrap();
+    assert_eq!(
+        (s.title.as_str(), s.origin, msgs.len()),
+        ("mine", SessionOrigin::Xade, 0)
+    );
+    assert_eq!(
+        block_on(f.reader.list_sessions(None, None, 0, 24))
+            .unwrap()
+            .total,
+        1
+    );
+
+    // Imported rows keep effort, cost and a known context max across updates.
+    let (id, op) = import_op(&f, "other", "t", &["x"], 5);
+    f.writer.send(op).unwrap();
+    f.writer
+        .send(WriteOp::ApplyTurnUsage {
+            session_id: id,
+            turn: UsageTotals {
+                cost_usd: 1.5,
+                context_window_max: 1000,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+    f.writer
+        .send(WriteOp::UpdateSession {
+            id,
+            title: None,
+            provider_session_id: None,
+            model_id: None,
+            effort: Some(Effort::High),
+            auto_mode: None,
+            preview_snippet: None,
+            usage: None,
+        })
+        .unwrap();
+    let (_, op) = import_op(&f, "other", "t2", &["y"], 0);
+    f.writer.send(op).unwrap();
+    f.writer.flush().unwrap();
+    let (s, _) = block_on(f.reader.load_session(id)).unwrap();
+    assert_eq!(
+        (
+            s.title.as_str(),
+            s.effort,
+            s.usage.cost_usd,
+            s.usage.context_window_max
+        ),
+        ("t2", Effort::High, 1.5, 1000)
+    );
+    let idx = block_on(f.reader.import_index(ProviderId::Claude)).unwrap();
+    assert_eq!(idx["shared"].id, own_id);
+    assert_eq!(idx["shared"].origin, SessionOrigin::Xade);
+    assert_eq!(idx["other"].origin, SessionOrigin::ClaudeCode);
 }

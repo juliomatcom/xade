@@ -22,7 +22,7 @@ use xade_store::{Page, SessionCard, StoreReader, WriteOp, WriterHandle};
 use crate::diff::{is_code_change, DiffData};
 use crate::home::HomeState;
 use crate::workspace::Tiling;
-use crate::{home, status_bar, theme, workspace};
+use crate::{home, icons, status_bar, theme, workspace};
 
 const GIT_REFRESH: Duration = Duration::from_secs(5);
 
@@ -134,6 +134,8 @@ pub struct App {
     pub writer: WriterHandle,
     pub reader: StoreReader,
     pub tiling: Tiling,
+    /// The session window filling the central area; the others are collapsed.
+    pub maximized: Option<SessionId>,
     /// Window to bring to the front on the next frame.
     pub raise: Option<SessionId>,
     pub vscode: Option<PathBuf>,
@@ -187,6 +189,7 @@ impl App {
             writer,
             reader,
             tiling: Tiling::default(),
+            maximized: None,
             raise: None,
             vscode: crate::widgets::diff_modal::find_code(),
             events_rx,
@@ -225,9 +228,13 @@ impl App {
         let (reader, bridge) = (self.reader.clone(), self.bridge.clone());
         self.rt.spawn(async move {
             let res = if query.is_empty() {
-                reader.list_sessions(scope, page, home::PAGE_SIZE).await
+                reader
+                    .list_sessions(scope, None, page, home::PAGE_SIZE)
+                    .await
             } else {
-                reader.search(scope, query, page, home::PAGE_SIZE).await
+                reader
+                    .search(scope, None, query, page, home::PAGE_SIZE)
+                    .await
             };
             match res {
                 Ok(page) => bridge.send(UiMsg::Cards { generation, page }),
@@ -326,6 +333,7 @@ impl App {
     fn focus(&mut self, id: SessionId) {
         if !self.open_windows.contains(&id) {
             self.open_windows.push(id);
+            self.maximized = None;
         }
         self.focused = Some(id);
         self.raise = Some(id);
@@ -340,6 +348,10 @@ impl App {
     fn drop_session(&mut self, id: SessionId) {
         self.sessions.remove(&id);
         self.open_windows.retain(|s| *s != id);
+        if self.maximized == Some(id) {
+            self.maximized = None;
+            self.tiling.retile();
+        }
         if self.focused == Some(id) {
             self.focused = self.open_windows.last().copied();
         }
@@ -626,7 +638,10 @@ impl eframe::App for App {
             if let Some(err) = self.error.clone() {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new(&err).color(theme::DANGER));
-                    if ui.small_button("Dismiss").clicked() {
+                    if ui
+                        .small_button(icons::with(icons::CLOSE, "Dismiss"))
+                        .clicked()
+                    {
                         self.error = None;
                     }
                 });

@@ -10,7 +10,7 @@ pub use error::ProviderError;
 pub use events::{ProviderEvent, SessionCommand};
 pub use ids::{ProviderId, SessionId, WorkspaceId};
 pub use model::{
-    Effort, Message, ModelOption, QuotaKind, QuotaWindow, Role, Session, SessionStatus,
-    SpawnConfig, UsageTotals, Workspace,
+    Effort, ImportedMessage, ImportedSession, Message, ModelOption, QuotaKind, QuotaWindow, Role,
+    Session, SessionOrigin, SessionStatus, SpawnConfig, UsageTotals, Workspace,
 };
 pub use provider::{AgentProvider, SessionHandle};

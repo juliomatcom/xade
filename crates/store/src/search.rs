@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use rusqlite::{params, Connection};
-use xade_core::{SessionId, WorkspaceId};
+use xade_core::{SessionId, SessionOrigin, WorkspaceId};
 
 use crate::reader::{card_from_row, list_sessions, CARD_COLS};
+use crate::schema::origin_str;
 use crate::{paginate, Page, SessionCard, StoreError};
 
 const MIN_FTS_CHARS: usize = 3;
@@ -18,48 +19,60 @@ const FUZZY_MIN_SCORE_PER_CHAR: u32 = 14;
 pub(crate) fn search(
     conn: &Connection,
     scope: Option<WorkspaceId>,
+    origin: Option<SessionOrigin>,
     query: &str,
     page: u32,
     page_size: u32,
 ) -> Result<Page<SessionCard>, StoreError> {
     let q = query.trim();
     if q.is_empty() {
-        return list_sessions(conn, scope, page, page_size);
+        return list_sessions(conn, scope, origin, page, page_size);
     }
     let scope = scope.map(|w| w.0.to_string());
+    let filter = Filter {
+        scope: scope.as_deref(),
+        origin: origin.map(origin_str),
+    };
     let cards = if q.chars().count() < MIN_FTS_CHARS {
-        like_search(conn, scope.as_deref(), q)?
+        like_search(conn, filter, q)?
     } else {
-        ranked_search(conn, scope.as_deref(), q)?
+        ranked_search(conn, filter, q)?
     };
     Ok(paginate(cards, page, page_size))
 }
 
-fn scoped_cards(conn: &Connection, scope: Option<&str>) -> Result<Vec<SessionCard>, StoreError> {
+/// Bound as `?1` (workspace) and `?2` (origin); `None` matches everything.
+#[derive(Clone, Copy)]
+struct Filter<'a> {
+    scope: Option<&'a str>,
+    origin: Option<&'static str>,
+}
+
+fn scoped_cards(conn: &Connection, f: Filter) -> Result<Vec<SessionCard>, StoreError> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT {CARD_COLS} FROM sessions WHERE (?1 IS NULL OR workspace_id = ?1)
+        "SELECT {CARD_COLS} FROM sessions
+         WHERE (?1 IS NULL OR workspace_id = ?1) AND (?2 IS NULL OR origin = ?2)
          ORDER BY updated_at DESC, id"
     ))?;
-    let rows = stmt.query_map([scope], card_from_row)?;
+    let rows = stmt.query_map(params![f.scope, f.origin], card_from_row)?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn like_search(
-    conn: &Connection,
-    scope: Option<&str>,
-    q: &str,
-) -> Result<Vec<SessionCard>, StoreError> {
+fn like_search(conn: &Connection, f: Filter, q: &str) -> Result<Vec<SessionCard>, StoreError> {
     let escaped = q
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_");
     let mut stmt = conn.prepare(&format!(
         "SELECT {CARD_COLS} FROM sessions
-         WHERE (?1 IS NULL OR workspace_id = ?1)
-           AND (title LIKE ?2 ESCAPE '\\' OR preview_snippet LIKE ?2 ESCAPE '\\')
+         WHERE (?1 IS NULL OR workspace_id = ?1) AND (?2 IS NULL OR origin = ?2)
+           AND (title LIKE ?3 ESCAPE '\\' OR preview_snippet LIKE ?3 ESCAPE '\\')
          ORDER BY updated_at DESC, id"
     ))?;
-    let rows = stmt.query_map(params![scope, format!("%{escaped}%")], card_from_row)?;
+    let rows = stmt.query_map(
+        params![f.scope, f.origin, format!("%{escaped}%")],
+        card_from_row,
+    )?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
@@ -75,7 +88,7 @@ struct FtsHit {
 
 fn fts_hits(
     conn: &Connection,
-    scope: Option<&str>,
+    f: Filter,
     q: &str,
 ) -> Result<HashMap<SessionId, FtsHit>, StoreError> {
     let mut stmt = conn.prepare(
@@ -84,17 +97,21 @@ fn fts_hits(
          FROM search_index
          JOIN sessions s ON s.id = search_index.session_id
          WHERE search_index MATCH ?1 AND (?2 IS NULL OR s.workspace_id = ?2)
+           AND (?3 IS NULL OR s.origin = ?3)
          ORDER BY bm25(search_index)
-         LIMIT ?3",
+         LIMIT ?4",
     )?;
-    let rows = stmt.query_map(params![fts_literal(q), scope, FTS_CANDIDATE_CAP], |r| {
-        Ok((
-            crate::schema::session_id(0, &r.get::<_, String>(0)?)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, f64>(3)?,
-        ))
-    })?;
+    let rows = stmt.query_map(
+        params![fts_literal(q), f.scope, f.origin, FTS_CANDIDATE_CAP],
+        |r| {
+            Ok((
+                crate::schema::session_id(0, &r.get::<_, String>(0)?)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, f64>(3)?,
+            ))
+        },
+    )?;
     // Rows arrive best-first: the first row per session sets its score, and the
     // first message row supplies the excerpt.
     let mut hits: HashMap<SessionId, FtsHit> = HashMap::new();
@@ -132,13 +149,9 @@ fn fuzzy_scores(cards: &[SessionCard], q: &str) -> HashMap<SessionId, u32> {
 
 /// Ranking: exact title substring, then FTS by bm25, then fuzzy-only by score;
 /// ties go to the most recently updated.
-fn ranked_search(
-    conn: &Connection,
-    scope: Option<&str>,
-    q: &str,
-) -> Result<Vec<SessionCard>, StoreError> {
-    let cards = scoped_cards(conn, scope)?;
-    let mut fts = fts_hits(conn, scope, q)?;
+fn ranked_search(conn: &Connection, f: Filter, q: &str) -> Result<Vec<SessionCard>, StoreError> {
+    let cards = scoped_cards(conn, f)?;
+    let mut fts = fts_hits(conn, f, q)?;
     let fuzzy = fuzzy_scores(&cards, q);
     let needle = q.to_lowercase();
 

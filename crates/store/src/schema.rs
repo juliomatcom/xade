@@ -8,12 +8,12 @@ use rusqlite::{Connection, OpenFlags};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
-use xade_core::{Effort, ProviderId, Role, SessionId, WorkspaceId};
+use xade_core::{Effort, ProviderId, QuotaKind, Role, SessionId, SessionOrigin, WorkspaceId};
 
 use crate::StoreError;
 
 /// Migrations in order; `PRAGMA user_version` is the count already applied.
-const MIGRATIONS: &[&str] = &[V1];
+const MIGRATIONS: &[&str] = &[V1, V2];
 
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
@@ -92,6 +92,18 @@ CREATE TRIGGER sessions_search_ad AFTER DELETE ON sessions
 BEGIN
     DELETE FROM search_index WHERE session_id = old.id;
 END;
+";
+
+const V2: &str = "
+ALTER TABLE sessions ADD COLUMN origin TEXT NOT NULL DEFAULT 'xade';
+CREATE UNIQUE INDEX sessions_provider_session ON sessions(provider_id, provider_session_id)
+    WHERE provider_session_id IS NOT NULL;
+CREATE TABLE quota (
+    kind TEXT PRIMARY KEY,
+    utilization_pct REAL NOT NULL,
+    resets_at TEXT,
+    updated_at TEXT NOT NULL
+);
 ";
 
 fn set_pragmas(conn: &Connection) -> rusqlite::Result<()> {
@@ -238,6 +250,36 @@ pub(crate) fn parse_role(idx: usize, s: &str) -> rusqlite::Result<Role> {
     }
 }
 
+pub(crate) fn origin_str(o: SessionOrigin) -> &'static str {
+    match o {
+        SessionOrigin::Xade => "xade",
+        SessionOrigin::ClaudeCode => "claude_code",
+    }
+}
+
+pub(crate) fn parse_origin(idx: usize, s: &str) -> rusqlite::Result<SessionOrigin> {
+    match s {
+        "xade" => Ok(SessionOrigin::Xade),
+        "claude_code" => Ok(SessionOrigin::ClaudeCode),
+        other => Err(conversion_error(idx, UnknownValue(other.to_string()))),
+    }
+}
+
+pub(crate) fn quota_kind_str(k: QuotaKind) -> &'static str {
+    match k {
+        QuotaKind::FiveHour => "five_hour",
+        QuotaKind::SevenDay => "seven_day",
+    }
+}
+
+pub(crate) fn parse_quota_kind(idx: usize, s: &str) -> rusqlite::Result<QuotaKind> {
+    match s {
+        "five_hour" => Ok(QuotaKind::FiveHour),
+        "seven_day" => Ok(QuotaKind::SevenDay),
+        other => Err(conversion_error(idx, UnknownValue(other.to_string()))),
+    }
+}
+
 pub(crate) fn to_i64(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
@@ -249,3 +291,35 @@ pub(crate) fn to_u64(v: i64) -> u64 {
 #[derive(Debug, thiserror::Error)]
 #[error("unknown stored value: {0}")]
 struct UnknownValue(String);
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn v1_database_upgrades_with_existing_sessions_defaulting_to_xade() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(V1).unwrap();
+        conn.pragma_update(None, "user_version", 1).unwrap();
+        conn.execute_batch(
+            "INSERT INTO workspaces VALUES ('w', '/p', 'p', 't', 0);
+             INSERT INTO sessions (id, workspace_id, provider_id, provider_session_id, title, model_id,
+                effort, created_at, updated_at)
+             VALUES ('s', 'w', 'claude', 'abc', 't', 'sonnet', 'default', 't', 't');",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        let origin: String = conn
+            .query_row("SELECT origin FROM sessions WHERE id = 's'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(origin, "xade");
+        conn.execute_batch("SELECT * FROM quota").unwrap();
+        let v: u32 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap();
+        assert_eq!(v, SCHEMA_VERSION);
+    }
+}

@@ -4,7 +4,7 @@ Verified against Claude Code 2.1.330 with fixtures in `crates/claude/fixtures/` 
 ## Spawn
 - Args: `-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio`, plus `--model <alias>`, `--effort <low|medium|high|xhigh|max>` (omit for CLI default), `--resume <id>` or `--session-id <uuid>`.
 - `--setting-sources project` is used by the recorder only, for isolation; the app keeps the user's settings.
-- Models: aliases `fable`, `opus`, `sonnet`, `haiku`. No thinking on/off flag exists.
+- Models: preflight sends `control_request initialize` to a short `claude -p` process (no prompt, free) and reads `response.models` (`value`, `resolvedModel`, `displayName`, `description`, `supportedEffortLevels`); sessions store `resolvedModel`, deduped with the "default" entry. Static aliases `fable`, `opus`, `sonnet`, `haiku` are the fallback. No thinking on/off flag exists.
 - Auth preflight: `claude auth status --json`; exit 0 + `loggedIn: true` when logged in, exit 1 when not. Read only `loggedIn`.
 - GUI apps on macOS lack the shell PATH: look up `claude` in `$PATH`, then `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` (the default install).
 
@@ -35,6 +35,10 @@ Verified against Claude Code 2.1.330 with fixtures in `crates/claude/fixtures/` 
 - `control_request/can_use_tool` → `PermissionRequest`; in auto mode the reader allows it itself and emits nothing.
 - A manual allow echoes the stored original `input` as `updatedInput`; deny sends "Denied by user".
 - Unknown or unparsable frames are skipped.
+
+## Transcripts (`crates/claude/src/transcript.rs`, fixture `fixtures/transcripts/`)
+- The CLI writes `~/.claude/projects/<dir>/<sessionId>.jsonl`; the file stem is the `--resume` id and a resume keeps it. Entries: `user`, `assistant`, `ai-title` matter; `isSidechain`/`isMeta`/`isCompactSummary` and every other type are skipped.
+- Mapping: `cwd` = workspace, last `aiTitle` (else first user text) = title, last assistant `model`; user text and `tool_result` (+ `toolUseResult`) and assistant `text`/`tool_use` become messages; usage is deduped per `message.id`.
 
 ## Lifecycle
 - Closing stdin ends the process after the current turn (exit 0; exit 1 if the last turn was interrupted).

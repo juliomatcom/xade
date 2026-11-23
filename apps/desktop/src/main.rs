@@ -3,6 +3,7 @@ mod composer;
 mod conversation;
 mod diff;
 mod home;
+mod icons;
 mod session_view;
 mod status_bar;
 mod theme;
@@ -57,11 +58,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     let handle = rt.handle().clone();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_title("Xade")
+        .with_inner_size([1280.0, 800.0])
+        .with_min_inner_size([800.0, 500.0]);
+    match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/xade-icon.png")) {
+        Ok(icon) => viewport = viewport.with_icon(icon),
+        Err(e) => tracing::warn!("app icon not loaded: {e}"),
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Xade")
-            .with_inner_size([1280.0, 800.0])
-            .with_min_inner_size([800.0, 500.0]),
+        viewport,
         ..Default::default()
     };
     eframe::run_native(

@@ -59,13 +59,16 @@ pub enum ManagerCmd {
     Close {
         session_id: SessionId,
     },
+    /// Reads every provider's own history and imports what is new or newer (idempotent).
+    /// Replies with `AppEventKind::ImportDone`.
+    Import,
     /// Replies once every child has exited.
     ShutdownAll(oneshot::Sender<()>),
 }
 
 #[derive(Debug, Clone)]
 pub struct AppEvent {
-    /// `None` for global events (quota, git).
+    /// `None` for global events (quota, import, git).
     pub session_id: Option<SessionId>,
     pub kind: AppEventKind,
 }
@@ -82,6 +85,11 @@ pub enum AppEventKind {
         messages: Vec<Message>,
     },
     Quota(QuotaWindow),
+    /// Reply to `Import`: sessions created and sessions replaced by a newer transcript.
+    ImportDone {
+        imported: u32,
+        updated: u32,
+    },
     /// Produced by the UI, not the manager.
     Git {
         dir: PathBuf,
