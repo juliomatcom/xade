@@ -4,13 +4,13 @@
 
 A fast native desktop app for running several AI coding agent sessions side by side.
 
-**Simple. Opinionated. Really fast.** Xade does one thing well, makes the choices for you, and never trades speed for features. These three rules lead every change to the project.
-
 Xade is short for X-provider Agentic Development Environment (pronounced "zade").
 
 **It uses the agent clients you already have configured.** Xade drives your installed `claude` CLI as is: your login, settings, `CLAUDE.md` files, MCP servers, skills and permission rules all apply. There is nothing to set up again, no API keys to paste, and your existing Claude Code sessions can be imported and resumed.
 
 <!-- Screenshot / demo video coming soon -->
+
+**Simple. Opinionated. Really fast.** Xade does one thing well, makes the choices for you, and never trades speed for features. These three rules lead every change to the project.
 
 ## What it does
 
