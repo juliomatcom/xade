@@ -10,6 +10,8 @@ pub const BG_RAISED: Color32 = Color32::from_rgb(0x1E, 0x23, 0x2B);
 /// Hover fill, one step above `BG_RAISED`.
 pub const BG_HOVER: Color32 = Color32::from_rgb(0x27, 0x2D, 0x37);
 pub const BORDER: Color32 = Color32::from_rgb(0x2A, 0x30, 0x3A);
+/// Border of the message input: clearly visible against `BG_HOVER`.
+pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x4B, 0x55, 0x63);
 pub const TEXT: Color32 = Color32::from_rgb(0xD6, 0xDA, 0xE1);
 pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x8A, 0x93, 0xA1);
 /// Brand jade; primary buttons, selection, links.

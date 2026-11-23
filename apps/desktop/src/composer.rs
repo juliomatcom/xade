@@ -60,8 +60,8 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
         }
     }
     egui::Frame::new()
-        .fill(theme::BG_RAISED)
-        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .fill(theme::BG_HOVER)
+        .stroke(egui::Stroke::new(1.5, theme::BORDER_STRONG))
         .corner_radius(8)
         .inner_margin(egui::Margin::same(6))
         .show(ui, |ui| {
@@ -154,19 +154,6 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     queued_rows(ui, vm);
 
     controls(ui, vm, env);
-    ui.horizontal_wrapped(|ui| {
-        let u = &vm.session.usage;
-        ui.label(
-            RichText::new(context_text(u))
-                .small()
-                .color(theme::TEXT_MUTED),
-        );
-        ui.label(
-            RichText::new(usage_text(u))
-                .small()
-                .color(theme::TEXT_MUTED),
-        );
-    });
 }
 
 /// Shown above the input when the prompt cache has expired: the next message resends the whole
@@ -235,7 +222,7 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     let models = provider.map(|p| p.models()).unwrap_or_default();
     let fallback = provider.map(|p| p.effort_levels()).unwrap_or_default();
     let efforts = effort_choices(&models, &vm.session.model_id, &fallback);
-    ui.horizontal_wrapped(|ui| {
+    ui.horizontal(|ui| {
         ui.label(RichText::new("Model").small().color(theme::TEXT_MUTED));
         let current = models
             .iter()
@@ -322,6 +309,16 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
                     .color(theme::WARN),
             );
         }
+        // Session stats take the rest of the row, right-aligned; they are cut with "…" when
+        // narrow (never a second row) and show in full on hover.
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            let u = &vm.session.usage;
+            let stats = format!("{} · {}", context_text(u), usage_text(u));
+            ui.add(
+                egui::Label::new(RichText::new(&stats).small().color(theme::TEXT_MUTED)).truncate(),
+            )
+            .on_hover_text(stats);
+        });
     });
 }
 
