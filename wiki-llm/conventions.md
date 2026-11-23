@@ -1,7 +1,7 @@
 # Conventions
 
 ## Hard invariants
-- Never read, copy, log or transmit CLI credentials or `claude auth status` output beyond the `loggedIn` boolean (it carries email and org).
+- Never read, copy, log or transmit CLI credentials or `claude auth status` output beyond `loggedIn` and `email`; `email` is for on-screen display only: never log (not at debug), persist, or put it in error reports, Copy text or issue bodies.
 - Spawn the vendor binary unmodified; never patch, wrap or proxy it, never expose it over the network.
 - No prompt engineering or token billing in this app; only pass user text and flags through.
 - Dependency rule: xade-core ← xade-claude, xade-store ← xade-runtime ← xade. Only xade names concrete providers.

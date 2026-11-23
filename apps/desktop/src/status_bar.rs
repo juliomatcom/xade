@@ -1,4 +1,4 @@
-//! Bottom status bar: git state of the active directory.
+//! Bottom status bar: active providers and the git state of the active directory.
 
 use std::time::Instant;
 
@@ -34,9 +34,29 @@ pub fn show(app: &App, ui: &mut egui::Ui) -> bool {
     settings
 }
 
-/// The directory name and its git state.
+/// One dot and name per provider: green when preflight passed, red (error on hover) when not.
+fn providers(app: &App, ui: &mut egui::Ui) {
+    for p in &app.providers {
+        let err = app.home.preflight_error.as_deref();
+        let color = if err.is_none() {
+            theme::OK
+        } else {
+            theme::DANGER
+        };
+        let text = match p.account_label() {
+            Some(label) => format!("{} ({label})", p.display_name()),
+            None => p.display_name().to_string(),
+        };
+        ui.label(RichText::new("\u{25CF}").small().color(color));
+        ui.label(RichText::new(text).small().color(theme::TEXT_MUTED))
+            .on_hover_text(err.unwrap_or("Logged in"));
+    }
+}
+
+/// The providers, the directory name and its git state.
 fn left(app: &App, ui: &mut egui::Ui) {
     let muted = |s: String| RichText::new(s).small().color(theme::TEXT_MUTED);
+    providers(app, ui);
     if let Some(first) = app.chord.pending(Instant::now()) {
         let first = keymap::stroke_label(&first, cfg!(target_os = "macos"));
         ui.label(muted(format!("{first} \u{2026}")));
@@ -98,14 +118,60 @@ fn left(app: &App, ui: &mut egui::Ui) {
     }
 }
 
+/// A provider that reports a fixed account label, for tests.
+#[cfg(test)]
+pub(crate) struct LabelledProvider(pub &'static str);
+
+#[cfg(test)]
+impl xade_core::AgentProvider for LabelledProvider {
+    fn id(&self) -> xade_core::ProviderId {
+        xade_core::ProviderId::Claude
+    }
+    fn display_name(&self) -> &'static str {
+        "Claude"
+    }
+    fn models(&self) -> Vec<xade_core::ModelOption> {
+        Vec::new()
+    }
+    fn default_model(&self) -> String {
+        String::new()
+    }
+    fn effort_levels(&self) -> Vec<xade_core::Effort> {
+        Vec::new()
+    }
+    fn preflight(&self) -> Result<(), xade_core::ProviderError> {
+        Ok(())
+    }
+    fn account_label(&self) -> Option<String> {
+        Some(self.0.into())
+    }
+    fn spawn(
+        &self,
+        _cfg: xade_core::SpawnConfig,
+    ) -> Result<xade_core::SessionHandle, xade_core::ProviderError> {
+        Err(xade_core::ProviderError::NotInstalled)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use xade_runtime::git::parse_porcelain_v2;
 
     /// `(text, rect)` of everything the bar draws for `porcelain` in a directory named `name`.
-    #[allow(clippy::unwrap_used)]
     fn bar(porcelain: &str, name: &str, width: f32) -> Vec<(String, egui::Rect)> {
+        bar_with(porcelain, name, width, None, false)
+    }
+
+    /// As `bar`, optionally with a warning and a provider labelled `a-long-account-label`.
+    #[allow(clippy::unwrap_used)]
+    fn bar_with(
+        porcelain: &str,
+        name: &str,
+        width: f32,
+        warning: Option<&str>,
+        provider: bool,
+    ) -> Vec<(String, egui::Rect)> {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -123,6 +189,14 @@ mod tests {
             is_pinned: false,
         });
         app.git.insert(root, parse_porcelain_v2(porcelain));
+        if provider {
+            app.providers = vec![std::sync::Arc::new(LabelledProvider(
+                "a-long-account-label",
+            ))];
+        }
+        if let Some(w) = warning {
+            app.warn(w);
+        }
         let input = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -196,5 +270,40 @@ mod tests {
             .find(|(t, _)| t == icons::SETTINGS)
             .expect("gear drawn");
         assert!(gear.max.x > w - 40.0 && gear.max.x <= w, "{gear:?}");
+    }
+
+    #[test]
+    fn provider_label_git_info_warning_and_gear_do_not_overlap() {
+        let w = crate::MIN_WINDOW_SIZE[0];
+        let long = "a-rather-long-workspace-directory-name-for-a-checkout";
+        let porcelain = "# branch.oid x\n# branch.head feat/some-branch\n? a\n? b\n";
+        let texts = bar_with(
+            porcelain,
+            long,
+            w,
+            Some("settings.json: invalid value on line 12"),
+            true,
+        );
+        let provider = texts
+            .iter()
+            .find(|(t, _)| t == "Claude (a-long-account-label)")
+            .expect("provider label drawn");
+        let mut rects: Vec<_> = texts.iter().filter(|(t, _)| !t.trim().is_empty()).collect();
+        assert!(rects.iter().any(|(t, _)| t.contains("settings.json")));
+        assert!(rects.iter().any(|(t, _)| t.starts_with("git: ")));
+        rects.sort_by(|a, b| a.1.min.x.total_cmp(&b.1.min.x));
+        assert_eq!(rects[0].0, "\u{25CF}", "dot leads the bar");
+        for pair in rects.windows(2) {
+            assert!(
+                pair[0].1.max.x <= pair[1].1.min.x + 0.5,
+                "{:?} overlaps {:?}",
+                pair[0],
+                pair[1]
+            );
+        }
+        let gear = rects.last().unwrap();
+        assert_eq!(gear.0, icons::SETTINGS);
+        assert!(gear.1.max.x <= w, "{gear:?}");
+        assert!(provider.1.min.x < 40.0, "{provider:?}");
     }
 }

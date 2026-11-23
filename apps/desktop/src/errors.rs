@@ -396,6 +396,18 @@ mod tests {
         assert!(!report_text(&report("msg"), 1, "").contains("Last log lines"));
     }
 
+    /// The status-bar account label is display-only: no report, copy text or issue URL has it.
+    #[test]
+    fn reports_never_carry_the_account_label() {
+        use xade_core::AgentProvider;
+        let provider = crate::status_bar::LabelledProvider("zq-org-label");
+        let label = provider.account_label().unwrap();
+        let r = report("msg");
+        let tail = "INFO line";
+        assert!(!report_text(&r, 1, tail).contains(&label));
+        assert!(!issue_url(&r, 1, tail, None).contains(&label));
+    }
+
     fn texts(out: &egui::FullOutput) -> Vec<String> {
         fn walk(s: &egui::Shape, v: &mut Vec<String>) {
             match s {

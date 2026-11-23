@@ -22,6 +22,8 @@ pub struct ClaudeProvider {
     binary: Option<PathBuf>,
     /// Static aliases until `preflight` replaces them with the CLI's versioned list.
     catalog: RwLock<Catalog>,
+    /// Email from the last auth check; display only, never logged or persisted.
+    account: RwLock<Option<String>>,
 }
 
 fn fallback_catalog() -> Catalog {
@@ -71,6 +73,7 @@ impl ClaudeProvider {
         Self {
             binary,
             catalog: RwLock::new(fallback_catalog()),
+            account: RwLock::new(None),
         }
     }
 
@@ -102,10 +105,26 @@ fn resolve_binary() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// No `Debug`: the account fields must never reach a log.
 #[derive(Deserialize)]
 struct AuthStatus {
     #[serde(rename = "loggedIn", default)]
     logged_in: bool,
+    #[serde(default)]
+    email: Option<String>,
+}
+
+/// `Err` when logged out or unparsable; `Ok(label)` is the email when non-empty.
+fn parse_auth_status(stdout: &[u8]) -> Result<Option<String>, ProviderError> {
+    let auth: AuthStatus =
+        serde_json::from_slice(stdout).map_err(|_| ProviderError::NotLoggedIn)?;
+    if !auth.logged_in {
+        return Err(ProviderError::NotLoggedIn);
+    }
+    Ok(auth
+        .email
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty()))
 }
 
 impl AgentProvider for ClaudeProvider {
@@ -136,9 +155,21 @@ impl AgentProvider for ClaudeProvider {
         ]
     }
 
+    fn account_label(&self) -> Option<String> {
+        self.account
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+    }
+
     fn preflight(&self) -> Result<(), ProviderError> {
+        let set_account = |v: Option<String>| {
+            *self.account.write().unwrap_or_else(|e| e.into_inner()) = v;
+        };
+        set_account(None);
         let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
-        // The output carries account details: parse only `loggedIn`, never log it.
+        // The output carries account details: read only `loggedIn` and `email`
+        // (the latter for display), never log them.
         let out = Command::new(binary)
             .args(["auth", "status", "--json"])
             .stdin(Stdio::null())
@@ -148,10 +179,7 @@ impl AgentProvider for ClaudeProvider {
         if !out.status.success() {
             return Err(ProviderError::NotLoggedIn);
         }
-        match serde_json::from_slice::<AuthStatus>(&out.stdout) {
-            Ok(a) if a.logged_in => {}
-            _ => return Err(ProviderError::NotLoggedIn),
-        }
+        set_account(parse_auth_status(&out.stdout)?);
         // Best effort: on failure the static aliases stay.
         match fetch_catalog(binary, MODELS_TIMEOUT) {
             Some(c) => *self.catalog.write().unwrap_or_else(|e| e.into_inner()) = c,
@@ -249,6 +277,23 @@ fn delete_transcript(projects: &Path, id: &str) -> Result<(), ProviderError> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn account_label_is_the_email_only() {
+        let label = |j: &str| parse_auth_status(j.as_bytes());
+        assert_eq!(
+            label(r#"{"loggedIn":true,"orgName":"Org","email":"a@b.c"}"#).unwrap(),
+            Some("a@b.c".into())
+        );
+        assert_eq!(label(r#"{"loggedIn":true,"orgName":"Org"}"#).unwrap(), None);
+        assert_eq!(label(r#"{"loggedIn":true,"email":"  "}"#).unwrap(), None);
+        assert_eq!(label(r#"{"loggedIn":true}"#).unwrap(), None);
+        assert!(matches!(
+            label(r#"{"loggedIn":false,"email":"a@b.c"}"#),
+            Err(ProviderError::NotLoggedIn)
+        ));
+        assert!(label("not json").is_err());
+    }
 
     #[test]
     fn delete_removes_transcript_and_subagent_dir_only() {

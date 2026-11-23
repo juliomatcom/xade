@@ -20,6 +20,11 @@ pub trait AgentProvider: Send + Sync {
     fn effort_levels(&self) -> Vec<Effort>;
     /// Blocking is fine; called once at startup.
     fn preflight(&self) -> Result<(), ProviderError>;
+    /// Account shown in the status bar, set by the last `preflight`; `None` when unknown or
+    /// logged out. For on-screen display only: never log, persist or put it in a report.
+    fn account_label(&self) -> Option<String> {
+        None
+    }
     /// Must be called inside a tokio runtime: starts a task and returns its channels.
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError>;
     /// Sessions found in the provider's own history. Blocking; callers use `spawn_blocking`.

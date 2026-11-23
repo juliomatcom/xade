@@ -273,11 +273,9 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                     app.add_directory();
                 }
                 import_button(app, ui);
-                // bottom_up: later items sit higher, so providers stay above the buttons
-                // and the workspace list below can take all remaining height.
+                // bottom_up: later items sit higher, so the workspace list below takes all
+                // remaining height.
                 ui.add_space(8.0);
-                ui.label(RichText::new("Claude").color(theme::CLAUDE));
-                heading(ui, "Active Providers");
                 ui.separator();
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
                     heading(ui, "Workspaces");

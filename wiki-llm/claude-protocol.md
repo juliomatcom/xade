@@ -5,7 +5,7 @@ Verified against Claude Code 2.1.330 with fixtures in `crates/claude/fixtures/` 
 - Args: `-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio`, plus `--model <alias>`, `--effort <low|medium|high|xhigh|max>` (omit for CLI default), `--resume <id>` or `--session-id <uuid>`.
 - `--setting-sources project` is used by the recorder only, for isolation; the app keeps the user's settings.
 - Models: preflight sends `control_request initialize` to a short `claude -p` process (no prompt, free) and reads `response.models` (`value`, `resolvedModel`, `displayName`, `description`, `supportedEffortLevels`); sessions store `resolvedModel`, deduped with the "default" entry. Static aliases `fable`, `opus`, `sonnet`, `haiku` are the fallback. No thinking on/off flag exists.
-- Auth preflight: `claude auth status --json`; exit 0 + `loggedIn: true` when logged in, exit 1 when not. Read only `loggedIn`.
+- Auth preflight: `claude auth status --json`; exit 0 + `loggedIn: true` when logged in, exit 1 when not. Read only `loggedIn`, plus `email` as the status-bar account label, display only.
 - GUI apps on macOS lack the shell PATH: look up `claude` in `$PATH`, then `~/.claude/local`, `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin` (the default install).
 
 ## Stdin (we send)
