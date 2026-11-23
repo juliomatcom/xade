@@ -423,61 +423,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
-name = "aw-claude"
-version = "0.1.0"
-dependencies = [
- "aw-core",
- "libc",
- "serde",
- "serde_json",
- "time",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "aw-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "time",
- "tokio",
- "uuid",
-]
-
-[[package]]
-name = "aw-runtime"
-version = "0.1.0"
-dependencies = [
- "aw-claude",
- "aw-core",
- "aw-store",
- "tempfile",
- "time",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
-name = "aw-store"
-version = "0.1.0"
-dependencies = [
- "aw-core",
- "nucleo-matcher",
- "rusqlite",
- "tempfile",
- "thiserror 2.0.21",
- "time",
- "tokio",
- "tracing",
- "uuid",
-]
-
-[[package]]
 name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -818,29 +763,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e9de72ce2ad1f90dc62fa25f0f430ef85eb4b0d8fa0be4f30373bc40a21d28e"
 dependencies = [
  "serde_core",
-]
-
-[[package]]
-name = "desktop"
-version = "0.1.0"
-dependencies = [
- "aw-claude",
- "aw-core",
- "aw-runtime",
- "aw-store",
- "dirs",
- "eframe",
- "egui",
- "egui_commonmark",
- "egui_extras",
- "rfd",
- "serde_json",
- "similar",
- "time",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
 ]
 
 [[package]]
@@ -4866,6 +4788,84 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "xade"
+version = "0.1.0"
+dependencies = [
+ "dirs",
+ "eframe",
+ "egui",
+ "egui_commonmark",
+ "egui_extras",
+ "rfd",
+ "serde_json",
+ "similar",
+ "time",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "xade-claude",
+ "xade-core",
+ "xade-runtime",
+ "xade-store",
+]
+
+[[package]]
+name = "xade-claude"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+ "xade-core",
+]
+
+[[package]]
+name = "xade-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "xade-runtime"
+version = "0.1.0"
+dependencies = [
+ "tempfile",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+ "xade-claude",
+ "xade-core",
+ "xade-store",
+]
+
+[[package]]
+name = "xade-store"
+version = "0.1.0"
+dependencies = [
+ "nucleo-matcher",
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.21",
+ "time",
+ "tokio",
+ "tracing",
+ "uuid",
+ "xade-core",
+]
 
 [[package]]
 name = "xcursor"

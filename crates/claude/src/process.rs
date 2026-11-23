@@ -8,13 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use aw_core::{ProviderError, ProviderEvent, SessionCommand, SessionHandle, SpawnConfig};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
 use tracing::debug;
+use xade_core::{ProviderError, ProviderEvent, SessionCommand, SessionHandle, SpawnConfig};
 
 use crate::frames::{parse_line, ControlRequest, InFrame, OutFrame};
 use crate::translate::Translator;
@@ -282,7 +282,7 @@ fn killpg(pid: Option<u32>, signal: libc::c_int) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aw_core::Effort;
+    use xade_core::Effort;
 
     fn cfg(effort: Effort, resume: Option<&str>) -> SpawnConfig {
         SpawnConfig {

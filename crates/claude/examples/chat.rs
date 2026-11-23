@@ -1,4 +1,4 @@
-//! Manual harness: `cargo run -p aw-claude --example chat -- [cwd] [model]`.
+//! Manual harness: `cargo run -p xade-claude --example chat -- [cwd] [model]`.
 //! Lines are prompts; `/stop` interrupts, `/auto on|off` toggles auto mode,
 //! `y`/`n` answers a pending permission, `/quit` shuts down. EOF waits for the
 //! outstanding turn, then shuts down.
@@ -8,9 +8,9 @@
 use std::collections::VecDeque;
 use std::io::Write;
 
-use aw_claude::ClaudeProvider;
-use aw_core::{AgentProvider, Effort, ProviderEvent, SessionCommand, SpawnConfig};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use xade_claude::ClaudeProvider;
+use xade_core::{AgentProvider, Effort, ProviderEvent, SessionCommand, SpawnConfig};
 
 #[tokio::main]
 async fn main() {

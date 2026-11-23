@@ -4,12 +4,12 @@ mod common;
 
 use std::sync::{Arc, Mutex};
 
-use aw_core::{
+use tokio::sync::{mpsc, oneshot};
+use xade_core::{
     AgentProvider, Effort, ModelOption, ProviderError, ProviderEvent, ProviderId, QuotaKind,
     QuotaWindow, Role, SessionCommand, SessionHandle, SessionStatus, SpawnConfig, UsageTotals,
 };
-use aw_runtime::{AppEventKind, ManagerCmd};
-use tokio::sync::{mpsc, oneshot};
+use xade_runtime::{AppEventKind, ManagerCmd};
 
 /// Replies to every prompt with a scripted turn: text, one tool call, a final answer.
 #[derive(Default)]
@@ -135,7 +135,7 @@ async fn create_send_close_open_resume() {
         .iter()
         .any(|e| matches!(&e.kind, AppEventKind::Provider(ProviderEvent::TextDelta(_)))));
 
-    aw_runtime::flush(&h.writer).await;
+    xade_runtime::flush(&h.writer).await;
     let (row, msgs) = h.reader.load_session(id).await.unwrap();
     assert_eq!(row.title, "Say pong");
     assert_eq!(row.provider_session_id.as_deref(), Some("fake-session"));
@@ -185,7 +185,7 @@ async fn create_send_close_open_resume() {
     })
     .unwrap();
     h.until_status(5, SessionStatus::Idle).await;
-    aw_runtime::flush(&h.writer).await;
+    xade_runtime::flush(&h.writer).await;
     let (_, msgs) = h.reader.load_session(id).await.unwrap();
     assert_eq!(msgs.len(), 8);
     assert_eq!(msgs.last().unwrap().seq, 8);
@@ -202,7 +202,7 @@ async fn create_send_close_open_resume() {
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    aw_runtime::flush(&h.writer).await;
+    xade_runtime::flush(&h.writer).await;
     {
         let spawns = provider.spawns.lock().unwrap();
         let last = spawns.last().unwrap();

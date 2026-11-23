@@ -6,12 +6,12 @@ mod session_actor;
 
 use std::path::PathBuf;
 
-use aw_core::{
+use tokio::sync::oneshot;
+use xade_core::{
     Effort, Message, ProviderEvent, ProviderId, QuotaWindow, Session, SessionId, SessionStatus,
     WorkspaceId,
 };
-use aw_store::WriterHandle;
-use tokio::sync::oneshot;
+use xade_store::WriterHandle;
 
 pub use git::GitState;
 pub use manager::SessionManager;

@@ -3,8 +3,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use aw_core::{Message, Session, SessionId, UsageTotals, Workspace, WorkspaceId};
 use rusqlite::{params, Connection, OptionalExtension, Row};
+use xade_core::{Message, Session, SessionId, UsageTotals, Workspace, WorkspaceId};
 
 use crate::schema::{self, to_u64};
 use crate::{search, Page, SessionCard, StoreError};

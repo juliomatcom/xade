@@ -1,10 +1,10 @@
 //! Tool-call cards and the pure helpers behind them.
 
-use aw_core::Message;
 use egui::collapsing_header::CollapsingState;
 use egui::{Id, RichText, Stroke};
 use egui_commonmark::CommonMarkCache;
 use serde_json::Value;
+use xade_core::Message;
 
 use super::markdown::markdown;
 use crate::diff::is_code_change;

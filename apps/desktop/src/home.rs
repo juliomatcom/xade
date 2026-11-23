@@ -2,10 +2,10 @@
 
 use std::time::{Duration, Instant};
 
-use aw_core::{QuotaKind, QuotaWindow, SessionStatus, Workspace, WorkspaceId};
-use aw_store::SessionCard;
 use egui::{Align, Layout, RichText};
 use time::OffsetDateTime;
+use xade_core::{QuotaKind, QuotaWindow, SessionStatus, Workspace, WorkspaceId};
+use xade_store::SessionCard;
 
 use crate::app::{App, View};
 use crate::theme;
@@ -38,7 +38,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
         .inner_margin(egui::Margin::symmetric(12, 8));
     egui::Panel::top("top_bar").frame(frame).show(ui, |ui| {
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Agent Workspace").strong().size(15.0));
+            ui.label(RichText::new("Xade").strong().size(15.0));
             scope_dropdown(app, ui);
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut app.home.search)

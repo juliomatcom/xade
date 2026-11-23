@@ -12,18 +12,18 @@ mod workspace;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use aw_claude::ClaudeProvider;
-use aw_core::AgentProvider;
-use aw_runtime::SessionManager;
-use aw_store::{StoreReader, StoreWriter};
+use xade_claude::ClaudeProvider;
+use xade_core::AgentProvider;
+use xade_runtime::SessionManager;
+use xade_store::{StoreReader, StoreWriter};
 
 use crate::app::App;
 
-/// `AW_DATA_DIR` overrides the platform data dir (tests, throwaway runs).
+/// `XADE_DATA_DIR` overrides the platform data dir (tests, throwaway runs).
 fn data_dir() -> PathBuf {
-    std::env::var_os("AW_DATA_DIR")
+    std::env::var_os("XADE_DATA_DIR")
         .map(PathBuf::from)
-        .or_else(|| dirs::data_dir().map(|d| d.join("agent-workspace")))
+        .or_else(|| dirs::data_dir().map(|d| d.join("xade")))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
@@ -59,13 +59,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handle = rt.handle().clone();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Agent Workspace")
+            .with_title("Xade")
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([800.0, 500.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "Agent Workspace",
+        "Xade",
         options,
         Box::new(move |cc| {
             Ok(Box::new(App::new(

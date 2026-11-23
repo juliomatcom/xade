@@ -4,13 +4,13 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::thread;
 
-use aw_core::{
-    Effort, Message, ProviderId, Role, Session, SessionId, UsageTotals, Workspace, WorkspaceId,
-};
-use aw_store::{StoreReader, StoreWriter, WriteOp, WriterHandle, SCHEMA_VERSION};
 use tempfile::TempDir;
 use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
+use xade_core::{
+    Effort, Message, ProviderId, Role, Session, SessionId, UsageTotals, Workspace, WorkspaceId,
+};
+use xade_store::{StoreReader, StoreWriter, WriteOp, WriterHandle, SCHEMA_VERSION};
 
 fn block_on<F: Future>(f: F) -> F::Output {
     tokio::runtime::Builder::new_current_thread()
@@ -66,7 +66,11 @@ impl Fixture {
             .unwrap();
     }
 
-    fn search(&self, scope: Option<WorkspaceId>, q: &str) -> aw_store::Page<aw_store::SessionCard> {
+    fn search(
+        &self,
+        scope: Option<WorkspaceId>,
+        q: &str,
+    ) -> xade_store::Page<xade_store::SessionCard> {
         self.writer.flush().unwrap();
         block_on(self.reader.search(scope, q.to_string(), 0, 24)).unwrap()
     }
@@ -418,7 +422,7 @@ fn load_session_roundtrip_and_max_seq() {
     assert_eq!(block_on(f.reader.max_seq(id)).unwrap(), 2);
 
     let missing = block_on(f.reader.load_session(SessionId::new()));
-    assert!(matches!(missing, Err(aw_store::StoreError::NotFound)));
+    assert!(matches!(missing, Err(xade_store::StoreError::NotFound)));
 }
 
 /// Timestamps round-trip at microsecond precision; compare everything else exactly.

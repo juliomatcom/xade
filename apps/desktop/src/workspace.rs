@@ -3,10 +3,10 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use aw_core::{AgentProvider, SessionId};
-use aw_runtime::ManagerCmd;
 use egui::{Id, Order, Rect};
 use tokio::sync::mpsc::UnboundedSender;
+use xade_core::{AgentProvider, SessionId};
+use xade_runtime::ManagerCmd;
 
 use crate::app::App;
 use crate::session_view;
@@ -256,11 +256,11 @@ mod tests {
     use super::*;
     use crate::app::{DiffState, PendingPermission, SessionVm};
     use crate::diff::DiffData;
-    use aw_core::{
-        Effort, Message, ProviderId, Role, Session, SessionStatus, UsageTotals, WorkspaceId,
-    };
     use egui_commonmark::CommonMarkCache;
     use time::OffsetDateTime;
+    use xade_core::{
+        Effort, Message, ProviderId, Role, Session, SessionStatus, UsageTotals, WorkspaceId,
+    };
 
     fn msg(role: Role, text: &str, tool: Option<(&str, &str)>, payload: Option<&str>) -> Message {
         Message {

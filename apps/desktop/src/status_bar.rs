@@ -1,7 +1,7 @@
 //! Bottom status bar: git state of the active directory.
 
-use aw_runtime::GitState;
 use egui::RichText;
+use xade_runtime::GitState;
 
 use crate::app::App;
 use crate::theme;

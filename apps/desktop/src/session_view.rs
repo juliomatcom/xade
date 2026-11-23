@@ -1,8 +1,8 @@
 //! One session window's content: header, conversation, permission banner and composer.
 
-use aw_core::SessionStatus;
-use aw_runtime::ManagerCmd;
 use egui::{Align, Layout, RichText};
+use xade_core::SessionStatus;
+use xade_runtime::ManagerCmd;
 
 use crate::app::SessionVm;
 use crate::diff::is_code_change;

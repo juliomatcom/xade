@@ -1,11 +1,13 @@
 [package]
-name = "aw-store"
+name = "xade-store"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [dependencies]
-aw-core = { path = "../core" }
+xade-core = { path = "../core" }
 nucleo-matcher = "=0.3.1"
 rusqlite = { version = "=0.43.0", features = ["bundled"] }
 thiserror = "=2.0.21"

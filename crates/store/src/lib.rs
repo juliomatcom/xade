@@ -5,9 +5,9 @@ mod schema;
 mod search;
 mod writer;
 
-use aw_core::{SessionId, WorkspaceId};
 use thiserror::Error;
 use time::OffsetDateTime;
+use xade_core::{SessionId, WorkspaceId};
 
 pub use reader::StoreReader;
 pub use schema::SCHEMA_VERSION;

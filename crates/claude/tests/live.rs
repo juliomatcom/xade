@@ -4,16 +4,16 @@
 
 use std::time::Duration;
 
-use aw_claude::ClaudeProvider;
-use aw_core::{AgentProvider, Effort, ProviderEvent, SessionCommand, SpawnConfig};
 use tokio::time::timeout;
+use xade_claude::ClaudeProvider;
+use xade_core::{AgentProvider, Effort, ProviderEvent, SessionCommand, SpawnConfig};
 
 #[tokio::test]
 #[ignore]
 async fn one_prompt_then_shutdown() {
     let provider = ClaudeProvider::new();
     provider.preflight().expect("preflight");
-    let cwd = std::env::temp_dir().join(format!("aw-claude-live-{}", std::process::id()));
+    let cwd = std::env::temp_dir().join(format!("xade-claude-live-{}", std::process::id()));
     std::fs::create_dir_all(&cwd).expect("cwd");
     let mut h = provider
         .spawn(SpawnConfig {

@@ -4,6 +4,8 @@ members = ["crates/core", "crates/claude", "crates/store", "crates/runtime", "ap
 
 [workspace.package]
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/juliomatcom/xade"
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }

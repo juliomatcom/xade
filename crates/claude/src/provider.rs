@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use aw_core::{
+use serde::Deserialize;
+use xade_core::{
     AgentProvider, Effort, ModelOption, ProviderError, ProviderId, SessionHandle, SpawnConfig,
 };
-use serde::Deserialize;
 
 use crate::process::spawn_session;
 

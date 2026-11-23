@@ -1,4 +1,4 @@
-# Agent Workspace — MVP Implementation Plan
+# Xade — MVP Implementation Plan
 
 > Source spec: [`agent_workspace_mvp_specification.md`](agent_workspace_mvp_specification.md). This plan narrows it to a short MVP and is written to be executed phase by phase by Sonnet 5.5 sub-agents. Opus owns Phase 0 and reviews each phase's output.
 > Rules live in `wiki-llm/conventions.md` (created in Phase 0). This plan is disposable once the MVP ships; the wiki is not.
@@ -89,13 +89,13 @@ flowchart BT
 
 | Crate | May depend on | Key external deps |
 |---|---|---|
-| `aw-core` (`crates/core`) | — | `serde`, `serde_json`, `uuid` (v4, serde), `thiserror`, `tokio` (feature `sync` only), `time` |
-| `aw-claude` (`crates/claude`) | `aw-core` | `tokio` (`process`, `io-util`, `rt`, `macros`, `time`), `serde_json`, `tracing` |
-| `aw-store` (`crates/store`) | `aw-core` | `rusqlite =0.43.0` (feature `bundled`, which includes FTS5 and trigram), `nucleo-matcher =0.3.1` |
-| `aw-runtime` (`crates/runtime`) | `aw-core`, `aw-store` | `tokio`, `tracing` |
-| `desktop` | all | `eframe =0.37.0` (wgpu renderer), `egui_commonmark =0.26.0` (feature `better_syntax_highlighting`), `egui_extras =0.37.0` (feature `syntect`), `similar =3.2.1`, `rfd =0.18.0`, `dirs`, `tokio` (`rt-multi-thread`), `tracing-subscriber` |
+| `xade-core` (`crates/core`) | — | `serde`, `serde_json`, `uuid` (v4, serde), `thiserror`, `tokio` (feature `sync` only), `time` |
+| `xade-claude` (`crates/claude`) | `xade-core` | `tokio` (`process`, `io-util`, `rt`, `macros`, `time`), `serde_json`, `tracing` |
+| `xade-store` (`crates/store`) | `xade-core` | `rusqlite =0.43.0` (feature `bundled`, which includes FTS5 and trigram), `nucleo-matcher =0.3.1` |
+| `xade-runtime` (`crates/runtime`) | `xade-core`, `xade-store` | `tokio`, `tracing` |
+| `xade` (`apps/desktop`) | all | `eframe =0.37.0` (wgpu renderer), `egui_commonmark =0.26.0` (feature `better_syntax_highlighting`), `egui_extras =0.37.0` (feature `syntect`), `similar =3.2.1`, `rfd =0.18.0`, `dirs`, `tokio` (`rt-multi-thread`), `tracing-subscriber` |
 
-`runtime` gets providers injected as `Vec<Arc<dyn AgentProvider>>`. It never names `claude`. Only `desktop` constructs `ClaudeProvider`.
+`runtime` gets providers injected as `Vec<Arc<dyn AgentProvider>>`. It never names `claude`. Only `xade` constructs `ClaudeProvider`.
 
 ### 3.2 Runtime data flow
 
@@ -295,7 +295,7 @@ Corner radius 6 (windows 8). Spacing scale 4/8/12/16. Body font: egui default pr
 ## 4. Phase 0 — Bootstrap, protocol spike, wiki skeleton (Opus) — DONE 2026-11-23
 
 **Delivered**
-- A Cargo workspace (packages `aw-core`, `aw-claude`, `aw-store`, `aw-runtime`, `desktop`, because a crate named `core` shadows Rust's `core`) with workspace clippy lints, `rustfmt.toml` and `.gitignore`. `cargo build` passes.
+- A Cargo workspace (packages `xade-core`, `xade-claude`, `xade-store`, `xade-runtime`, `xade`, because a crate named `core` shadows Rust's `core`) with workspace clippy lints, `rustfmt.toml` and `.gitignore`. `cargo build` passes.
 - `crates/claude/scripts/record.py` (stdlib Python, redacts home path, user name and emails) and 10 fixtures in `crates/claude/fixtures/`: `simple_turn`, `two_turns`, `init_first`, `thinking`, `thinking_summaries`, `tool_allow`, `tool_deny`, `edit_allow`, `interrupt`, `resume`. `not_logged_in` was not recorded; the auth check below covers it.
 - The wiki: `index.md` and `conventions.md` are complete, `claude-protocol.md` holds all verified facts, and the other pages are stubs.
 - Version pins checked to resolve to a single egui: `eframe =0.37.0`, `egui_extras =0.37.0` (feature `syntect`), `egui_commonmark =0.26.0` (feature `better_syntax_highlighting`).
@@ -367,7 +367,7 @@ Corner radius 6 (windows 8). Spacing scale 4/8/12/16. Body font: egui default pr
 
 **Files:** `crates/store/src/{lib.rs, schema.rs, writer.rs, reader.rs, search.rs}`, `crates/store/tests/*.rs`
 
-Database schema (`dirs::data_dir()/agent-workspace/workspace.db`):
+Database schema (`dirs::data_dir()/xade/workspace.db`):
 
 ```mermaid
 erDiagram
@@ -494,7 +494,7 @@ flowchart TD
    - Unit tests cover clean, dirty, detached, no-upstream and ahead/behind outputs.
 
 **Tasks: desktop**
-1. `main.rs`: init tracing. DB path is `dirs::data_dir()/agent-workspace/workspace.db`. Build `ClaudeProvider`, run `preflight` (on failure, the app starts and Home shows a blocking banner with the error and a "Retry" button). Spawn the writer, the reader and the manager on the tokio runtime. Call `eframe::run_native`. In the creation closure, clone `cc.egui_ctx` into the bridge forwarder (§3.2).
+1. `main.rs`: init tracing. DB path is `dirs::data_dir()/xade/workspace.db`. Build `ClaudeProvider`, run `preflight` (on failure, the app starts and Home shows a blocking banner with the error and a "Retry" button). Spawn the writer, the reader and the manager on the tokio runtime. Call `eframe::run_native`. In the creation closure, clone `cc.egui_ctx` into the bridge forwarder (§3.2).
 2. `app.rs`: `App { view: View::{Home, Workspace}, home: HomeState, sessions: HashMap<SessionId, SessionVm>, open_windows: Vec<SessionId>, quota: Vec<QuotaWindow>, cmd_tx, rt: tokio::runtime::Handle, events_rx, ... }`, implementing `eframe::App`. `update` draws in this order: drain events, the top bar (`TopBottomPanel::top`), the status bar (`TopBottomPanel::bottom`), the sidebar (`SidePanel::left`), then the active view in `CentralPanel`. Session state lives in `App`, never in a view, so background sessions keep updating.
 3. `home.rs`, following spec §5.1 and the shell and theme in §3.4:
    - **Top bar:** a search input, a quota bar (hidden when `quota` is empty) and a "New Session" button.
@@ -576,7 +576,7 @@ flowchart TD
 **Tasks**
 1. App exit: intercept the window close event, send `ShutdownAll`, wait for its oneshot (5 s cap), then exit.
 2. Startup recovery: any status kept in memory starts as `Closed`. Status isn't persisted, so the only check needed is that nothing treats a stored session as live.
-3. Verify that the child exits on parent death (stdin EOF). If the P0 spike showed it does not, record child pids in `data_dir/agent-workspace/children.pid`. On the next startup, SIGTERM any listed pid that is still a `claude` process, then clear the file. An in-app watchdog cannot help here, because it dies with the app. Write the outcome into `claude-protocol.md`.
+3. Verify that the child exits on parent death (stdin EOF). If the P0 spike showed it does not, record child pids in `data_dir/xade/children.pid`. On the next startup, SIGTERM any listed pid that is still a `claude` process, then clear the file. An in-app watchdog cannot help here, because it dies with the app. Write the outcome into `claude-protocol.md`.
 4. Write a manual checklist of the §1 success criteria to `wiki-llm/testing.md`, as a short numbered list.
 5. `cargo clippy --workspace -- -D warnings` and `cargo fmt --check` are clean.
 
@@ -624,7 +624,7 @@ Start here. Open only the page your task needs; the code is the detail.
 - Never read, copy, log or transmit CLI credentials (~/.claude/.credentials.json, keychain, OAuth tokens). Auth is the CLI's job.
 - Spawn the vendor binary unmodified; never patch, wrap or proxy it, never expose it over the network.
 - No prompt engineering or token billing in this app; only pass user text and flags through.
-- Dependency rule: core ← claude, store ← runtime ← desktop. Only desktop names concrete providers.
+- Dependency rule: core ← claude, store ← runtime ← xade. Only xade names concrete providers.
 - Only the store writer thread writes SQLite; only the session actor creates message WriteOps.
 - Persist every user prompt, finalized assistant block and tool result when it completes; never persist deltas.
 - Unknown CLI frames or fields are skipped, never fatal.

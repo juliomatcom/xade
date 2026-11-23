@@ -6,10 +6,10 @@ mod common;
 
 use std::sync::Arc;
 
-use aw_claude::ClaudeProvider;
-use aw_core::{AgentProvider, Role, SessionStatus};
-use aw_runtime::{AppEventKind, ManagerCmd};
 use tokio::sync::oneshot;
+use xade_claude::ClaudeProvider;
+use xade_core::{AgentProvider, Role, SessionStatus};
+use xade_runtime::{AppEventKind, ManagerCmd};
 
 #[tokio::test]
 #[ignore]
@@ -32,7 +32,7 @@ async fn create_send_close_resume() {
     })
     .unwrap();
     h.until_status(120, SessionStatus::Idle).await;
-    aw_runtime::flush(&h.writer).await;
+    xade_runtime::flush(&h.writer).await;
     let (row, msgs) = h.reader.load_session(id).await.unwrap();
     assert!(
         row.provider_session_id.is_some(),
@@ -61,7 +61,7 @@ async fn create_send_close_resume() {
     })
     .unwrap();
     h.until_status(120, SessionStatus::Idle).await;
-    aw_runtime::flush(&h.writer).await;
+    xade_runtime::flush(&h.writer).await;
     let (row2, msgs2) = h.reader.load_session(id).await.unwrap();
     assert_eq!(row2.provider_session_id, row.provider_session_id);
     assert!(msgs2.len() > before + 1);

@@ -2,10 +2,10 @@
 
 use std::collections::HashMap;
 
-use aw_core::{SessionId, WorkspaceId};
 use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use rusqlite::{params, Connection};
+use xade_core::{SessionId, WorkspaceId};
 
 use crate::reader::{card_from_row, list_sessions, CARD_COLS};
 use crate::{paginate, Page, SessionCard, StoreError};

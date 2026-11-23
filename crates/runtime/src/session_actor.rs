@@ -4,15 +4,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aw_core::{
-    AgentProvider, Effort, Message, ProviderEvent, Role, Session, SessionCommand, SessionHandle,
-    SessionId, SessionStatus, SpawnConfig,
-};
-use aw_store::{WriteOp, WriterHandle};
 use time::OffsetDateTime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
 use uuid::Uuid;
+use xade_core::{
+    AgentProvider, Effort, Message, ProviderEvent, Role, Session, SessionCommand, SessionHandle,
+    SessionId, SessionStatus, SpawnConfig,
+};
+use xade_store::{WriteOp, WriterHandle};
 
 use crate::{AppEvent, AppEventKind};
 

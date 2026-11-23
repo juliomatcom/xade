@@ -1,4 +1,4 @@
-//! Claude Code CLI adapter: `ClaudeProvider` implements `aw_core::AgentProvider`.
+//! Claude Code CLI adapter: `ClaudeProvider` implements `xade_core::AgentProvider`.
 
 pub mod frames;
 pub mod process;

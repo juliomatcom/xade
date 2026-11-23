@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use aw_core::{AgentProvider, Effort, ProviderId, SessionStatus, Workspace, WorkspaceId};
-use aw_runtime::{AppEvent, AppEventKind, ManagerCmd, SessionManager};
-use aw_store::{StoreReader, StoreWriter, WriteOp, WriterHandle};
 use time::OffsetDateTime;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::time::timeout;
+use xade_core::{AgentProvider, Effort, ProviderId, SessionStatus, Workspace, WorkspaceId};
+use xade_runtime::{AppEvent, AppEventKind, ManagerCmd, SessionManager};
+use xade_store::{StoreReader, StoreWriter, WriteOp, WriterHandle};
 
 pub struct Harness {
     pub tx: UnboundedSender<ManagerCmd>,
@@ -36,7 +36,7 @@ pub async fn start(dir: &Path, provider: Arc<dyn AgentProvider>) -> Harness {
             is_pinned: false,
         }))
         .expect("upsert");
-    aw_runtime::flush(&writer).await;
+    xade_runtime::flush(&writer).await;
     let reader = StoreReader::open(&db).expect("reader");
     let (tx, rx) = SessionManager::start(vec![provider], writer.clone(), reader.clone());
     Harness {

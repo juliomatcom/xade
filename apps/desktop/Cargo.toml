@@ -1,14 +1,16 @@
 [package]
-name = "desktop"
+name = "xade"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [dependencies]
-aw-claude = { path = "../../crates/claude" }
-aw-core = { path = "../../crates/core" }
-aw-runtime = { path = "../../crates/runtime" }
-aw-store = { path = "../../crates/store" }
+xade-claude = { path = "../../crates/claude" }
+xade-core = { path = "../../crates/core" }
+xade-runtime = { path = "../../crates/runtime" }
+xade-store = { path = "../../crates/store" }
 dirs = "=7.0.0"
 egui = "=0.37.0"
 egui_commonmark = { version = "=0.26.0", features = ["better_syntax_highlighting"] }

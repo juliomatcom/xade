@@ -1,5 +1,5 @@
 # Store
-- DB is `dirs::data_dir()/agent-workspace/workspace.db`; the desktop app picks the path and opens it (`aw-store` takes a path).
+- DB is `dirs::data_dir()/xade/workspace.db`; the xade app picks the path and opens it (`xade-store` takes a path).
 - One writer: `StoreWriter` owns the only write connection on a std thread; every `WriteOp` is its own transaction, failures are logged and never fatal; `WriterHandle::flush` waits for pending ops.
 - Readers (`StoreReader`) use their own query-only connection behind a mutex via `spawn_blocking`; WAL lets them run beside the writer.
 - Migrations are keyed by `PRAGMA user_version`; the writer applies them on open, and a newer DB than the code is an error.

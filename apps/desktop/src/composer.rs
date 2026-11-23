@@ -1,8 +1,8 @@
 //! Prompt input, send/stop, model and effort pickers, Auto toggle and the context and usage meters.
 
-use aw_core::{Effort, SessionStatus, UsageTotals};
-use aw_runtime::ManagerCmd;
 use egui::{Key, Modifiers, RichText};
+use xade_core::{Effort, SessionStatus, UsageTotals};
+use xade_runtime::ManagerCmd;
 
 use crate::app::{push_user_message, SessionVm};
 use crate::theme;

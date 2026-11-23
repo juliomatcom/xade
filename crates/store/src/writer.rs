@@ -4,9 +4,9 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::thread;
 
-use aw_core::{Effort, Message, Role, Session, SessionId, UsageTotals, Workspace, WorkspaceId};
 use rusqlite::{params, Connection, TransactionBehavior};
 use time::OffsetDateTime;
+use xade_core::{Effort, Message, Role, Session, SessionId, UsageTotals, Workspace, WorkspaceId};
 
 use crate::schema::{self, fmt_ts, to_i64};
 use crate::StoreError;

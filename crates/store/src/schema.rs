@@ -3,12 +3,12 @@
 use std::path::Path;
 use std::time::Duration;
 
-use aw_core::{Effort, ProviderId, Role, SessionId, WorkspaceId};
 use rusqlite::types::Type;
 use rusqlite::{Connection, OpenFlags};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
+use xade_core::{Effort, ProviderId, Role, SessionId, WorkspaceId};
 
 use crate::StoreError;
 

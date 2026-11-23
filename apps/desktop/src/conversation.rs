@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
-use aw_core::{Message, Role, SessionStatus};
 use egui::RichText;
 use egui_commonmark::CommonMarkCache;
+use xade_core::{Message, Role, SessionStatus};
 
 use crate::app::SessionVm;
 use crate::theme;

@@ -2,11 +2,11 @@
 
 #![allow(clippy::expect_used)]
 
-use aw_claude::frames::{parse_line, InFrame};
-use aw_claude::Translator;
-use aw_core::{ProviderEvent, QuotaKind};
 use serde_json::Value;
 use std::sync::atomic::Ordering;
+use xade_claude::frames::{parse_line, InFrame};
+use xade_claude::Translator;
+use xade_core::{ProviderEvent, QuotaKind};
 
 fn load(name: &str) -> Vec<Value> {
     let path = format!("{}/fixtures/{name}.ndjson", env!("CARGO_MANIFEST_DIR"));

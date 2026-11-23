@@ -1,19 +1,21 @@
 [package]
-name = "aw-runtime"
+name = "xade-runtime"
 version = "0.1.0"
 edition.workspace = true
+license.workspace = true
+repository.workspace = true
 publish = false
 
 [dependencies]
-aw-core = { path = "../core" }
-aw-store = { path = "../store" }
+xade-core = { path = "../core" }
+xade-store = { path = "../store" }
 time = "=0.3.55"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt", "process", "time", "sync", "macros"] }
 tracing = "=0.1.44"
 uuid = { version = "=1.29.3", features = ["v4"] }
 
 [dev-dependencies]
-aw-claude = { path = "../claude" }
+xade-claude = { path = "../claude" }
 tempfile = "=3.27.0"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync"] }
 

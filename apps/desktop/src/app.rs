@@ -6,18 +6,18 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aw_core::{
-    AgentProvider, Message, ProviderEvent, QuotaKind, QuotaWindow, Role, Session, SessionId,
-    SessionStatus, Workspace, WorkspaceId,
-};
-use aw_runtime::git::{git_status, GitState};
-use aw_runtime::{AppEvent, AppEventKind, ManagerCmd};
-use aw_store::{Page, SessionCard, StoreReader, WriteOp, WriterHandle};
 use egui::RichText;
 use egui_commonmark::CommonMarkCache;
 use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
+use xade_core::{
+    AgentProvider, Message, ProviderEvent, QuotaKind, QuotaWindow, Role, Session, SessionId,
+    SessionStatus, Workspace, WorkspaceId,
+};
+use xade_runtime::git::{git_status, GitState};
+use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
+use xade_store::{Page, SessionCard, StoreReader, WriteOp, WriterHandle};
 
 use crate::diff::{is_code_change, DiffData};
 use crate::home::HomeState;
@@ -266,7 +266,7 @@ impl App {
                 last_opened_at: OffsetDateTime::now_utc(),
                 is_pinned: false,
             }));
-            aw_runtime::flush(&writer).await;
+            xade_runtime::flush(&writer).await;
             if let Ok(ws) = reader.list_workspaces().await {
                 bridge.send(UiMsg::Workspaces(ws));
             }
@@ -303,7 +303,7 @@ impl App {
             cwd: ws.root_path.clone(),
             provider: provider.id(),
             model_id: provider.default_model(),
-            effort: aw_core::Effort::Default,
+            effort: xade_core::Effort::Default,
             auto_mode: false,
         });
     }
