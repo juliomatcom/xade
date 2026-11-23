@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Record Claude CLI stream-json sessions as redacted NDJSON fixtures.
 
-Usage: record.py <scenario> <cwd> [--claude PATH] [--extra "ARGS"]
+Usage: record.py <scenario> <cwd> [--claude PATH] [--resume ID]
+       record.py --rescrub <fixtures-dir>   (re-apply redaction to existing fixtures)
 Writes crates/claude/fixtures/<scenario>.ndjson. Each line is {"dir": "in"|"out", "frame": {...}}
 so tests can see both what we sent and what the CLI emitted. Home paths, the user name and
 email addresses are redacted before writing.
@@ -50,18 +51,53 @@ SENSITIVE_KEYS = {"account", "email", "orgId", "orgName", "organization", "organ
                   "organizationName", "accountUuid", "emailAddress"}
 
 
+# Local setup the recorder's machine leaks (connectors, plugins, skills, paths); fixtures are public.
+SETUP_KEYS = {"mcp_servers", "plugins", "skills", "slash_commands", "terminal_slash_commands", "agents",
+              "commands", "memory_paths", "scratchpad_path", "messaging_socket_path", "output_style"}
+
+
 def scrub(obj):
-    """Drop account/identity keys anywhere in a frame (e.g. the initialize response)."""
+    """Drop identity and local-setup keys anywhere in a frame; keep only built-in tool names."""
     if isinstance(obj, dict):
-        return {k: ("<redacted>" if k in SENSITIVE_KEYS else scrub(v)) for k, v in obj.items()}
+        out = {}
+        for k, v in obj.items():
+            if k in SENSITIVE_KEYS:
+                out[k] = "<redacted>"
+            elif k in SETUP_KEYS:
+                out[k] = [] if isinstance(v, list) else "<redacted>"
+            elif k == "tools" and isinstance(v, list):
+                out[k] = [t for t in v if not (isinstance(t, str) and t.startswith("mcp__"))]
+            else:
+                out[k] = scrub(v)
+        return out
     if isinstance(obj, list):
         return [scrub(v) for v in obj]
     return obj
 
 
+REPO_PARENT = os.path.basename(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(HERE)))))
+
+
 def redact(s: str) -> str:
     s = s.replace(HOME, "/HOME").replace(USER, "USER")
+    if REPO_PARENT and REPO_PARENT != USER:
+        s = s.replace(REPO_PARENT, "work")
     return EMAIL.sub("<redacted-email>", s)
+
+
+def rescrub(fixtures_dir):
+    """Re-apply scrub/redact to existing fixture files in place."""
+    for name in sorted(os.listdir(fixtures_dir)):
+        if not name.endswith(".ndjson"):
+            continue
+        path = os.path.join(fixtures_dir, name)
+        lines = []
+        for line in open(path):
+            d = json.loads(line)
+            d["frame"] = scrub(d["frame"])
+            lines.append(redact(json.dumps(d)))
+        with open(path, "w") as f:
+            f.write("\n".join(lines) + "\n")
 
 
 class Rec:
@@ -155,6 +191,8 @@ class Rec:
 
 
 def main():
+    if len(sys.argv) == 3 and sys.argv[1] == "--rescrub":
+        return rescrub(sys.argv[2])
     ap = argparse.ArgumentParser()
     ap.add_argument("scenario")
     ap.add_argument("cwd")
