@@ -38,6 +38,14 @@ Early MVP. macOS first. Claude Code is the only provider today.
 cargo run --release -p xade
 ```
 
+To install it as a regular macOS app (so you can open it from Launchpad and keep it in the Dock):
+
+```sh
+./scripts/bundle-macos.sh            # builds and installs /Applications/Xade.app
+```
+
+Run the script again after pulling changes to update the app.
+
 Xade stores its data in the `xade/` folder inside your OS data directory. To use another location, set `XADE_DATA_DIR`.
 
 ## Development
