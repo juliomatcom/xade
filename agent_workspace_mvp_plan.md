@@ -584,6 +584,58 @@ flowchart TD
 
 ---
 
+## 10b. Phase 7 — Claude Code import, versioned models, saved quota (Sonnet; backend first, then UI)
+
+**Goal:** sessions created outside Xade show up, tagged and grouped, and can be resumed. The model picker lists exact versions (Opus 5.5 ≠ Opus 5). The quota bar shows the last known values at startup.
+
+**Design (Opus)**
+- **Versioned models.** `ClaudeProvider::preflight` also runs one short `claude -p --input-format stream-json --output-format stream-json --verbose` process. It sends `control_request {subtype:"initialize"}`, reads the `control_response` (`response.models`, see fixture `init_first`), then closes stdin. No prompt is sent, so it costs nothing. Each entry becomes `ModelOption { id: resolvedModel, label: displayName, description, effort_levels }`.
+  - Dedupe by `resolvedModel`, preferring the non-"default" entry's label.
+  - `default_model()` = the "default" entry's `resolvedModel`.
+  - Store models behind an `RwLock` in the provider. If the call fails, fall back to the static aliases.
+  - Sessions store the exact model id, so a session stays on its version. The effort picker shows only `Default` + the model's `effort_levels`.
+- **Origin.** Add `SessionOrigin { Xade, ClaudeCode }` (`Session.origin`). Store migration V2 adds:
+  - `sessions.origin TEXT NOT NULL DEFAULT 'xade'`
+  - a unique index on `(provider_id, provider_session_id)` where not null
+  - a `quota(kind PK, utilization_pct, resets_at, updated_at)` table
+- **Import source.** `~/.claude/projects/<dir>/<sessionId>.jsonl`: one JSON entry per line, with `type`, `sessionId`, `cwd`, `timestamp`, `message`, `isSidechain`, `isMeta`, `toolUseResult`, and `ai-title` entries carrying `aiTitle`. Mapping:
+  - workspace = `cwd`
+  - title = last `aiTitle`, else `derive_title(first user text)`
+  - model = last assistant `message.model`
+  - created/updated = first and last `timestamp`
+  - messages, in file order, skipping `isSidechain`/`isMeta`:
+    - user text → User; skip text starting with `<command-`, `<local-command`, `<system-reminder>`, or `[Request interrupted`
+    - user `tool_result` → ToolResult, with `toolUseResult` as `tool_payload_json`
+    - assistant `text` → Assistant, assistant `tool_use` → ToolCall; skip `thinking`
+  - usage: input/output/cache_read summed from assistant `message.usage`; context used = the last assistant usage's input + cache_read + cache_creation; context max unknown (0) until the session's first turn in Xade; cost unknown (0)
+  - Ignore every other entry type. Parse tolerantly; unknown entries are skipped.
+- **Provider API.** `AgentProvider::import_sessions(&self) -> Vec<ImportedSession>` has a default empty impl. It's blocking, and is run via `spawn_blocking`. `ImportedSession { provider_session_id, cwd, title, model_id, created_at, updated_at, usage, messages }`.
+- **Runtime.** `ManagerCmd::Import` → for each provider, call `import_sessions()`. For each result:
+  - Skip it if the `provider_session_id` belongs to an `origin=Xade` session (Xade's own sessions also appear in `~/.claude/projects`), if the session is live, or if the stored `updated_at` is at least as new.
+  - Otherwise send `WriteOp::ImportSession { session, messages, workspace_root }`. In one transaction it upserts the workspace by path, upserts the session (origin ClaudeCode), and replaces its messages.
+  - Emit `AppEventKind::ImportDone { imported, updated }`.
+  Import is idempotent.
+- **Quota.** The session actor also sends `WriteOp::UpsertQuota(q)` on every `Quota` event. The desktop loads `reader.load_quota()` at startup. When `resets_at` is in the past, show 0% and "reset".
+- **UI.**
+  - Each card and window header gets an origin badge ("Xade" / "Claude Code").
+  - Home gets a filter row: All · Xade · Claude Code (`list_sessions`/`search` take an `origin: Option<SessionOrigin>` filter). This is the grouping.
+  - An "Import from Claude Code" button sits in the sidebar, and an automatic import runs in the background after a successful preflight.
+  - Opening an imported session resumes it with `--resume` in its `cwd`. The context meter shows `used / ?` until max is known.
+
+**Acceptance**
+- An import of the real `~/.claude/projects` brings in sessions grouped by directory with titles, and doesn't duplicate on re-run.
+- Opening one shows its history; a new prompt continues it; the context meter updates.
+- The model picker shows "Opus 5.5", "Opus 5", "Sonnet 5.5", and so on.
+- The quota bar shows values right after launch if any session ever ran.
+
+## 10c. Phase 8 — UI polish (Sonnet)
+- Icons on most buttons, using glyphs from egui's default fonts (egui-phosphor 0.14 targets egui 0.36, which is incompatible). Rocket 🚀 on the Auto toggle. A unit test asserts every icon glyph exists in the default fonts.
+- A maximize button in the session window header. Maximizing makes that window fill the central area and collapses all others; restoring re-tiles.
+- Session windows get a slightly lighter background (new `bg_window` token, between `bg_panel` and `bg_raised`).
+- The quota bar is always visible: it shows "—" placeholders until data exists.
+
+---
+
 ## 11. Wiki (`wiki-llm/`): structure and initial content
 
 Principles, from `AGENTS.md`: it orients, the code is the detail. One line per fact, each page under ~40 lines. No field lists, styling or history.
