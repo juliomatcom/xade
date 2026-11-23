@@ -677,6 +677,32 @@ flowchart TD
 
 ---
 
+## 10f. Phase 11 — Error handling, logging and crash safety (Sonnet; design by Opus)
+**Goal:** no error is lost silently and the app never closes suddenly. Every error is logged, and the ones a user should know about appear in a modal they can copy or turn into a GitHub issue.
+
+1. **Swallowed-error sweep first.** Grep the workspace for `let _ =`, `.ok()`, `.unwrap_or_default()`, `unwrap_or(..)` on `Result`s, `if let Ok(..)` without an else, `Err(_) =>`, ignored `JoinHandle`s, unchecked channel `send`, `filter_map(Result::ok)`, and any `unwrap`/`expect` in non-test code. Classify each site:
+   - fine (an expected case, such as a closed channel during shutdown)
+   - should log (`warn!`)
+   - should surface to the user
+   Fix the last two groups. The report lists every site and its class.
+2. **Log file.** Use `tracing-appender` with daily rolling files in `<data dir>/logs/xade.log`, keeping 7 days, plus stderr. Never log prompt or message text above `debug` (existing rule). The startup log line includes the version, OS and data dir.
+3. **Never close suddenly.**
+   - A `std::panic::set_hook` logs the panic with a backtrace and writes `<data dir>/logs/crash-<ts>.txt`.
+   - The UI thread wraps the bodies of `App::logic` and `App::ui` in `catch_unwind(AssertUnwindSafe(..))`. On a panic it skips the rest of that frame, records the panic as an error report, and keeps running.
+   - The session actor, manager loop and writer thread are supervised. A panic or unexpected exit becomes an `AppEvent` error, and the affected session moves to `Error` instead of dying silently. If the writer thread dies, that's a fatal-but-shown error: a modal says "Saving is disabled".
+4. **Error modal.** A central queue holds `App::report(ErrorReport { title, message, details, at })`, shown one at a time. The modal has:
+   - a selectable monospace text block with the error and details
+   - **Copy**, which calls `ctx.copy_text` on a ready-to-paste block: version, OS, error, details, and the last 50 log lines
+   - **Open GitHub issue**, which opens `https://github.com/juliomatcom/xade/issues/new?title=..&body=..`. The body is URL-encoded and kept under about 6,000 characters. The home path is replaced with `~` and email-like strings are redacted, because the user reviews it on GitHub before submitting anyway.
+   - **Open logs folder**
+   - **Dismiss**
+   Repeated identical errors collapse with a count. Warnings don't get a modal: they're logged and shown as muted text in the status bar for 10 s.
+5. The existing red error line becomes `report()` for errors and a status-bar warning for warnings.
+
+**Acceptance:** a forced panic in a UI handler (debug-only hidden key `Cmd+Shift+Alt+P`) shows the modal and the app keeps running. A forced writer-thread failure shows "Saving is disabled". The log file exists with the startup line. Tests cover the sweep fixes, issue-URL building (encoding, truncation, redaction), and the modal rendering headless.
+
+---
+
 ## 11. Wiki (`wiki-llm/`): structure and initial content
 
 Principles, from `AGENTS.md`: it orients, the code is the detail. One line per fact, each page under ~40 lines. No field lists, styling or history.
