@@ -7,6 +7,9 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::{json, Value};
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.5;
+/// The family shipped inside the app (JetBrains Mono, SIL OFL); it needs no install.
+pub const BUNDLED_FONT: &str = "JetBrains Mono";
+const BUNDLED_FONT_DATA: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
 const MIN_FONT_SIZE: f32 = 9.0;
 const MAX_FONT_SIZE: f32 = 28.0;
 /// How often the file's mtime is checked.
@@ -33,7 +36,7 @@ impl SendMode {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Config {
-    /// An installed family; `None` keeps egui's default font.
+    /// The bundled family or an installed one; `None` keeps egui's default font.
     pub font_family: Option<String>,
     pub font_size: f32,
     pub send_while_running: SendMode,
@@ -42,7 +45,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Config {
-            font_family: None,
+            font_family: Some(BUNDLED_FONT.to_string()),
             font_size: DEFAULT_FONT_SIZE,
             send_while_running: SendMode::default(),
         }
@@ -99,7 +102,7 @@ pub fn path(data_dir: &Path) -> PathBuf {
 pub fn load(path: &Path) -> (Config, Option<String>) {
     if !path.exists() {
         let defaults = serde_json::to_string_pretty(&json!({
-            "font_family": null,
+            "font_family": BUNDLED_FONT,
             "font_size": DEFAULT_FONT_SIZE,
             "send_while_running": "queue",
         }))
@@ -159,8 +162,14 @@ fn mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// Egui's default fonts with the installed `family` in front of the proportional list.
+/// Egui's default fonts with `family` (bundled or installed) in front of the proportional list.
 pub fn font_definitions(family: &str) -> Result<egui::FontDefinitions, String> {
+    if family.eq_ignore_ascii_case(BUNDLED_FONT) {
+        return Ok(with_front(
+            BUNDLED_FONT,
+            egui::FontData::from_static(BUNDLED_FONT_DATA),
+        ));
+    }
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
     let name = canonical_family(&db, family).unwrap_or_else(|| family.to_string());
@@ -176,6 +185,11 @@ pub fn font_definitions(family: &str) -> Result<egui::FontDefinitions, String> {
         .ok_or_else(|| format!("font \"{family}\" could not be read"))?;
     let mut data = egui::FontData::from_owned(bytes);
     data.index = index;
+    tracing::info!(family, "font resolved");
+    Ok(with_front(family, data))
+}
+
+fn with_front(family: &str, data: egui::FontData) -> egui::FontDefinitions {
     let mut defs = egui::FontDefinitions::default();
     defs.font_data
         .insert(family.to_string(), std::sync::Arc::new(data));
@@ -183,8 +197,7 @@ pub fn font_definitions(family: &str) -> Result<egui::FontDefinitions, String> {
         .entry(egui::FontFamily::Proportional)
         .or_default()
         .insert(0, family.to_string());
-    tracing::info!(family, "font resolved");
-    Ok(defs)
+    defs
 }
 
 /// The database's spelling of `family`, matched ignoring case.
@@ -207,7 +220,7 @@ mod tests {
         assert_eq!(full.font_family.as_deref(), Some("Menlo"));
         assert_eq!(full.font_size, 16.0);
         let partial = Config::parse(r#"{"font_size":15,"theme":"light","extra":[1]}"#).unwrap();
-        assert_eq!(partial.font_family, None);
+        assert_eq!(partial.font_family.as_deref(), Some(BUNDLED_FONT));
         assert_eq!(partial.font_size, 15.0);
         let null = Config::parse(r#"{"font_family":null}"#).unwrap();
         assert_eq!(null, Config::default());
@@ -260,7 +273,7 @@ mod tests {
         assert_eq!((cfg, err), (Config::default(), None));
         let written = std::fs::read_to_string(&file).unwrap();
         assert_eq!(Config::parse(&written).unwrap(), Config::default());
-        assert!(written.contains('\n') && written.contains("\"font_family\": null"));
+        assert!(written.contains('\n') && written.contains("\"font_family\": \"JetBrains Mono\""));
 
         std::fs::write(&file, "{ nope").unwrap();
         let (cfg, err) = load(&file);
@@ -304,6 +317,16 @@ mod tests {
         assert!(w.changed(tick(4)));
         assert!(!w.changed(tick(5)));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_default_font_ships_with_the_app() {
+        let defs = font_definitions("jetbrains mono").unwrap();
+        assert!(defs.font_data.contains_key(BUNDLED_FONT));
+        assert_eq!(
+            defs.families[&egui::FontFamily::Proportional][0],
+            BUNDLED_FONT
+        );
     }
 
     #[test]

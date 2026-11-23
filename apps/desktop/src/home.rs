@@ -56,12 +56,68 @@ fn search_width(available: f32) -> f32 {
     (available - TOP_BAR_RESERVED).clamp(160.0, 320.0)
 }
 
+/// The Workspace / Home toggle, boxed and centered in the top bar so the two read as one control.
+fn view_toggle(app: &mut App, ui: &mut egui::Ui, area: egui::Rect) {
+    let id = egui::Id::unique("view_toggle_width");
+    let width = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(190.0);
+    // The gap between the clusters as of the previous frame; centered on the bar when it
+    // fits there, else on the gap.
+    let (lo, hi) = ui
+        .data(|d| d.get_temp::<(f32, f32)>(egui::Id::unique("top_bar_gap")))
+        .map_or((area.left(), area.right()), |(l, r)| (l + 12.0, r - 12.0));
+    let half = width / 2.0;
+    let x = if lo + half <= hi - half {
+        area.center().x.clamp(lo + half, hi - half)
+    } else {
+        (lo + hi) / 2.0
+    };
+    let rect = egui::Rect::from_center_size(
+        egui::pos2(x, area.center().y),
+        egui::vec2(width, area.height()),
+    );
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(Layout::left_to_right(Align::Center)),
+    );
+    let used = egui::Frame::new()
+        .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(4, 2))
+        .show(&mut child, |ui| {
+            let to_ws = ui
+                .selectable_label(
+                    app.view == View::Workspace,
+                    icons::with(icons::WORKSPACE, "Workspace"),
+                )
+                .clicked();
+            let to_home = ui
+                .selectable_label(app.view == View::Home, icons::with(icons::HOME, "Home"))
+                .on_hover_text(format!(
+                    "Home / Workspace ({})",
+                    keymap::shortcut_text(Action::ToggleView)
+                ))
+                .clicked();
+            if to_home {
+                app.view = View::Home;
+            } else if to_ws && !app.open_windows.is_empty() {
+                app.view = View::Workspace;
+            }
+        })
+        .response
+        .rect
+        .width();
+    ui.data_mut(|d| d.insert_temp(id, used));
+}
+
 pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
         .fill(theme::BG_APP)
         .stroke(egui::Stroke::new(1.0, theme::BORDER))
         .inner_margin(egui::Margin::symmetric(12, 8));
     egui::Panel::top("top_bar").frame(frame).show(ui, |ui| {
+        let area = ui.max_rect();
+        view_toggle(app, ui, area);
         ui.horizontal(|ui| {
             ui.label(RichText::new("Xade").strong().size(15.0));
             scope_dropdown(app, ui);
@@ -74,6 +130,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 app.home.search_changed_at = Some(Instant::now());
             }
             provider_dropdown(ui);
+            let left_end = ui.min_rect().right();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .button(icons::SHORTCUTS)
@@ -95,20 +152,6 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                     .clicked()
                 {
                     app.tiling.retile();
-                }
-                let to_ws = ui
-                    .selectable_label(
-                        app.view == View::Workspace,
-                        icons::with(icons::WORKSPACE, "Workspace"),
-                    )
-                    .clicked();
-                let to_home = ui
-                    .selectable_label(app.view == View::Home, icons::with(icons::HOME, "Home"))
-                    .clicked();
-                if to_home {
-                    app.view = View::Home;
-                } else if to_ws && !app.open_windows.is_empty() {
-                    app.view = View::Workspace;
                 }
                 let enabled = app.home.scope.is_some() && app.home.preflight_error.is_none();
                 let new = ui
@@ -141,6 +184,10 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 for kind in [QuotaKind::SevenDay, QuotaKind::FiveHour] {
                     quota_meter(ui, kind, app.quota.iter().find(|q| q.kind == kind));
                 }
+                let right_start = ui.min_rect().left();
+                ui.data_mut(|d| {
+                    d.insert_temp(egui::Id::unique("top_bar_gap"), (left_end, right_start))
+                });
             });
         });
     });

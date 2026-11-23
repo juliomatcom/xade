@@ -300,7 +300,11 @@ impl App {
             maximized: None,
             raise: None,
             vscode: crate::widgets::diff_modal::find_code(),
-            config: Config::default(),
+            // No family yet, so the first `apply_config` always installs the configured font.
+            config: Config {
+                font_family: None,
+                ..Config::default()
+            },
             config_watch: Some(config::Watch::new(config_path)),
             chord: Chord::default(),
             sidebar_visible: true,
