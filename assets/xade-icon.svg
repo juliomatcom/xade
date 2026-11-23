@@ -1,0 +1,118 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+    <defs>
+        <clipPath id="squircle">
+            <rect width="512" height="512" rx="115" ry="115" />
+        </clipPath>
+
+        <linearGradient id="metalChassis" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#1e293b" />
+            <stop offset="50%" stop-color="#0f172a" />
+            <stop offset="100%" stop-color="#020617" />
+        </linearGradient>
+
+        <linearGradient id="jade1" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="0%" stop-color="#16a34a" />
+            <stop offset="50%" stop-color="#047857" />
+            <stop offset="100%" stop-color="#022c22" />
+        </linearGradient>
+
+        <linearGradient id="jade2" x1="100%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#34d399" />
+            <stop offset="60%" stop-color="#059669" />
+            <stop offset="100%" stop-color="#064e3b" />
+        </linearGradient>
+
+        <linearGradient id="jade3" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#10b981" />
+            <stop offset="50%" stop-color="#065f46" />
+            <stop offset="100%" stop-color="#022c22" />
+        </linearGradient>
+
+        <linearGradient id="jade4" x1="0%" y1="50%" x2="100%" y2="50%">
+            <stop offset="0%" stop-color="#059669" />
+            <stop offset="50%" stop-color="#15803d" />
+            <stop offset="100%" stop-color="#064e3b" />
+        </linearGradient>
+
+        <linearGradient id="gloss" x1="0%" y1="0%" x2="100%" y2="100%">
+            <stop offset="25%" stop-color="rgba(255,255,255,0)" />
+            <stop offset="45%" stop-color="rgba(255,255,255,0.08)" />
+            <stop offset="50%" stop-color="rgba(255,255,255,0.25)" />
+            <stop offset="55%" stop-color="rgba(255,255,255,0)" />
+        </linearGradient>
+
+        <g id="facet-248">
+            <path d="M 0,0 L 248,0 L 236,12 L 12,12 Z" fill="rgba(167, 243, 208, 0.3)" />
+            <path d="M 0,0 L 12,12 L 12,236 L 0,248 Z" fill="rgba(255, 255, 255, 0.15)" />
+            <path d="M 248,0 L 248,248 L 236,236 L 236,12 Z" fill="rgba(0, 0, 0, 0.25)" />
+            <path d="M 0,248 L 12,236 L 236,236 L 248,248 Z" fill="rgba(2, 44, 34, 0.5)" />
+            <rect x="12" y="12" width="224" height="224" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="1" />
+        </g>
+
+        <g id="facet-116">
+            <path d="M 0,0 L 116,0 L 106,10 L 10,10 Z" fill="rgba(167, 243, 208, 0.3)" />
+            <path d="M 0,0 L 10,10 L 10,106 L 0,116 Z" fill="rgba(255, 255, 255, 0.15)" />
+            <path d="M 116,0 L 116,116 L 106,106 L 106,10 Z" fill="rgba(0, 0, 0, 0.25)" />
+            <path d="M 0,116 L 10,106 L 106,106 L 116,116 Z" fill="rgba(2, 44, 34, 0.5)" />
+            <rect x="10" y="10" width="96" height="96" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="1" />
+        </g>
+    </defs>
+
+    <g clip-path="url(#squircle)">
+        <rect width="512" height="512" fill="url(#metalChassis)" />
+
+        <g transform="translate(0, 0)">
+            <rect width="248" height="248" fill="url(#jade1)" />
+            <use href="#facet-248" />
+        </g>
+
+        <g transform="translate(264, 0)">
+            <rect width="116" height="116" fill="url(#jade2)" />
+            <use href="#facet-116" />
+        </g>
+
+        <g transform="translate(396, 0)">
+            <rect width="116" height="116" fill="url(#jade3)" />
+            <use href="#facet-116" />
+        </g>
+
+        <g transform="translate(264, 132)">
+            <rect width="116" height="116" fill="url(#jade4)" />
+            <use href="#facet-116" />
+        </g>
+
+        <g transform="translate(396, 132)">
+            <rect width="116" height="116" fill="url(#jade1)" />
+            <use href="#facet-116" />
+        </g>
+
+        <g transform="translate(0, 264)">
+            <rect width="116" height="116" fill="url(#jade3)" />
+            <use href="#facet-116" />
+        </g>
+
+        <g transform="translate(132, 264)">
+            <rect width="116" height="116" fill="url(#jade4)" />
+            <use href="#facet-116" />
+        </g>
+
+        <g transform="translate(264, 264)">
+            <rect width="248" height="248" fill="url(#jade2)" />
+            <use href="#facet-248" />
+        </g>
+
+        <g transform="translate(0, 396)">
+            <rect width="116" height="116" fill="url(#jade1)" />
+            <use href="#facet-116" />
+        </g>
+
+        <g transform="translate(132, 396)">
+            <rect width="116" height="116" fill="url(#jade2)" />
+            <use href="#facet-116" />
+        </g>
+
+        <rect width="512" height="512" fill="url(#gloss)" pointer-events="none" />
+
+        <rect width="512" height="512" rx="115" ry="115" fill="none" stroke="#2a3341" stroke-width="4" pointer-events="none" />
+    </g>
+</svg>

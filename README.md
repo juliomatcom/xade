@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/xade-icon.png" alt="Xade icon" width="128"></p>
+
 # Xade
 
 A fast native desktop app for running several AI coding agent sessions side by side.
@@ -49,3 +51,5 @@ Project notes for contributors and AI agents live in `wiki-llm/`. Start at `wiki
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+Copyright © 2026 Julio César Martín
