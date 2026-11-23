@@ -50,6 +50,14 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             }
             provider_dropdown(ui);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let can_tile = app.view == View::Workspace && !app.open_windows.is_empty();
+                if ui
+                    .add_enabled(can_tile, egui::Button::new("Tile"))
+                    .on_hover_text("Re-tile windows into equal columns")
+                    .clicked()
+                {
+                    app.tiling.retile();
+                }
                 let to_ws = ui
                     .selectable_label(app.view == View::Workspace, "Workspace")
                     .clicked();

@@ -14,6 +14,8 @@ pub const ACCENT: Color32 = Color32::from_rgb(0x2F, 0x81, 0xF7);
 pub const OK: Color32 = Color32::from_rgb(0x2E, 0xA0, 0x43);
 pub const WARN: Color32 = Color32::from_rgb(0xD2, 0x99, 0x22);
 pub const DANGER: Color32 = Color32::from_rgb(0xF8, 0x51, 0x49);
+pub const DIFF_DEL_BG: Color32 = Color32::from_rgb(0x4B, 0x1D, 0x22);
+pub const DIFF_ADD_BG: Color32 = Color32::from_rgb(0x1A, 0x3D, 0x2A);
 pub const CLAUDE: Color32 = Color32::from_rgb(0xD9, 0x77, 0x57);
 
 const RADIUS: u8 = 6;

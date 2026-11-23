@@ -11,8 +11,12 @@ aw-runtime = { path = "../../crates/runtime" }
 aw-store = { path = "../../crates/store" }
 dirs = "=7.0.0"
 egui = "=0.37.0"
+egui_commonmark = { version = "=0.26.0", features = ["better_syntax_highlighting"] }
+egui_extras = { version = "=0.37.0", features = ["syntect"] }
 eframe = "=0.37.0"
 rfd = "=0.18.0"
+serde_json = "=1.0.154"
+similar = "=3.2.1"
 time = "=0.3.55"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "macros", "process", "time", "sync"] }
 tracing = "=0.1.44"

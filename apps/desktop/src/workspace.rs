@@ -1,0 +1,425 @@
+//! Workspace view: one `egui::Window` per open session, auto-tiled into equal columns.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use aw_core::{AgentProvider, SessionId};
+use aw_runtime::ManagerCmd;
+use egui::{Id, Order, Rect};
+use tokio::sync::mpsc::UnboundedSender;
+
+use crate::app::App;
+use crate::session_view;
+use crate::theme;
+use crate::widgets::diff_modal::{self, ModalAction};
+
+const GAP: f32 = 8.0;
+const DEFAULT_SIZE: [f32; 2] = [520.0, 640.0];
+const CASCADE: f32 = 28.0;
+/// How far a window may drift from its tile before auto-tiling turns off.
+const MOVE_TOLERANCE: f32 = 3.0;
+
+/// What session views need from `App` while their `SessionVm` is borrowed out of it.
+pub struct Env<'a> {
+    pub cmd_tx: &'a UnboundedSender<ManagerCmd>,
+    pub providers: &'a [Arc<dyn AgentProvider>],
+    pub vscode: Option<&'a Path>,
+}
+
+/// Auto-tiling state: windows are re-tiled while `auto` and the set of windows or the area changes.
+pub struct Tiling {
+    pub auto: bool,
+    ids: Vec<SessionId>,
+    area: Rect,
+}
+
+impl Default for Tiling {
+    fn default() -> Self {
+        Tiling {
+            auto: true,
+            ids: Vec::new(),
+            area: Rect::NOTHING,
+        }
+    }
+}
+
+impl Tiling {
+    /// The top bar's Tile button.
+    pub fn retile(&mut self) {
+        self.auto = true;
+        self.ids.clear();
+    }
+}
+
+/// `n` equal-width, full-height columns inside `area`.
+pub fn tile_rects(area: Rect, n: usize) -> Vec<Rect> {
+    if n == 0 {
+        return Vec::new();
+    }
+    let w = (area.width() - GAP * (n as f32 - 1.0)) / n as f32;
+    (0..n)
+        .map(|i| {
+            let x = area.left() + i as f32 * (w + GAP);
+            Rect::from_min_size(egui::pos2(x, area.top()), egui::vec2(w, area.height()))
+        })
+        .collect()
+}
+
+fn differs(a: Rect, b: Rect) -> bool {
+    (a.min - b.min).abs().max_elem() > MOVE_TOLERANCE
+        || (a.size() - b.size()).abs().max_elem() > MOVE_TOLERANCE
+}
+
+pub fn show(app: &mut App, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    let area = ui.available_rect_before_wrap();
+    let ids: Vec<SessionId> = app
+        .open_windows
+        .iter()
+        .copied()
+        .filter(|id| app.sessions.contains_key(id))
+        .collect();
+    if ids.is_empty() {
+        ui.label(egui::RichText::new("Opening session…").color(theme::TEXT_MUTED));
+        return;
+    }
+    let tiles = tile_rects(area, ids.len());
+    let retile = app.tiling.auto
+        && (app.tiling.ids != ids
+            || differs(app.tiling.area, area)
+            || app.tiling.area.is_negative());
+    if retile {
+        app.tiling.ids = ids.clone();
+        app.tiling.area = area;
+        for (id, rect) in ids.iter().zip(&tiles) {
+            if let Some(vm) = app.sessions.get_mut(id) {
+                vm.apply_rect = Some(*rect);
+                vm.collapsed = false;
+            }
+        }
+    }
+
+    let mut closes = Vec::new();
+    let mut user_moved = false;
+    let mut pressed = None;
+    let mut prev_min = area.min;
+    let pointer_down = ctx.input(|i| i.pointer.any_pressed());
+    let press_layer = ctx
+        .pointer_interact_pos()
+        .filter(|_| pointer_down)
+        .and_then(|p| ctx.layer_id_at(p));
+    for (i, id) in ids.iter().enumerate() {
+        let Some(mut vm) = app.sessions.remove(id) else {
+            continue;
+        };
+        let env = Env {
+            cmd_tx: &app.cmd_tx,
+            providers: &app.providers,
+            vscode: app.vscode.as_deref(),
+        };
+        let applying = vm.apply_rect.take();
+        let default_pos = if i > 0 {
+            prev_min + egui::vec2(CASCADE, CASCADE)
+        } else {
+            prev_min
+        };
+        let win = window(*id, vm.collapsed, area, applying, default_pos);
+        let mut out = session_view::ViewOut::default();
+        let resp = win.show(&ctx, |ui| out = session_view::show(ui, &mut vm, &env));
+        if let Some(resp) = &resp {
+            let rect = resp.response.rect;
+            prev_min = rect.min;
+            if applying.is_none() && !vm.collapsed {
+                vm.window_rect = Some(rect);
+                if app.tiling.auto && !retile && differs(rect, tiles[i]) {
+                    user_moved = true;
+                }
+            }
+            if press_layer == Some(resp.response.layer_id) {
+                pressed = Some(*id);
+            }
+        }
+        if out.collapse {
+            let rect = vm.window_rect.unwrap_or(tiles[i]);
+            if vm.collapsed {
+                vm.apply_rect = Some(rect);
+            } else {
+                vm.apply_rect = Some(Rect::from_min_size(
+                    rect.min,
+                    egui::vec2(rect.width(), session_view::HEADER_HEIGHT),
+                ));
+            }
+            vm.collapsed = !vm.collapsed;
+        }
+        if out.close {
+            closes.push(*id);
+        }
+        diff_modal_for(&ctx, *id, &mut vm, &env);
+        app.sessions.insert(*id, vm);
+    }
+
+    if user_moved {
+        app.tiling.auto = false;
+    }
+    if let Some(id) = pressed {
+        app.focused = Some(id);
+    }
+    if let Some(id) = app.raise.take() {
+        ctx.move_to_top(egui::LayerId::new(Order::Middle, Id::unique(id)));
+    }
+    for id in closes {
+        app.close_session(id);
+    }
+}
+
+/// One session window; `applying` forces its rect for this frame only.
+fn window<'a>(
+    id: SessionId,
+    collapsed: bool,
+    area: Rect,
+    applying: Option<Rect>,
+    default_pos: egui::Pos2,
+) -> egui::Window<'a> {
+    let win = egui::Window::new("session")
+        .id(Id::unique(id))
+        .title_bar(false)
+        // While the size is being forced the window's previous size may still be wrong, and
+        // constraining against it would shove the window off its tile.
+        .constrain(false)
+        .min_size([100.0, if collapsed { 20.0 } else { 80.0 }])
+        .resizable(!collapsed)
+        .frame(
+            egui::Frame::new()
+                .fill(theme::BG_PANEL)
+                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .corner_radius(8),
+        );
+    match applying {
+        Some(r) => win.current_pos(r.min).fixed_size(r.size()),
+        None => win
+            .constrain_to(area)
+            .default_size(DEFAULT_SIZE)
+            .default_pos(default_pos),
+    }
+}
+
+/// Draws the session's diff modal, when open, and applies its decision.
+fn diff_modal_for(ctx: &egui::Context, id: SessionId, vm: &mut crate::app::SessionVm, env: &Env) {
+    let Some(diff) = &vm.diff else { return };
+    let pending = vm
+        .pending_permission
+        .as_ref()
+        .filter(|p| p.tool_use_id == diff.tool_use_id)
+        .map(|p| p.request_id.clone());
+    let rel = diff
+        .data
+        .path
+        .strip_prefix(&vm.cwd)
+        .unwrap_or(&diff.data.path)
+        .display()
+        .to_string();
+    let action = diff_modal::show(
+        ctx,
+        Id::unique(("diff", id)),
+        &diff.data,
+        &rel,
+        pending.is_some(),
+        env.vscode,
+    );
+    let decision = match action {
+        ModalAction::Accept => Some((true, false)),
+        ModalAction::AcceptAuto => Some((true, true)),
+        ModalAction::Cancel => Some((false, false)),
+        ModalAction::Close => {
+            vm.diff = None;
+            None
+        }
+        ModalAction::None => None,
+    };
+    if let (Some((allow, enable_auto)), Some(request_id)) = (decision, pending) {
+        let _ = env.cmd_tx.send(ManagerCmd::RespondPermission {
+            session_id: id,
+            request_id,
+            allow,
+            enable_auto,
+        });
+        if enable_auto {
+            vm.session.auto_mode = true;
+        }
+        vm.pending_permission = None;
+        vm.diff = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::{DiffState, PendingPermission, SessionVm};
+    use crate::diff::DiffData;
+    use aw_core::{
+        Effort, Message, ProviderId, Role, Session, SessionStatus, UsageTotals, WorkspaceId,
+    };
+    use egui_commonmark::CommonMarkCache;
+    use time::OffsetDateTime;
+
+    fn msg(role: Role, text: &str, tool: Option<(&str, &str)>, payload: Option<&str>) -> Message {
+        Message {
+            id: uuid::Uuid::new_v4(),
+            session_id: SessionId::new(),
+            seq: 1,
+            role,
+            content_text: text.into(),
+            thinking_text: None,
+            tool_name: tool.map(|t| t.0.to_string()),
+            tool_use_id: tool.map(|t| t.1.to_string()),
+            tool_payload_json: payload.map(str::to_string),
+            is_error: false,
+            created_at: OffsetDateTime::now_utc(),
+        }
+    }
+
+    fn vm() -> SessionVm {
+        let now = OffsetDateTime::now_utc();
+        let session = Session {
+            id: SessionId::new(),
+            workspace_id: WorkspaceId::new(),
+            provider_id: ProviderId::Claude,
+            provider_session_id: None,
+            title: "Fix the thing".into(),
+            preview_snippet: String::new(),
+            model_id: "opus".into(),
+            effort: Effort::Default,
+            auto_mode: false,
+            usage: UsageTotals::default(),
+            created_at: now,
+            updated_at: now,
+        };
+        let edit = r#"{"file_path":"/tmp/nope/a.rs","old_string":"a","new_string":"b"}"#;
+        let patch = r#"{"structuredPatch":[{"oldStart":3,"newStart":3,"lines":["-a","+b"]}]}"#;
+        SessionVm {
+            session,
+            cwd: "/tmp/nope".into(),
+            status: SessionStatus::NeedsApproval,
+            messages: vec![
+                msg(
+                    Role::User,
+                    "hello `code`\n\n```rust\nfn x() {}\n```",
+                    None,
+                    None,
+                ),
+                msg(
+                    Role::Assistant,
+                    "Sure:\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```sh\nls",
+                    None,
+                    None,
+                ),
+                msg(
+                    Role::ToolCall,
+                    "",
+                    Some(("Bash", "t1")),
+                    Some(r#"{"command":"ls"}"#),
+                ),
+                msg(Role::ToolResult, "a.rs", Some(("Bash", "t1")), None),
+                msg(Role::ToolCall, "", Some(("Edit", "t2")), Some(edit)),
+                msg(Role::ToolResult, "ok", Some(("Edit", "t2")), Some(patch)),
+                msg(
+                    Role::ToolCall,
+                    "",
+                    Some(("Write", "t3")),
+                    Some(r#"{"file_path":"/tmp/nope/b.txt","content":"x"}"#),
+                ),
+            ],
+            live_text: "streaming ```".into(),
+            thinking_tokens: Some(42),
+            pending_permission: Some(PendingPermission {
+                request_id: "r".into(),
+                tool_use_id: "t3".into(),
+                tool_name: "Write".into(),
+                input_json: String::new(),
+                reviewable: false,
+            }),
+            input: "draft".into(),
+            error: Some("boom".into()),
+            md_cache: CommonMarkCache::default(),
+            diff: DiffData::build("Edit", edit, Some(patch), Path::new("/tmp/nope")).map(|data| {
+                DiffState {
+                    tool_use_id: "t2".into(),
+                    data,
+                }
+            }),
+            settings_pending: true,
+            collapsed: false,
+            window_rect: None,
+            apply_rect: None,
+        }
+    }
+
+    fn frame(ctx: &egui::Context, run: impl FnMut(&egui::Context)) {
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 900.0),
+            )),
+            ..Default::default()
+        };
+        ctx.run_pass(input, run).drop_without_applying_deltas();
+    }
+
+    #[test]
+    fn tiled_windows_land_on_their_tiles_and_stay_there() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            vscode: None,
+        };
+        let area = Rect::from_min_size(egui::pos2(20.0, 50.0), egui::vec2(1200.0, 700.0));
+        let tiles = tile_rects(area, 3);
+        let mut vms: Vec<SessionVm> = (0..3).map(|_| vm()).collect();
+        for f in 0..6 {
+            frame(&ctx, |ctx| {
+                for (i, vm) in vms.iter_mut().enumerate() {
+                    let applying = (f == 0).then_some(tiles[i]);
+                    let win = window(vm.session.id, false, area, applying, area.min);
+                    let resp = win.show(ctx, |ui| {
+                        session_view::show(ui, vm, &env);
+                    });
+                    let rect = resp.map(|r| r.response.rect).unwrap_or(Rect::NOTHING);
+                    if f >= 2 {
+                        assert!(
+                            !differs(rect, tiles[i]),
+                            "frame {f} window {i}: {rect:?} vs {:?}",
+                            tiles[i]
+                        );
+                    }
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn session_view_renders_banner_modal_and_collapsed_header() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            vscode: None,
+        };
+        let mut v = vm();
+        let area = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 700.0));
+        for f in 0..4 {
+            v.collapsed = f == 3;
+            frame(&ctx, |ctx| {
+                let win = window(v.session.id, v.collapsed, area, None, area.min);
+                win.show(ctx, |ui| {
+                    session_view::show(ui, &mut v, &env);
+                });
+                diff_modal_for(ctx, v.session.id, &mut v, &env);
+            });
+        }
+    }
+}

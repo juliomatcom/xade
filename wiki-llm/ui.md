@@ -3,5 +3,8 @@
 - All UI state lives in `App` (per-session `SessionVm`, home state, git map), never in a view, so background sessions keep updating.
 - Manager events, query results and git results reach the UI through one std mpsc channel; every sender calls `request_repaint()`, and `App::logic` drains it each frame. Never block or `.await` in a frame.
 - Reads (home list, search, workspaces) run as tasks on the tokio runtime and return tagged with a generation; stale results are dropped.
-- Git status is `git status --porcelain=v2` of the active directory (focused session cwd in Workspace view, else the selected or most recent workspace); one in-flight run per directory.
-- Git refreshes on active-directory change, every 5 s while the window is focused, and after any `ToolResult` or `TurnComplete`.
+- Git status is `git status --porcelain=v2` of the active directory (focused session cwd in Workspace view, else the selected or most recent workspace), one in-flight run per directory; it refreshes on directory change, every 5 s while focused, and after any `ToolResult` or `TurnComplete`.
+- Each open session is an `egui::Window` (`workspace.rs`); windows auto-tile into equal columns whenever the window set or area changes, until a user drag or resize turns it off (top-bar Tile re-enables); closing sends `ManagerCmd::Close`.
+- `messages` holds finalized blocks only; `live_text` is the block in flight and is cleared when `AssistantText` finalizes it; thinking is an ephemeral token count, never persisted.
+- Permissions: non-code tools get a banner (Approve / Approve & Enable Auto / Deny); code-change tools never render inline, their request opens the diff modal (Accept / Accept & Enable Auto / Cancel = deny) and Esc or close only hides it, leaving the card's "Review changes".
+- "Open in VS Code" runs `code --goto <path>:<line>`; the `code` binary is resolved once at startup (`$PATH`, then known macOS locations).

@@ -14,12 +14,15 @@ use aw_runtime::git::{git_status, GitState};
 use aw_runtime::{AppEvent, AppEventKind, ManagerCmd};
 use aw_store::{Page, SessionCard, StoreReader, WriteOp, WriterHandle};
 use egui::RichText;
+use egui_commonmark::CommonMarkCache;
 use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
+use crate::diff::{is_code_change, DiffData};
 use crate::home::HomeState;
-use crate::{home, session_basic, status_bar, theme};
+use crate::workspace::Tiling;
+use crate::{home, status_bar, theme, workspace};
 
 const GIT_REFRESH: Duration = Duration::from_secs(5);
 
@@ -66,11 +69,54 @@ pub struct SessionVm {
     pub pending_permission: Option<PendingPermission>,
     pub input: String,
     pub error: Option<String>,
+    pub md_cache: CommonMarkCache,
+    /// The diff modal, when open.
+    pub diff: Option<DiffState>,
+    /// A model or effort change waits for the next turn.
+    pub settings_pending: bool,
+    pub collapsed: bool,
+    /// Last rect of the expanded window.
+    pub window_rect: Option<egui::Rect>,
+    /// One-frame layout override (tiling, collapse, expand).
+    pub apply_rect: Option<egui::Rect>,
+}
+
+pub struct DiffState {
+    pub tool_use_id: String,
+    pub data: DiffData,
 }
 
 pub struct PendingPermission {
     pub request_id: String,
+    pub tool_use_id: String,
     pub tool_name: String,
+    pub input_json: String,
+    /// A code-change tool whose diff opened in the modal.
+    pub reviewable: bool,
+}
+
+impl SessionVm {
+    /// Opens the diff modal for a tool call, from its stored result when it has finished.
+    pub fn open_diff(&mut self, tool_use_id: &str) {
+        let find = |role: Role| {
+            self.messages
+                .iter()
+                .find(|m| m.role == role && m.tool_use_id.as_deref() == Some(tool_use_id))
+        };
+        let (Some(call), result) = (find(Role::ToolCall), find(Role::ToolResult)) else {
+            return;
+        };
+        let data = DiffData::build(
+            call.tool_name.as_deref().unwrap_or_default(),
+            call.tool_payload_json.as_deref().unwrap_or_default(),
+            result.and_then(|r| r.tool_payload_json.as_deref()),
+            &self.cwd,
+        );
+        self.diff = data.map(|data| DiffState {
+            tool_use_id: tool_use_id.to_string(),
+            data,
+        });
+    }
 }
 
 pub struct App {
@@ -87,6 +133,10 @@ pub struct App {
     pub providers: Vec<Arc<dyn AgentProvider>>,
     pub writer: WriterHandle,
     pub reader: StoreReader,
+    pub tiling: Tiling,
+    /// Window to bring to the front on the next frame.
+    pub raise: Option<SessionId>,
+    pub vscode: Option<PathBuf>,
     events_rx: Receiver<UiMsg>,
     bridge: Bridge,
     git_inflight: HashSet<PathBuf>,
@@ -136,6 +186,9 @@ impl App {
             providers,
             writer,
             reader,
+            tiling: Tiling::default(),
+            raise: None,
+            vscode: crate::widgets::diff_modal::find_code(),
             events_rx,
             bridge,
             git_inflight: HashSet::new(),
@@ -275,6 +328,7 @@ impl App {
             self.open_windows.push(id);
         }
         self.focused = Some(id);
+        self.raise = Some(id);
         self.view = View::Workspace;
     }
 
@@ -372,6 +426,12 @@ impl App {
                 pending_permission: None,
                 input: String::new(),
                 error: None,
+                md_cache: CommonMarkCache::default(),
+                diff: None,
+                settings_pending: false,
+                collapsed: false,
+                window_rect: None,
+                apply_rect: None,
             },
         );
         self.focus(id);
@@ -426,12 +486,16 @@ impl App {
         let mut refresh_git = false;
         let mut refresh_cards = false;
         match ev {
-            ProviderEvent::TextDelta(t) => vm.live_text.push_str(&t),
+            ProviderEvent::TextDelta(t) => {
+                vm.thinking_tokens = None;
+                vm.live_text.push_str(&t);
+            }
             ProviderEvent::ThinkingProgress { estimated_tokens } => {
                 vm.thinking_tokens = Some(estimated_tokens);
             }
             ProviderEvent::AssistantText { text } => {
                 vm.live_text.clear();
+                vm.thinking_tokens = None;
                 let m = new_message(vm, Role::Assistant, text, None);
                 vm.messages.push(m);
             }
@@ -440,6 +504,7 @@ impl App {
                 name,
                 input_json,
             } => {
+                vm.thinking_tokens = None;
                 let mut m = new_message(vm, Role::ToolCall, String::new(), Some(tool_use_id));
                 m.tool_name = Some(name);
                 m.tool_payload_json = Some(input_json);
@@ -459,17 +524,28 @@ impl App {
             }
             ProviderEvent::PermissionRequest {
                 request_id,
+                tool_use_id,
                 tool_name,
-                ..
+                input_json,
             } => {
+                let diff = is_code_change(&tool_name)
+                    .then(|| DiffData::build(&tool_name, &input_json, None, &vm.cwd))
+                    .flatten();
                 vm.pending_permission = Some(PendingPermission {
                     request_id,
+                    tool_use_id: tool_use_id.clone(),
                     tool_name,
+                    input_json,
+                    reviewable: diff.is_some(),
                 });
+                if let Some(data) = diff {
+                    vm.diff = Some(DiffState { tool_use_id, data });
+                }
             }
             ProviderEvent::TurnComplete { usage, .. } => {
                 vm.live_text.clear();
                 vm.thinking_tokens = None;
+                vm.settings_pending = false;
                 vm.session.usage.accumulate(&usage);
                 refresh_git = true;
                 refresh_cards = true;
@@ -557,7 +633,7 @@ impl eframe::App for App {
             }
             match self.view {
                 View::Home => home::grid(self, ui),
-                View::Workspace => session_basic::show(self, ui),
+                View::Workspace => workspace::show(self, ui),
             }
         });
     }

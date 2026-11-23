@@ -1,8 +1,13 @@
 mod app;
+mod composer;
+mod conversation;
+mod diff;
 mod home;
-mod session_basic;
+mod session_view;
 mod status_bar;
 mod theme;
+mod widgets;
+mod workspace;
 
 use std::path::PathBuf;
 use std::sync::Arc;
