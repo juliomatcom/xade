@@ -21,6 +21,8 @@ pub const BG_SIDEBAR: Color32 = Color32::from_rgb(0x12, 0x20, 0x1C);
 /// Bottom status bar fill.
 pub const BG_STATUS: Color32 = Color32::from_rgb(0x0C, 0x17, 0x14);
 pub const OK: Color32 = Color32::from_rgb(0x34, 0xD3, 0x99);
+/// Muted fill behind OK-colored text (e.g. Auto: ON) — avoids a glowing solid mint.
+pub const OK_BG: Color32 = Color32::from_rgb(0x12, 0x3B, 0x2F);
 pub const WARN: Color32 = Color32::from_rgb(0xD2, 0x99, 0x22);
 pub const DANGER: Color32 = Color32::from_rgb(0xF8, 0x51, 0x49);
 pub const DIFF_DEL_BG: Color32 = Color32::from_rgb(0x4B, 0x1D, 0x22);

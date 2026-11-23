@@ -12,3 +12,4 @@
 - Button glyphs live only in `icons.rs`; a unit test asserts each exists in egui's default fonts, which needs the `monochrome_emoji_fonts` feature on `egui`.
 - Home cards and session headers carry an origin badge (Xade / Claude Code); a Home filter row passes `origin` to list and search.
 - `ManagerCmd::Import` runs once at startup after a good preflight (and after a Retry that recovers) and from the sidebar button; `ImportDone` re-runs the home query and workspace list.
+- Home shows a fixed 3x3 page of tiles (`PAGE_SIZE` 9) placed by exact rects that fill the central area; the sidebar is user-resizable and the top-bar search field shrinks with width, so `MIN_WINDOW_SIZE` (main.rs) is the width a headless test keeps overlap-free.

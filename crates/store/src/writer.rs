@@ -12,6 +12,7 @@ use xade_core::{
 };
 
 use crate::schema::{self, fmt_ts, to_i64};
+use crate::throwaway;
 use crate::StoreError;
 
 const PREVIEW_CHARS: usize = 200;
@@ -52,8 +53,18 @@ pub enum WriteOp {
         messages: Vec<Message>,
         workspace_root: PathBuf,
     },
+    /// Deletes `ClaudeCode`-origin sessions whose workspace root is throwaway (see
+    /// `throwaway::is_throwaway_dir`; messages and search rows go with them), then workspaces
+    /// that are throwaway and hold no session. Replies with the counts.
+    PruneThrowaway(mpsc::Sender<PruneCounts>),
     /// Replies once every earlier op has been applied.
     Flush(mpsc::Sender<()>),
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PruneCounts {
+    pub sessions: u32,
+    pub workspaces: u32,
 }
 
 /// Cheap to clone; the writer thread exits when the last handle is dropped.
@@ -271,9 +282,47 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
             messages,
             workspace_root,
         } => import_session(&tx, session, messages, &workspace_root)?,
+        WriteOp::PruneThrowaway(reply) => {
+            let counts = prune_throwaway(&tx)?;
+            tx.commit()?;
+            let _ = reply.send(counts);
+            return Ok(());
+        }
         WriteOp::Flush(_) => {}
     }
     tx.commit()
+}
+
+fn prune_throwaway(tx: &Transaction) -> rusqlite::Result<PruneCounts> {
+    let mut counts = PruneCounts::default();
+    let sessions: Vec<(String, String)> = tx
+        .prepare(
+            "SELECT s.id, w.root_path FROM sessions s JOIN workspaces w ON w.id = s.workspace_id
+             WHERE s.origin = ?1",
+        )?
+        .query_map([schema::origin_str(SessionOrigin::ClaudeCode)], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    for (id, root) in sessions {
+        if throwaway::is_throwaway_dir(Path::new(&root)) {
+            // The sessions delete trigger and the messages cascade clear the search rows.
+            counts.sessions += tx.execute("DELETE FROM sessions WHERE id = ?1", [id])? as u32;
+        }
+    }
+    let empty: Vec<(String, String)> = tx
+        .prepare(
+            "SELECT id, root_path FROM workspaces
+             WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE workspace_id = workspaces.id)",
+        )?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (id, root) in empty {
+        if throwaway::is_throwaway_dir(Path::new(&root)) {
+            counts.workspaces += tx.execute("DELETE FROM workspaces WHERE id = ?1", [id])? as u32;
+        }
+    }
+    Ok(counts)
 }
 
 fn import_session(

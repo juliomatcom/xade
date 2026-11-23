@@ -210,6 +210,42 @@ impl App {
         app
     }
 
+    /// A bare `App` over a store at `db`, for headless layout tests; starts nothing.
+    #[cfg(test)]
+    pub fn for_test(ctx: &egui::Context, rt: Handle, db: &std::path::Path) -> Self {
+        let (tx, events_rx) = std::sync::mpsc::channel();
+        let writer = xade_store::StoreWriter::spawn(db).expect("writer");
+        let reader = xade_store::StoreReader::open(db).expect("reader");
+        App {
+            view: View::Home,
+            home: HomeState::default(),
+            sessions: HashMap::new(),
+            open_windows: Vec::new(),
+            focused: None,
+            quota: Vec::new(),
+            cmd_tx: tokio::sync::mpsc::unbounded_channel().0,
+            rt,
+            git: HashMap::new(),
+            error: None,
+            providers: Vec::new(),
+            writer,
+            reader,
+            tiling: Tiling::default(),
+            maximized: None,
+            raise: None,
+            vscode: None,
+            events_rx,
+            bridge: Bridge {
+                tx,
+                ctx: ctx.clone(),
+            },
+            git_inflight: HashSet::new(),
+            git_stale: HashSet::new(),
+            git_dir: None,
+            git_checked: Instant::now(),
+        }
+    }
+
     // ----- background work -----
 
     pub fn refresh_workspaces(&self) {

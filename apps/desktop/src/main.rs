@@ -20,6 +20,9 @@ use xade_store::{StoreReader, StoreWriter};
 
 use crate::app::App;
 
+/// Smallest main window that still fits the top bar without overlap.
+pub const MIN_WINDOW_SIZE: [f32; 2] = [1280.0, 760.0];
+
 /// `XADE_DATA_DIR` overrides the platform data dir (tests, throwaway runs).
 fn data_dir() -> PathBuf {
     std::env::var_os("XADE_DATA_DIR")
@@ -61,7 +64,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut viewport = egui::ViewportBuilder::default()
         .with_title("Xade")
         .with_inner_size([1280.0, 800.0])
-        .with_min_inner_size([800.0, 500.0]);
+        .with_min_inner_size(MIN_WINDOW_SIZE);
     match eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/xade-icon-app.png")) {
         Ok(icon) => viewport = viewport.with_icon(icon),
         Err(e) => tracing::warn!("app icon not loaded: {e}"),

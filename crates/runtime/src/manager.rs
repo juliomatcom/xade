@@ -13,7 +13,7 @@ use xade_core::{
     AgentProvider, Effort, ImportedSession, Message, ProviderId, Session, SessionId, SessionOrigin,
     SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
 };
-use xade_store::{StoreReader, WriteOp, WriterHandle};
+use xade_store::{throwaway, StoreReader, WriteOp, WriterHandle};
 
 use crate::session_actor::{Actor, ActorCmd};
 use crate::{flush, AppEvent, AppEventKind, ManagerCmd};
@@ -188,9 +188,14 @@ impl SessionManager {
         });
     }
 
-    /// Skips sessions Xade owns or runs, and transcripts not newer than the stored row.
+    /// Skips sessions Xade owns or runs, transcripts not newer than the stored row, and
+    /// sessions from throwaway directories; first prunes what earlier runs left of those.
     async fn apply_import(&mut self, batches: Vec<(ProviderId, Vec<ImportedSession>)>) {
-        let (mut imported, mut updated) = (0u32, 0u32);
+        let (mut imported, mut updated, mut skipped) = (0u32, 0u32, 0u32);
+        let (prune_tx, prune_rx) = std::sync::mpsc::channel();
+        let _ = self.writer.send(WriteOp::PruneThrowaway(prune_tx));
+        flush(&self.writer).await;
+        let pruned = prune_rx.try_recv().unwrap_or_default();
         for (provider_id, sessions) in batches {
             let Some(provider) = self.provider(provider_id) else {
                 continue;
@@ -204,6 +209,10 @@ impl SessionManager {
             };
             let default_model = provider.default_model();
             for imp in sessions {
+                if throwaway::is_throwaway_dir(&imp.cwd) {
+                    skipped += 1;
+                    continue;
+                }
                 let id = match index.get(&imp.provider_session_id) {
                     Some(r) if r.origin == SessionOrigin::Xade => continue,
                     Some(r) if self.live.get(&r.id).is_some_and(|tx| !tx.is_closed()) => continue,
@@ -226,6 +235,14 @@ impl SessionManager {
             }
         }
         flush(&self.writer).await;
+        tracing::info!(
+            imported,
+            updated,
+            skipped_throwaway = skipped,
+            pruned_sessions = pruned.sessions,
+            pruned_workspaces = pruned.workspaces,
+            "import applied"
+        );
         self.emit(None, AppEventKind::ImportDone { imported, updated });
     }
 

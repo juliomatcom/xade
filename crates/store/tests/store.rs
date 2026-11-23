@@ -789,3 +789,71 @@ fn import_never_touches_xade_origin_and_keeps_local_fields() {
     assert_eq!(idx["shared"].origin, SessionOrigin::Xade);
     assert_eq!(idx["other"].origin, SessionOrigin::ClaudeCode);
 }
+
+#[test]
+fn prune_removes_throwaway_imports_and_empty_workspaces_only() {
+    let f = Fixture::new();
+    let real = env!("CARGO_MANIFEST_DIR");
+    let mut keep_ws = workspace(WorkspaceId::new(), real);
+    keep_ws.display_name = "real".into();
+    let keep_id = keep_ws.id;
+    f.writer.send(WriteOp::UpsertWorkspace(keep_ws)).unwrap();
+    // A user-added workspace that exists outside temp and has no sessions stays.
+    let user_ws = workspace(WorkspaceId::new(), &format!("{real}/src"));
+    f.writer.send(WriteOp::UpsertWorkspace(user_ws)).unwrap();
+    // An empty workspace in temp, and one that no longer exists, both go.
+    f.writer
+        .send(WriteOp::UpsertWorkspace(workspace(
+            WorkspaceId::new(),
+            "/tmp/empty-ws",
+        )))
+        .unwrap();
+    f.writer
+        .send(WriteOp::UpsertWorkspace(workspace(
+            WorkspaceId::new(),
+            "/definitely/not/here",
+        )))
+        .unwrap();
+    // Imported session in temp (pruned), imported session in a real dir (kept),
+    // Xade-origin session in temp (kept, so its workspace stays).
+    let (junk_id, junk_op) = import_op(&f, "junk", "junk title", &["junk body"], 10);
+    f.writer.send(junk_op).unwrap();
+    let mut good = session(keep_id, "good title", f.base);
+    good.provider_session_id = Some("good".into());
+    good.origin = SessionOrigin::ClaudeCode;
+    let good_id = good.id;
+    f.writer.send(WriteOp::InsertSession(good)).unwrap();
+    let own_id = f.add_session("own title", 5);
+    f.add_message(junk_id, 2, Role::User, "junk body two");
+    f.writer.flush().unwrap();
+    assert_eq!(f.titles("junk").len(), 1);
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    f.writer.send(WriteOp::PruneThrowaway(tx)).unwrap();
+    f.writer.flush().unwrap();
+    let counts = rx.recv().unwrap();
+    assert_eq!(
+        (counts.sessions, counts.workspaces),
+        (1, 3),
+        "junk session; its workspace, the empty temp one and the missing one"
+    );
+    assert!(f.titles("junk").is_empty(), "search rows are gone");
+    assert!(block_on(f.reader.load_session(junk_id)).is_err());
+    assert!(block_on(f.reader.load_session(good_id)).is_ok());
+    assert!(block_on(f.reader.load_session(own_id)).is_ok());
+    let roots: Vec<String> = block_on(f.reader.list_workspaces())
+        .unwrap()
+        .into_iter()
+        .map(|w| w.root_path.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(roots.len(), 3, "{roots:?}");
+    assert!(roots.contains(&"/tmp/project".to_string()));
+    assert!(roots.contains(&real.to_string()));
+    assert!(roots.contains(&format!("{real}/src")));
+
+    // Second run is a no-op.
+    let (tx, rx) = std::sync::mpsc::channel();
+    f.writer.send(WriteOp::PruneThrowaway(tx)).unwrap();
+    f.writer.flush().unwrap();
+    assert_eq!(rx.recv().unwrap(), xade_store::PruneCounts::default());
+}

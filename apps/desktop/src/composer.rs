@@ -139,13 +139,24 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
                 }
             });
         let on = vm.session.auto_mode;
-        let (text, fill) = if on {
-            (icons::with(icons::AUTO, "Auto: ON"), theme::OK)
+        let (text, fill, fg, stroke) = if on {
+            (
+                icons::with(icons::AUTO, "Auto: ON"),
+                theme::OK_BG,
+                theme::OK,
+                theme::OK,
+            )
         } else {
-            (icons::with(icons::AUTO, "Auto: OFF"), theme::BG_HOVER)
+            (
+                icons::with(icons::AUTO, "Auto: OFF"),
+                theme::BG_HOVER,
+                theme::TEXT,
+                theme::BORDER,
+            )
         };
-        let pill = egui::Button::new(RichText::new(text).small().color(theme::TEXT))
+        let pill = egui::Button::new(RichText::new(text).small().color(fg))
             .fill(fill)
+            .stroke(egui::Stroke::new(1.0, stroke))
             .corner_radius(10);
         if ui.add(pill).clicked() {
             vm.session.auto_mode = !on;

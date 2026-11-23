@@ -10,10 +10,17 @@ use xade_store::SessionCard;
 use crate::app::{App, View};
 use crate::{icons, theme};
 
-pub const PAGE_SIZE: u32 = 24;
+/// The home grid is `GRID` x `GRID` tiles per page.
+const GRID: usize = 3;
+pub const PAGE_SIZE: u32 = (GRID * GRID) as u32;
 pub const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
-const CARD_HEIGHT: f32 = 132.0;
 const CARD_GAP: f32 = 12.0;
+const CARD_PAD: f32 = 12.0;
+const ROW_GAP: f32 = 4.0;
+const SIDEBAR_DEFAULT: f32 = 220.0;
+const SIDEBAR_MIN: f32 = 160.0;
+/// Below this inner width the import button shows a short label.
+const IMPORT_FULL_LABEL_WIDTH: f32 = 190.0;
 
 #[derive(Default)]
 pub struct HomeState {
@@ -36,6 +43,15 @@ pub struct HomeState {
     pub import_result: Option<(u32, u32)>,
 }
 
+/// Room the provider dropdown and the right-hand cluster (buttons, quota meters) take; the
+/// top-bar test fails if they outgrow it.
+const TOP_BAR_RESERVED: f32 = 108.0 + 704.0;
+
+/// The search field shrinks with the space left of `TOP_BAR_RESERVED`.
+fn search_width(available: f32) -> f32 {
+    (available - TOP_BAR_RESERVED).clamp(160.0, 320.0)
+}
+
 pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
         .fill(theme::BG_APP)
@@ -48,7 +64,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut app.home.search)
                     .hint_text("Fuzzy search sessions (try typos)")
-                    .desired_width(320.0),
+                    .desired_width(search_width(ui.available_width())),
             );
             if resp.changed() {
                 app.home.search_changed_at = Some(Instant::now());
@@ -215,14 +231,15 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         .inner_margin(egui::Margin::same(12));
     egui::Panel::left("sidebar")
         .frame(frame)
-        .default_size(210.0)
-        .resizable(false)
+        .default_size(SIDEBAR_DEFAULT)
+        .size_range(SIDEBAR_MIN..=(ui.available_width() * 0.4).max(SIDEBAR_MIN))
+        .resizable(true)
         .show(ui, |ui| {
             ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
                 if ui
                     .add_sized(
                         [ui.available_width(), 28.0],
-                        egui::Button::new(icons::with(icons::ADD_DIR, "Add Directory")),
+                        egui::Button::new(icons::with(icons::ADD_DIR, "Add Directory")).truncate(),
                     )
                     .clicked()
                 {
@@ -275,14 +292,24 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
 
 fn import_button(app: &mut App, ui: &mut egui::Ui) {
     let enabled = !app.home.importing && app.home.preflight_error.is_none();
-    let btn = egui::Button::new(icons::with(icons::IMPORT, "Import from Claude Code"));
-    if ui
+    let narrow = ui.available_width() < IMPORT_FULL_LABEL_WIDTH;
+    let label = if narrow {
+        "Import"
+    } else {
+        "Import from Claude Code"
+    };
+    let btn = egui::Button::new(icons::with(icons::IMPORT, label)).truncate();
+    let resp = ui
         .add_enabled_ui(enabled, |ui| {
             ui.add_sized([ui.available_width(), 28.0], btn)
         })
-        .inner
-        .clicked()
-    {
+        .inner;
+    let resp = if narrow {
+        resp.on_hover_text("Import from Claude Code")
+    } else {
+        resp
+    };
+    if resp.clicked() {
         app.start_import();
     }
     if app.home.importing {
@@ -406,6 +433,9 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
         });
+    ui.add_space(CARD_GAP);
+    let area = ui.available_rect_before_wrap();
+    let mut open = None;
     if app.home.cards.is_empty() {
         let msg = if !app.home.search.trim().is_empty() {
             "No sessions match your search."
@@ -414,33 +444,57 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
         } else {
             "No sessions yet. Select a workspace and start a new session."
         };
-        ui.label(RichText::new(msg).color(theme::TEXT_MUTED));
-    }
-    let mut open = None;
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            let cols = ((ui.available_width() / 320.0) as usize).clamp(1, 4);
-            let width = (ui.available_width() - CARD_GAP * (cols as f32 - 1.0)) / cols as f32;
-            for row in app.home.cards.chunks(cols) {
-                ui.horizontal(|ui| {
-                    ui.spacing_mut().item_spacing.x = CARD_GAP;
-                    for card in row {
-                        if card_ui(app, ui, card, width) {
-                            open = Some(card.id);
-                        }
-                    }
-                });
-            }
+        ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+            ui.label(RichText::new(msg).color(theme::TEXT_MUTED));
         });
+    }
+    for (card, rect) in app.home.cards.iter().zip(tile_rects(area)) {
+        if card_ui(app, ui, card, rect) {
+            open = Some(card.id);
+        }
+    }
     if let Some(id) = open {
         app.open_session(id);
     }
 }
 
-/// Draws one card; returns true when clicked.
-fn card_ui(app: &App, ui: &mut egui::Ui, card: &SessionCard, width: f32) -> bool {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, CARD_HEIGHT), egui::Sense::click());
+/// The 3x3 tile rects (row-major) that exactly fill `area` with `CARD_GAP` between them.
+fn tile_rects(area: egui::Rect) -> impl Iterator<Item = egui::Rect> {
+    let n = GRID as f32;
+    let w = ((area.width() - CARD_GAP * (n - 1.0)) / n).max(0.0);
+    let h = ((area.height() - CARD_GAP * (n - 1.0)) / n).max(0.0);
+    (0..GRID * GRID).map(move |i| {
+        let (col, row) = ((i % GRID) as f32, (i / GRID) as f32);
+        let min = area.min + egui::vec2(col * (w + CARD_GAP), row * (h + CARD_GAP));
+        egui::Rect::from_min_size(min, egui::vec2(w, h))
+    })
+}
+
+/// Wrapped text of at most `max_rows` rows, ellipsized, never wider than `width`.
+fn clipped_text(
+    painter: &egui::Painter,
+    text: &str,
+    font: egui::FontId,
+    color: egui::Color32,
+    width: f32,
+    max_rows: usize,
+) -> std::sync::Arc<egui::Galley> {
+    let mut job = egui::text::LayoutJob::simple(text.to_owned(), font, color, width);
+    job.wrap.max_rows = max_rows;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('\u{2026}');
+    painter.layout_job(job)
+}
+
+/// Draws one card inside `rect`, clipped to it; returns true when clicked.
+fn card_ui(app: &App, ui: &mut egui::Ui, card: &SessionCard, rect: egui::Rect) -> bool {
+    let resp = ui
+        .interact(
+            rect,
+            ui.make_persistent_id(("card", card.id)),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
     let fill = if resp.hovered() {
         theme::BG_HOVER
     } else {
@@ -453,48 +507,99 @@ fn card_ui(app: &App, ui: &mut egui::Ui, card: &SessionCard, width: f32) -> bool
         egui::Stroke::new(1.0, theme::BORDER),
         egui::StrokeKind::Inside,
     );
-    let inner = rect.shrink(12.0);
+    let inner = rect.shrink(CARD_PAD);
+    if inner.width() <= 0.0 || inner.height() <= 0.0 {
+        return resp.clicked();
+    }
     let status = app
         .sessions
         .get(&card.id)
         .map_or(SessionStatus::Closed, |vm| vm.status.clone());
     let excerpt = card.excerpt.as_deref().unwrap_or(&card.preview_snippet);
     let excerpt: String = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
-    ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| {
-        ui.shrink_clip_rect(inner);
-        ui.spacing_mut().item_spacing.y = 4.0;
-        let title = if card.title.is_empty() {
-            "New session"
-        } else {
-            &card.title
-        };
-        ui.add(
-            egui::Label::new(RichText::new(title).strong())
-                .truncate()
-                .selectable(false),
+    let title = if card.title.is_empty() {
+        "New session"
+    } else {
+        &card.title
+    };
+    let painter = ui.painter().with_clip_rect(inner);
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let line_h = painter
+        .layout_no_wrap("Ag".into(), small.clone(), theme::TEXT_MUTED)
+        .size()
+        .y;
+
+    // Top-down: title, badge row, excerpt; the time/status row is pinned to the bottom.
+    let title = clipped_text(
+        &painter,
+        title,
+        egui::TextStyle::Body.resolve(ui.style()),
+        ui.visuals().strong_text_color(),
+        inner.width(),
+        2,
+    );
+    let mut y = inner.top();
+    painter.galley(egui::pos2(inner.left(), y), title.clone(), theme::TEXT);
+    y += title.size().y + ROW_GAP;
+
+    let badge_h = line_h + 4.0;
+    let bottom = egui::Rect::from_min_max(
+        egui::pos2(inner.left(), (inner.bottom() - line_h).max(inner.top())),
+        inner.max,
+    );
+    let badges = egui::Rect::from_min_size(
+        egui::pos2(inner.left(), y),
+        egui::vec2(inner.width(), badge_h),
+    );
+    y += badge_h + ROW_GAP;
+    let rows = ((bottom.top() - ROW_GAP - y) / line_h).floor();
+    if rows >= 1.0 && !excerpt.is_empty() {
+        let g = clipped_text(
+            &painter,
+            &excerpt,
+            small,
+            theme::TEXT_MUTED,
+            inner.width(),
+            rows as usize,
         );
-        ui.horizontal(|ui| {
-            origin_badge(ui, card.origin);
-            ui.label(RichText::new("Claude").small().color(theme::CLAUDE));
-            ui.label(
+        painter.galley(egui::pos2(inner.left(), y), g, theme::TEXT_MUTED);
+    }
+
+    let row = |ui: &mut egui::Ui, r: egui::Rect, content: &mut dyn FnMut(&mut egui::Ui)| {
+        if r.top() >= inner.bottom() {
+            return;
+        }
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(r)
+                .layout(Layout::left_to_right(Align::Center)),
+            |ui| {
+                ui.shrink_clip_rect(inner);
+                ui.style_mut().interaction.selectable_labels = false;
+                content(ui);
+            },
+        );
+    };
+    row(ui, badges, &mut |ui| {
+        origin_badge(ui, card.origin);
+        ui.label(RichText::new("Claude").small().color(theme::CLAUDE));
+        ui.add(
+            egui::Label::new(
                 RichText::new(app.workspace_name(card.workspace_id))
                     .small()
                     .color(theme::TEXT_MUTED),
-            );
-        });
-        ui.add(
-            egui::Label::new(RichText::new(excerpt).small().color(theme::TEXT_MUTED))
-                .selectable(false),
+            )
+            .truncate(),
         );
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(relative_time(card.updated_at))
-                    .small()
-                    .color(theme::TEXT_MUTED),
-            );
-            let (text, color) = status_badge(&status);
-            ui.label(RichText::new(text).small().color(color));
-        });
+    });
+    row(ui, bottom, &mut |ui| {
+        ui.label(
+            RichText::new(relative_time(card.updated_at))
+                .small()
+                .color(theme::TEXT_MUTED),
+        );
+        let (text, color) = status_badge(&status);
+        ui.label(RichText::new(text).small().color(color));
     });
     resp.clicked()
 }
@@ -521,6 +626,7 @@ fn relative_time(t: OffsetDateTime) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -545,5 +651,106 @@ mod tests {
             Some("Resets in 1h 30m")
         );
         assert_eq!(reset_text(&window(10.0, None, now), now), None);
+    }
+
+    /// `(text rects, frame rects)` the top bar draws at window width `width`.
+    fn top_bar_rects(width: f32) -> (Vec<egui::Rect>, Vec<egui::Rect>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-ui-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let now = OffsetDateTime::now_utc();
+        app.quota = vec![
+            window(80.0, Some(5400), now),
+            QuotaWindow {
+                kind: QuotaKind::SevenDay,
+                ..window(20.0, Some(90_000), now)
+            },
+        ];
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 760.0),
+            )),
+            ..Default::default()
+        };
+        // The second pass settles sizes that depend on the first.
+        ctx.run_ui(input(), |ui| top_bar(&mut app, ui))
+            .textures_delta
+            .clear();
+        let mut out = ctx.run_ui(input(), |ui| top_bar(&mut app, ui));
+        out.textures_delta.clear();
+        let _ = std::fs::remove_dir_all(&dir);
+        let (mut texts, mut frames) = (Vec::new(), Vec::new());
+        fn collect(
+            shape: &egui::Shape,
+            width: f32,
+            t: &mut Vec<egui::Rect>,
+            f: &mut Vec<egui::Rect>,
+        ) {
+            match shape {
+                egui::Shape::Text(s) => t.push(s.galley.rect.translate(s.pos.to_vec2())),
+                // The bar's own background spans the window; widget frames never do.
+                egui::Shape::Rect(r) if r.rect.width() < width * 0.9 => f.push(r.rect),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| collect(s, width, t, f)),
+                _ => {}
+            }
+        }
+        for c in &out.shapes {
+            collect(&c.shape, width, &mut texts, &mut frames);
+        }
+        (texts, frames)
+    }
+
+    fn assert_no_overlaps(width: f32) {
+        let (texts, frames) = top_bar_rects(width);
+        assert!(texts.len() > 8, "top bar drew {} texts", texts.len());
+        for (i, a) in texts.iter().enumerate() {
+            assert!(a.max.x <= width, "text {a:?} leaves the window at {width}");
+            for b in &texts[i + 1..] {
+                let o = a.intersect(*b);
+                assert!(
+                    o.width() < 0.5 || o.height() < 0.5,
+                    "text overlap {a:?} / {b:?} at width {width}"
+                );
+            }
+        }
+        // Frames may nest (a bar inside its track) but never partly cover one another.
+        for (i, a) in frames.iter().enumerate() {
+            for b in &frames[i + 1..] {
+                let o = a.intersect(*b);
+                let nested = a.contains_rect(*b) || b.contains_rect(*a);
+                assert!(
+                    nested || o.width() < 0.5 || o.height() < 0.5,
+                    "frame overlap {a:?} / {b:?} at width {width}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn top_bar_has_no_overlaps_from_min_window_width_up() {
+        for width in [crate::MIN_WINDOW_SIZE[0], 1400.0, 1600.0, 2000.0, 3000.0] {
+            assert_no_overlaps(width);
+        }
+    }
+
+    #[test]
+    fn tiles_fill_the_area_exactly_at_any_size() {
+        for (w, h) in [(700.0, 400.0), (1000.0, 640.0), (2400.0, 1200.0)] {
+            let area = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(w, h));
+            let tiles: Vec<_> = tile_rects(area).collect();
+            assert_eq!(tiles.len(), PAGE_SIZE as usize);
+            assert_eq!(tiles[0].min, area.min);
+            assert!((tiles[8].max - area.max).length() < 0.01);
+            assert!(tiles
+                .iter()
+                .all(|t| (t.width() - tiles[0].width()).abs() < 0.01));
+            assert!(tiles.windows(2).all(|p| !p[0].intersects(p[1])));
+        }
     }
 }

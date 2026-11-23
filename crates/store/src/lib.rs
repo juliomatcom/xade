@@ -3,6 +3,7 @@
 mod reader;
 mod schema;
 mod search;
+pub mod throwaway;
 mod writer;
 
 use thiserror::Error;
@@ -11,7 +12,7 @@ use xade_core::{SessionId, SessionOrigin, WorkspaceId};
 
 pub use reader::{ImportRef, StoreReader};
 pub use schema::SCHEMA_VERSION;
-pub use writer::{StoreWriter, WriteOp, WriterHandle};
+pub use writer::{PruneCounts, StoreWriter, WriteOp, WriterHandle};
 
 #[derive(Debug, Error)]
 pub enum StoreError {

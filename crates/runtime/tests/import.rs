@@ -108,6 +108,11 @@ fn imported(psid: &str, title: &str, cwd: &std::path::Path, age_secs: i64) -> Im
     }
 }
 
+/// Imports skip temp dirs, so these tests live under the target dir instead.
+fn non_temp_dir() -> tempfile::TempDir {
+    tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap()
+}
+
 async fn import(h: &mut common::Harness) -> (u32, u32) {
     h.tx.send(ManagerCmd::Import).unwrap();
     let ev = h
@@ -121,10 +126,11 @@ async fn import(h: &mut common::Harness) -> (u32, u32) {
 
 #[tokio::test]
 async fn import_is_idempotent_and_groups_by_workspace() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = non_temp_dir();
     let provider = Arc::new(FakeProvider::default());
     let mut h = common::start(dir.path(), provider.clone()).await;
     let elsewhere = dir.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).unwrap();
     *provider.import.lock().unwrap() = vec![
         imported("a", "first", &h.cwd, 100),
         imported("b", "second", &elsewhere, 50),
@@ -181,7 +187,7 @@ async fn import_is_idempotent_and_groups_by_workspace() {
 
 #[tokio::test]
 async fn xade_sessions_and_live_sessions_are_never_overwritten() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = non_temp_dir();
     let provider = Arc::new(FakeProvider::default());
     let mut h = common::start(dir.path(), provider.clone()).await;
 
@@ -252,5 +258,41 @@ async fn xade_sessions_and_live_sessions_are_never_overwritten() {
     assert_eq!(
         h.reader.load_session(cc.id).await.unwrap().0.title,
         "cc newer"
+    );
+}
+
+#[tokio::test]
+async fn throwaway_cwds_are_skipped_and_earlier_leftovers_pruned() {
+    let dir = non_temp_dir();
+    let provider = Arc::new(FakeProvider::default());
+    let mut h = common::start(dir.path(), provider.clone()).await;
+    let temp = tempfile::tempdir().unwrap();
+    let gone = dir.path().join("gone");
+    *provider.import.lock().unwrap() = vec![
+        imported("ok", "kept", &h.cwd, 100),
+        imported("tmp", "in temp", temp.path(), 90),
+        imported("gone", "missing dir", &gone, 80),
+    ];
+    assert_eq!(import(&mut h).await, (1, 0));
+    let all = h.reader.list_sessions(None, None, 0, 24).await.unwrap();
+    assert_eq!(all.items.len(), 1);
+    assert_eq!(h.reader.list_workspaces().await.unwrap().len(), 1);
+
+    // A leftover from an older run (directory gone since) is removed with its workspace.
+    let leftover = dir.path().join("leftover");
+    std::fs::create_dir_all(&leftover).unwrap();
+    *provider.import.lock().unwrap() = vec![imported("late", "late", &leftover, 70)];
+    assert_eq!(import(&mut h).await, (1, 0));
+    assert_eq!(h.reader.list_workspaces().await.unwrap().len(), 2);
+    std::fs::remove_dir(&leftover).unwrap();
+    assert_eq!(import(&mut h).await, (0, 0));
+    assert_eq!(h.reader.list_workspaces().await.unwrap().len(), 1);
+    assert_eq!(
+        h.reader
+            .list_sessions(None, None, 0, 24)
+            .await
+            .unwrap()
+            .total,
+        1
     );
 }
