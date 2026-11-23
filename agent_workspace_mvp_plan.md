@@ -648,7 +648,7 @@ flowchart TD
 | Action | Keys | VS Code analogue |
 |---|---|---|
 | New session in the selected workspace | Cmd+N | New file |
-| Focus search | Cmd+P | Quick Open |
+| Open session picker | Cmd+P | Quick Open |
 | Send prompt | Cmd+Enter | Chat submit |
 | Stop the current turn | Cmd+. | Cancel |
 | Close the focused session window | Cmd+W | Close editor |
@@ -662,6 +662,8 @@ flowchart TD
 | Keyboard shortcuts | Cmd+K Cmd+S | Keyboard Shortcuts |
 | Close a modal | Esc | — |
 
+- **Session picker (Quick Open):** `Cmd+P`, or an "Open session" button in the top bar, which shows in both views. It opens a centered popup with a search field, using the same fuzzy search as Home, across all workspaces and both origins. The results list shows title, origin badge, workspace and relative time; already-open sessions are marked. Up/Down moves the selection and Enter opens it, adding a window and auto-tiling. Esc closes the popup. This is how to put several old sessions side by side without leaving the Workspace view.
+- **Home:** Cmd+click on a card opens that session in the background and stays on Home, so several can be opened in a row. A plain click opens it and switches to Workspace, as today.
 - Chords: after `Cmd+K`, wait up to 1.5 s for the second key, and show a muted "Cmd+K …" hint in the status bar meanwhile. Plain shortcuts are consumed with `ctx.input_mut(|i| i.consume_shortcut(..))` so text fields don't also receive them.
 - Tests cover the table having no duplicate bindings, chord state transitions, and the modal rendering headless.
 
