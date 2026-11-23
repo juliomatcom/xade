@@ -292,6 +292,7 @@ mod tests {
             input,
             error: None,
             md_cache: egui_commonmark::CommonMarkCache::default(),
+            path_links: Default::default(),
             diff: None,
             settings_pending: false,
             collapsed: false,

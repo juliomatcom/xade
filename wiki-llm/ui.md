@@ -8,6 +8,7 @@
 - Maximize (`App.maximized`) fills the central area with that window and collapses the others into header strips above it; restore or Tile re-tiles.
 - `messages` holds finalized blocks only; `live_text` is the block in flight and is cleared when `AssistantText` finalizes it; thinking is an ephemeral token count, never persisted.
 - Permissions: non-code tools get a banner (Approve / Approve & Enable Auto / Deny); code-change tools never render inline, their request opens the diff modal (Accept / Accept & Enable Auto / Cancel = deny) and Esc or close only hides it, leaving the card's "Review changes".
+- Paths in finalized user and assistant messages (plain text or inline code, not code blocks; relative to the session cwd, `~/` and `:line` suffixes accepted) become links only if they are an existing file on first render (`widgets/path_links.rs`, cached per message); a click opens the file through `App::open_path`. The editor highlights with bat's syntax set (two-face); markdown code blocks keep syntect's defaults.
 - "Open in VS Code" runs `code --goto <path>:<line>`; the `code` binary is resolved once at startup (`$PATH`, then known macOS locations).
 - Button glyphs live only in `icons.rs`; a unit test asserts each exists in egui's default fonts, which needs the `monochrome_emoji_fonts` feature on `egui`.
 - `ManagerCmd::Import` runs at startup after a good preflight (and a recovering Retry) and from the sidebar; `ImportDone` re-runs the home query and workspace list.

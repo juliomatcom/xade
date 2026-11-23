@@ -249,6 +249,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     let mut closes = Vec::new();
     let mut reloads = Vec::new();
+    let mut opens = Vec::new();
     let mut toggle_max = None;
     let mut user_moved = false;
     let mut pressed = None;
@@ -356,6 +357,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let (true, WindowKind::Session(id)) = (out.reload, *kind) {
             reloads.push(id);
         }
+        opens.extend(out.open_file.take());
         {
             let (c, w, a) = taken.geom();
             *c = collapsed;
@@ -411,6 +413,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     for id in reloads {
         app.reload_session(id);
+    }
+    for path in opens {
+        app.open_path(path);
     }
 }
 
@@ -584,6 +589,7 @@ mod tests {
             input: "draft".into(),
             error: Some("boom".into()),
             md_cache: CommonMarkCache::default(),
+            path_links: Default::default(),
             diff: DiffData::build("Edit", edit, Some(patch), Path::new("/tmp/nope")).map(|data| {
                 DiffState {
                     tool_use_id: "t2".into(),

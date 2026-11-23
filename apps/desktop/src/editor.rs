@@ -3,11 +3,12 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant, SystemTime};
 
 use egui::{RichText, TextStyle};
 use egui_commonmark::CommonMarkCache;
-use egui_extras::syntax_highlighting::{highlight, CodeTheme};
+use egui_extras::syntax_highlighting::{highlight_with, CodeTheme, SyntectSettings};
 
 use crate::session_view::ViewOut;
 use crate::widgets::markdown::markdown;
@@ -18,6 +19,13 @@ use crate::{chrome, theme};
 pub const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
 /// How often open files are compared with their mtime on disk.
 pub const DISK_POLL: Duration = Duration::from_secs(2);
+
+/// bat's syntax set (two-face): far more languages than syntect's defaults. One static, since
+/// egui memoizes highlighting by the settings' address.
+static SYNTAX: LazyLock<SyntectSettings> = LazyLock::new(|| SyntectSettings {
+    ps: two_face::syntax::extra_newlines(),
+    ..SyntectSettings::default()
+});
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct EditorId(pub u32);
@@ -62,6 +70,16 @@ impl EditorVm {
 
     fn is_markdown(&self) -> bool {
         self.language() == "md"
+    }
+
+    /// What syntect matches a syntax by: the extension, else the file name (`Dockerfile`).
+    fn syntax_token(&self) -> String {
+        let Some(path) = self.path.as_deref() else {
+            return "md".into();
+        };
+        path.extension()
+            .or_else(|| path.file_name())
+            .map_or_else(String::new, |s| s.to_string_lossy().into_owned())
     }
 
     /// Replaces the text with the file's current content.
@@ -291,9 +309,16 @@ fn edit(ui: &mut egui::Ui, vm: &mut EditorVm) {
         .collect::<Vec<_>>()
         .join("\n");
     let theme = CodeTheme::from_style(ui.style());
-    let language = vm.language();
+    let language = vm.syntax_token();
     let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, _wrap: f32| {
-        let mut job = highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), language);
+        let mut job = highlight_with(
+            ui.ctx(),
+            ui.style(),
+            &theme,
+            buf.as_str(),
+            &language,
+            &SYNTAX,
+        );
         job.wrap.max_width = f32::INFINITY;
         ui.fonts_mut(|f| f.layout_job(job))
     };
@@ -404,6 +429,8 @@ mod tests {
             ("b.md", false),
             ("c.md", true),
             ("d.xyz", false),
+            ("e.tsx", false),
+            ("Dockerfile", false),
         ] {
             let id = ed.create(
                 Some(PathBuf::from(format!("/tmp/xade-nope/{name}"))),
@@ -420,6 +447,28 @@ mod tests {
         assert_eq!(vm.title(), "Untitled-1.md");
         vm.disk_changed = true;
         frames(vm, 2);
+    }
+
+    #[test]
+    fn extended_syntax_set_covers_common_languages() {
+        for token in [
+            "ts",
+            "tsx",
+            "toml",
+            "swift",
+            "kt",
+            "Dockerfile",
+            "tf",
+            "vue",
+            "svelte",
+            "zig",
+            "proto",
+        ] {
+            assert!(
+                SYNTAX.ps.find_syntax_by_extension(token).is_some(),
+                "{token}"
+            );
+        }
     }
 
     #[test]

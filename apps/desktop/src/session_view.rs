@@ -19,6 +19,8 @@ pub struct ViewOut {
     pub maximize: bool,
     /// Close the session and reopen it with what other processes wrote.
     pub reload: bool,
+    /// A file path clicked in the transcript, to open in Xade's editor.
+    pub open_file: Option<std::path::PathBuf>,
 }
 
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
@@ -42,7 +44,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
         });
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE)
-        .show(ui, |ui| conversation::show(ui, vm));
+        .show(ui, |ui| out.open_file = conversation::show(ui, vm));
     out
 }
 

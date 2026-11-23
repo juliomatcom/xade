@@ -29,6 +29,7 @@ use crate::keymap::{self, Action, Chord};
 use crate::running::{self, PendingOpen};
 use crate::widgets::delete_modal::{self, PendingDelete};
 use crate::widgets::keymaps_modal;
+use crate::widgets::path_links::PathLinks;
 use crate::widgets::session_picker::{self, PickerState};
 use crate::workspace::{Tiling, WindowKind};
 use crate::{home, logging, status_bar, theme, workspace};
@@ -114,6 +115,7 @@ pub struct SessionVm {
     pub input: String,
     pub error: Option<String>,
     pub md_cache: CommonMarkCache,
+    pub path_links: PathLinks,
     /// The diff modal, when open.
     pub diff: Option<DiffState>,
     /// A model or effort change waits for the next turn.
@@ -1367,6 +1369,7 @@ impl App {
                 input: String::new(),
                 error: None,
                 md_cache: CommonMarkCache::default(),
+                path_links: PathLinks::default(),
                 diff: None,
                 settings_pending: false,
                 collapsed: false,

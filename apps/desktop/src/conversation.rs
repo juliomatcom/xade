@@ -1,6 +1,7 @@
 //! The scrolling transcript of one session.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use egui::RichText;
 use egui_commonmark::CommonMarkCache;
@@ -9,13 +10,18 @@ use xade_core::{Message, Role, SessionStatus};
 use crate::app::SessionVm;
 use crate::theme;
 use crate::widgets::markdown::markdown;
+use crate::widgets::path_links::PathLinks;
 use crate::widgets::tool_card::{self, CardStatus};
 
-pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) {
+/// Draws the transcript; returns a file path the user clicked.
+pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
     let mut review = None;
+    let mut open = None;
     let SessionVm {
+        cwd,
         messages,
         md_cache,
+        path_links,
         live_text,
         thinking_tokens,
         status,
@@ -43,8 +49,19 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) {
                     ui.set_width(ui.available_width());
                     for m in messages.iter() {
                         row(ui, |ui| match m.role {
-                            Role::User => user_bubble(ui, md_cache, m),
-                            Role::Assistant => assistant(ui, md_cache, m.id, &m.content_text),
+                            Role::User => {
+                                open = open
+                                    .take()
+                                    .or(user_bubble(ui, md_cache, path_links, cwd, m));
+                            }
+                            Role::Assistant => {
+                                let id = m.id;
+                                let text = &m.content_text;
+                                let clicked = assistant(ui, |ui| {
+                                    path_links.markdown(ui, md_cache, cwd, id, text)
+                                });
+                                open = open.take().or(clicked);
+                            }
                             Role::ToolCall => {
                                 let result = m.tool_use_id.as_deref().and_then(|t| results.get(t));
                                 let card_status = match result {
@@ -75,7 +92,10 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) {
                         ui.add_space(6.0);
                     }
                     if !live_text.is_empty() {
-                        assistant(ui, md_cache, "live", live_text);
+                        assistant(ui, |ui| {
+                            markdown(ui, md_cache, "live", live_text);
+                            None
+                        });
                     }
                     if let (Some(n), true) = (*thinking_tokens, live_text.is_empty()) {
                         ui.horizontal(|ui| {
@@ -94,6 +114,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) {
     if let Some(id) = review {
         vm.open_diff(&id);
     }
+    open
 }
 
 /// One transcript row in its own scope, so its allocated rect is observable in tests.
@@ -110,7 +131,14 @@ fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 /// User messages longer than this many lines show a head and a "Show all" toggle.
 const USER_PREVIEW_LINES: usize = 30;
 
-fn user_bubble(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &Message) {
+fn user_bubble(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    links: &mut PathLinks,
+    cwd: &Path,
+    m: &Message,
+) -> Option<PathBuf> {
+    let mut clicked = None;
     let indent = ui.available_width() * 0.15;
     let total = m.content_text.lines().count();
     let long = total > USER_PREVIEW_LINES;
@@ -137,7 +165,7 @@ fn user_bubble(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &Message) {
                     } else {
                         m.content_text.as_str()
                     };
-                    markdown(ui, cache, m.id, shown);
+                    clicked = links.markdown(ui, cache, cwd, m.id, shown);
                     if long {
                         let label = if open {
                             "Show less".to_string()
@@ -151,14 +179,14 @@ fn user_bubble(ui: &mut egui::Ui, cache: &mut CommonMarkCache, m: &Message) {
                 });
             });
     });
+    clicked
 }
 
+/// The assistant avatar beside `body`, which draws the text.
 fn assistant(
     ui: &mut egui::Ui,
-    cache: &mut CommonMarkCache,
-    id: impl std::hash::Hash + std::fmt::Debug,
-    text: &str,
-) {
+    body: impl FnOnce(&mut egui::Ui) -> Option<PathBuf>,
+) -> Option<PathBuf> {
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
         ui.painter().rect_filled(rect, 4.0, theme::CLAUDE);
@@ -169,8 +197,9 @@ fn assistant(
             egui::FontId::proportional(12.0),
             theme::BG_APP,
         );
-        ui.vertical(|ui| markdown(ui, cache, id, text));
-    });
+        ui.vertical(body).inner
+    })
+    .inner
 }
 
 #[cfg(test)]
@@ -295,6 +324,7 @@ mod tests {
             input: String::new(),
             error: None,
             md_cache: CommonMarkCache::default(),
+            path_links: Default::default(),
             diff: None,
             settings_pending: false,
             collapsed: false,
