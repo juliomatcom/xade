@@ -1,5 +1,5 @@
 import { useState } from "react";
-import JadeLogo from "./JadeLogo";
+import LazyLogo from "./LazyLogo";
 
 const REPO = "https://github.com/juliomatcom/xade";
 const RELEASES = `${REPO}/releases/latest`;
@@ -224,7 +224,7 @@ export default function App() {
               </div>
             </div>
             <div className="mx-auto aspect-square w-full max-w-xs">
-              <JadeLogo />
+              <LazyLogo />
             </div>
           </div>
         </section>

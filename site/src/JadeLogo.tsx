@@ -97,10 +97,10 @@ export default function JadeLogo() {
     resize();
 
     const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
-    const clock = new THREE.Clock();
+    const t0 = performance.now();
     let raf = 0;
     const tick = () => {
-      const t = clock.getElapsedTime();
+      const t = (performance.now() - t0) / 1000;
       const idleY = reduce ? 0 : Math.sin(t * 0.6) * 0.18;
       const idleX = reduce ? 0 : Math.cos(t * 0.45) * 0.06;
       logo.rotation.y += (target.y + idleY - logo.rotation.y) * 0.06;
