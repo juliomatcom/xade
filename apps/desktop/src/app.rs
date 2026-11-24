@@ -562,6 +562,8 @@ impl App {
     /// Applies `next`; fonts are rebuilt only when the family changed (or at startup with one).
     fn apply_config(&mut self, ctx: &egui::Context, next: Config) {
         theme::set_font_size(ctx, next.font_size);
+        theme::set_palette(next.theme.clone());
+        theme::refresh(ctx);
         keymap::set_current(next.shortcuts.clone());
         if next.font_family != self.config.font_family {
             let defs = match next.font_family.as_deref().map(config::font_definitions) {
@@ -1654,7 +1656,7 @@ impl App {
                 pending_permission: None,
                 input: String::new(),
                 error: None,
-                md_cache: CommonMarkCache::default(),
+                md_cache: crate::widgets::markdown::new_cache(),
                 path_links: PathLinks::default(),
                 diff: None,
                 changes: Default::default(),
@@ -2150,7 +2152,7 @@ impl App {
             home::sidebar(self, ui);
         }
         let frame = egui::Frame::new()
-            .fill(theme::BG_PANEL)
+            .fill(theme::bg_panel())
             .inner_margin(egui::Margin::same(16));
         egui::CentralPanel::default()
             .frame(frame)

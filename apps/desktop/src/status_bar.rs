@@ -103,7 +103,7 @@ fn fps_text(fps: f32) -> String {
 
 pub fn show(app: &App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
-        .fill(theme::BG_STATUS)
+        .fill(theme::bg_status())
         .inner_margin(egui::Margin::symmetric(12, 4));
     egui::Panel::bottom("status_bar")
         .frame(frame)
@@ -121,7 +121,7 @@ pub fn show(app: &App, ui: &mut egui::Ui) {
                                 ui.label(
                                     RichText::new(app.fps.label())
                                         .small()
-                                        .color(theme::TEXT_MUTED),
+                                        .color(theme::text_muted()),
                                 )
                                 .on_hover_text(
                                     "Frames per second. Idle: the rate Xade could sustain, \
@@ -140,23 +140,23 @@ fn providers(app: &App, ui: &mut egui::Ui) {
     for p in &app.providers {
         let err = app.home.preflight_error.as_deref();
         let color = if err.is_none() {
-            theme::OK
+            theme::ok()
         } else {
-            theme::DANGER
+            theme::danger()
         };
         let text = match p.account_label() {
             Some(label) => format!("{} ({label})", p.display_name()),
             None => p.display_name().to_string(),
         };
         ui.label(RichText::new("\u{25CF}").small().color(color));
-        ui.label(RichText::new(text).small().color(theme::TEXT_MUTED))
+        ui.label(RichText::new(text).small().color(theme::text_muted()))
             .on_hover_text(err.unwrap_or("Logged in"));
     }
 }
 
 /// The providers, the directory name and its git state.
 fn left(app: &App, ui: &mut egui::Ui) {
-    let muted = |s: String| RichText::new(s).small().color(theme::TEXT_MUTED);
+    let muted = |s: String| RichText::new(s).small().color(theme::text_muted());
     providers(app, ui);
     if let Some(first) = app.chord.pending(Instant::now()) {
         let first = keymap::stroke_label(&first, cfg!(target_os = "macos"));

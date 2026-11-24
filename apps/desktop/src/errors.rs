@@ -228,10 +228,10 @@ pub fn modal(ctx: &egui::Context, queue: &ErrorQueue) -> ModalAction {
                 RichText::new(format!("{} {}", icons::WARNING, report.title))
                     .strong()
                     .size(18.0)
-                    .color(theme::DANGER),
+                    .color(theme::danger()),
             );
             if count > 1 {
-                ui.label(RichText::new(format!("\u{d7}{count}")).color(theme::TEXT_MUTED));
+                ui.label(RichText::new(format!("\u{d7}{count}")).color(theme::text_muted()));
             }
         });
         ui.add_space(6.0);
@@ -267,9 +267,9 @@ pub fn modal(ctx: &egui::Context, queue: &ErrorQueue) -> ModalAction {
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let dismiss = egui::Button::new(
-                    RichText::new(icons::with(icons::CLOSE, "Dismiss")).color(theme::TEXT),
+                    RichText::new(icons::with(icons::CLOSE, "Dismiss")).color(theme::text()),
                 )
-                .fill(theme::ACCENT);
+                .fill(theme::accent());
                 if ui.add(dismiss).clicked() {
                     action = ModalAction::Dismiss;
                 }
@@ -277,7 +277,7 @@ pub fn modal(ctx: &egui::Context, queue: &ErrorQueue) -> ModalAction {
                     ui.label(
                         RichText::new(format!("{more} more"))
                             .small()
-                            .color(theme::TEXT_MUTED),
+                            .color(theme::text_muted()),
                     );
                 }
             });

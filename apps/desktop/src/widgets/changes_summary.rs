@@ -94,8 +94,8 @@ impl ChangesCache {
 
 fn counts(ui: &mut egui::Ui, added: usize, removed: usize) {
     // Right-to-left, so the removed count goes first.
-    ui.label(RichText::new(format!("\u{2212}{removed}")).color(theme::DANGER));
-    ui.label(RichText::new(format!("+{added}")).color(theme::OK));
+    ui.label(RichText::new(format!("\u{2212}{removed}")).color(theme::danger()));
+    ui.label(RichText::new(format!("+{added}")).color(theme::ok()));
 }
 
 /// Where a card's list came from, which sets how it words itself.
@@ -118,8 +118,8 @@ pub fn show(
 ) -> Option<usize> {
     let mut clicked = None;
     egui::Frame::new()
-        .fill(theme::BG_RAISED)
-        .stroke(Stroke::new(1.0, theme::BORDER))
+        .fill(theme::bg_raised())
+        .stroke(Stroke::new(1.0, theme::border()))
         .corner_radius(6)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
@@ -150,8 +150,8 @@ pub fn show(
                 let (added, removed) = files
                     .iter()
                     .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
-                ui.label(RichText::new(format!("+{added}")).color(theme::OK));
-                ui.label(RichText::new(format!("\u{2212}{removed}")).color(theme::DANGER));
+                ui.label(RichText::new(format!("+{added}")).color(theme::ok()));
+                ui.label(RichText::new(format!("\u{2212}{removed}")).color(theme::danger()));
             });
             state.show_body_unindented(ui, |ui| {
                 for (i, f) in files.iter().enumerate() {
@@ -161,7 +161,7 @@ pub fn show(
                             counts(ui, f.added, f.removed);
                             ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                                 let name =
-                                    RichText::new(rel.display().to_string()).color(theme::ACCENT);
+                                    RichText::new(rel.display().to_string()).color(theme::accent());
                                 let row = ui.add(egui::Button::new(name).frame(false).truncate());
                                 if row.clicked() {
                                     clicked = Some(i);

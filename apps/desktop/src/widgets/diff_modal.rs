@@ -100,7 +100,8 @@ pub fn show(
                         action = ModalAction::Cancel;
                     }
                     let accept = |t: &str| {
-                        egui::Button::new(RichText::new(t).color(theme::TEXT)).fill(theme::ACCENT)
+                        egui::Button::new(RichText::new(t).color(theme::text()))
+                            .fill(theme::accent())
                     };
                     if ui
                         .add(accept(&icons::with(icons::ACCEPT, "Accept")))
@@ -121,7 +122,7 @@ pub fn show(
         });
         ui.separator();
         if data.too_large {
-            ui.label(RichText::new("File too large to diff").color(theme::TEXT_MUTED));
+            ui.label(RichText::new("File too large to diff").color(theme::text_muted()));
         } else {
             body(ui, data);
         }
@@ -160,7 +161,7 @@ fn body(ui: &mut egui::Ui, data: &DiffData) {
                             egui::Align2::LEFT_CENTER,
                             label,
                             TextStyle::Small.resolve(ui.style()),
-                            theme::TEXT_MUTED,
+                            theme::text_muted(),
                         );
                     }
                     Row::Pair(l, r) => {
@@ -185,13 +186,13 @@ fn paint_cell(
     code_theme: &CodeTheme,
 ) {
     let Some(cell) = cell else {
-        ui.painter().rect_filled(rect, 0.0, theme::BG_APP);
+        ui.painter().rect_filled(rect, 0.0, theme::bg_app());
         return;
     };
     let bg = match cell.kind {
         Kind::Same => Color32::TRANSPARENT,
-        Kind::Del => theme::DIFF_DEL_BG,
-        Kind::Add => theme::DIFF_ADD_BG,
+        Kind::Del => theme::diff_del_bg(),
+        Kind::Add => theme::diff_add_bg(),
     };
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, bg);
@@ -201,7 +202,7 @@ fn paint_cell(
         egui::Align2::RIGHT_CENTER,
         cell.line_no.to_string(),
         font,
-        theme::TEXT_MUTED,
+        theme::text_muted(),
     );
     let job = highlight_with(
         ui.ctx(),
@@ -216,5 +217,5 @@ fn paint_cell(
         rect.left() + GUTTER,
         rect.center().y - galley.size().y / 2.0,
     );
-    painter.galley(pos, galley, theme::TEXT);
+    painter.galley(pos, galley, theme::text());
 }

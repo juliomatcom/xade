@@ -97,5 +97,5 @@ pub fn badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
 
 /// The neutral badge editor windows carry where sessions show their origin.
 pub fn file_badge(ui: &mut egui::Ui) {
-    badge(ui, "File", theme::TEXT_MUTED);
+    badge(ui, "File", theme::text_muted());
 }

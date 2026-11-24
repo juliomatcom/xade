@@ -36,7 +36,7 @@ pub(super) fn context_donut(ui: &mut egui::Ui, u: &UsageTotals) {
     painter.circle_stroke(
         center,
         radius,
-        egui::Stroke::new(DONUT_STROKE, theme::BORDER_STRONG),
+        egui::Stroke::new(DONUT_STROKE, theme::border_strong()),
     );
     if let Some(f) = context_fraction(u).filter(|f| *f > 0.0) {
         painter.add(egui::Shape::line(
@@ -72,11 +72,10 @@ fn context_text(u: &UsageTotals) -> String {
 
 pub(super) fn usage_text(u: &UsageTotals) -> String {
     format!(
-        "in {} · out {} · cache {} · ${:.2}",
+        "in {} · out {} · cache {}",
         fmt_tokens(u.input_tokens),
         fmt_tokens(u.output_tokens),
         fmt_tokens(u.cache_read_tokens),
-        u.cost_usd
     )
 }
 
@@ -96,8 +95,8 @@ mod tests {
         assert_eq!(context_fraction(&u), Some(0.5));
         u.context_tokens_used = 5000;
         assert_eq!(context_fraction(&u), Some(1.0));
-        assert_eq!(theme::usage_color(0.0), theme::OK, "empty is green");
-        assert_eq!(theme::usage_color(1.0), theme::DANGER, "full is red");
+        assert_eq!(theme::usage_color(0.0), theme::ok(), "empty is green");
+        assert_eq!(theme::usage_color(1.0), theme::danger(), "full is red");
     }
 
     #[test]
@@ -123,7 +122,7 @@ mod tests {
             cost_usd: 0.1234,
         };
         assert_eq!(context_text(&u), "ctx 50.0k / 200.0k (25%)");
-        assert_eq!(usage_text(&u), "in 1.2k · out 300 · cache 5.0k · $0.12");
+        assert_eq!(usage_text(&u), "in 1.2k · out 300 · cache 5.0k");
         assert_eq!(context_text(&UsageTotals::default()), "ctx —");
         let imported = UsageTotals {
             context_tokens_used: 42_000,

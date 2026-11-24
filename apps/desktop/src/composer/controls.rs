@@ -44,7 +44,7 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
         let attach = resp
             .on_hover_text("Attach files (or type @ or drop files here): adds @path mentions")
             .clicked();
-        ui.label(RichText::new("Model").small().color(theme::TEXT_MUTED));
+        ui.label(RichText::new("Model").small().color(theme::text_muted()));
         let current = models
             .iter()
             .find(|m| m.id == vm.session.model_id)
@@ -77,7 +77,7 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
                     }
                 }
             });
-        ui.label(RichText::new("Thinking").small().color(theme::TEXT_MUTED));
+        ui.label(RichText::new("Thinking").small().color(theme::text_muted()));
         egui::ComboBox::from_id_salt(("effort", id))
             .selected_text(effort_label(vm.session.effort))
             .width(80.0)
@@ -100,16 +100,16 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
         let (text, fill, fg, stroke) = if on {
             (
                 icons::with(icons::AUTO, "Auto: ON"),
-                theme::OK_BG,
-                theme::OK,
-                theme::OK,
+                theme::ok_bg(),
+                theme::ok(),
+                theme::ok(),
             )
         } else {
             (
                 icons::with(icons::AUTO, "Auto: OFF"),
-                theme::BG_HOVER,
-                theme::TEXT,
-                theme::BORDER,
+                theme::bg_hover(),
+                theme::text(),
+                theme::border(),
             )
         };
         let pill = egui::Button::new(RichText::new(text).small().color(fg))
@@ -127,7 +127,7 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
             ui.label(
                 RichText::new("applies to next turn")
                     .small()
-                    .color(theme::WARN),
+                    .color(theme::warn()),
             );
         }
         // Session stats take the rest of the row, right-aligned; they are cut with "…" when
@@ -137,7 +137,8 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
             context_donut(ui, u);
             let stats = usage_text(u);
             ui.add(
-                egui::Label::new(RichText::new(&stats).small().color(theme::TEXT_MUTED)).truncate(),
+                egui::Label::new(RichText::new(&stats).small().color(theme::text_muted()))
+                    .truncate(),
             )
             .on_hover_text(stats);
         });

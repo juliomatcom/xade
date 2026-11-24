@@ -94,7 +94,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                                 }
                             }
                             Role::System => {
-                                ui.label(RichText::new(&m.content_text).color(theme::TEXT_MUTED));
+                                ui.label(RichText::new(&m.content_text).color(theme::text_muted()));
                             }
                             Role::ToolResult => {}
                         });
@@ -150,7 +150,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                             ui.add(egui::Spinner::new().size(12.0));
                             ui.label(
                                 RichText::new(format!("Thinking… ~{n} tokens"))
-                                    .color(theme::TEXT_MUTED),
+                                    .color(theme::text_muted()),
                             );
                         });
                     }
@@ -164,14 +164,14 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                                 crate::home::relative_time(m.created_at)
                             ))
                             .small()
-                            .color(theme::TEXT_MUTED),
+                            .color(theme::text_muted()),
                         )
                         .on_hover_text(m.created_at.to_string());
                         ui.ctx()
                             .request_repaint_after(std::time::Duration::from_secs(30));
                     }
                     if let Some(e) = error {
-                        ui.label(RichText::new(&*e).color(theme::DANGER));
+                        ui.label(RichText::new(&*e).color(theme::danger()));
                     }
                 });
         });
@@ -217,8 +217,8 @@ fn user_bubble(
     ui.horizontal_top(|ui| {
         ui.add_space(indent);
         egui::Frame::new()
-            .fill(theme::BG_RAISED)
-            .stroke(egui::Stroke::new(1.0, theme::ACCENT))
+            .fill(theme::bg_raised())
+            .stroke(egui::Stroke::new(1.0, theme::border_light()))
             .corner_radius(8)
             .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
@@ -227,8 +227,8 @@ fn user_bubble(
                 ui.vertical(|ui| {
                     if let Some(d) = Delivery::of(m) {
                         let (label, color) = match d {
-                            Delivery::Queued => ("Queued", theme::TEXT_MUTED),
-                            Delivery::Steered => ("Steering", theme::WARN),
+                            Delivery::Queued => ("Queued", theme::text_muted()),
+                            Delivery::Steered => ("Steering", theme::warn()),
                         };
                         ui.label(RichText::new(label).small().strong().color(color));
                     }

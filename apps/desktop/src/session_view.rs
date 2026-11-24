@@ -40,8 +40,8 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
         .resizable(false)
         .frame(
             egui::Frame::new()
-                .fill(theme::BG_WINDOW)
-                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .fill(theme::bg_window())
+                .stroke(egui::Stroke::new(1.0, theme::border()))
                 .inner_margin(egui::Margin::same(8)),
         )
         .show(ui, |ui| {
@@ -90,7 +90,7 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
         |ui| {
             status_dot(ui, &vm.status);
             if !cwd.is_empty() {
-                ui.label(RichText::new(cwd).small().color(theme::TEXT_MUTED))
+                ui.label(RichText::new(cwd).small().color(theme::text_muted()))
                     .on_hover_text(vm.cwd.display().to_string());
             }
             if let Some(tex) = conversation::claude_symbol(ui.ctx()) {
@@ -112,7 +112,7 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
 fn fork_strips(ui: &mut egui::Ui, vm: &SessionVm) -> bool {
     if let Some(location) = &vm.sync.elsewhere {
         egui::Frame::new()
-            .fill(theme::WARN)
+            .fill(theme::warn())
             .inner_margin(egui::Margin::symmetric(10, 4))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -123,7 +123,7 @@ fn fork_strips(ui: &mut egui::Ui, vm: &SessionVm) -> bool {
                              Close one of them.",
                             icons::WARNING
                         ))
-                        .color(theme::BG_APP),
+                        .color(theme::bg_app()),
                     )
                     .truncate(),
                 );
@@ -134,8 +134,8 @@ fn fork_strips(ui: &mut egui::Ui, vm: &SessionVm) -> bool {
     let mut reload = false;
     if running::updated_elsewhere(t.mtime, t.own_write, idle) {
         egui::Frame::new()
-            .fill(theme::BG_RAISED)
-            .stroke(egui::Stroke::new(1.0, theme::WARN))
+            .fill(theme::bg_raised())
+            .stroke(egui::Stroke::new(1.0, theme::warn()))
             .inner_margin(egui::Margin::symmetric(10, 2))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -143,7 +143,7 @@ fn fork_strips(ui: &mut egui::Ui, vm: &SessionVm) -> bool {
                     ui.label(
                         RichText::new("Updated elsewhere \u{2014}")
                             .small()
-                            .color(theme::WARN),
+                            .color(theme::warn()),
                     );
                     reload = ui.small_button("Reload").clicked();
                 });
@@ -154,12 +154,12 @@ fn fork_strips(ui: &mut egui::Ui, vm: &SessionVm) -> bool {
 
 fn status_dot(ui: &mut egui::Ui, status: &SessionStatus) {
     let (color, tip) = match status {
-        SessionStatus::Idle => (theme::TEXT_MUTED, "Idle".to_string()),
-        SessionStatus::Streaming => (theme::ACCENT, "Streaming".to_string()),
-        SessionStatus::NeedsApproval => (theme::WARN, "Needs approval".to_string()),
-        SessionStatus::Error(e) => (theme::DANGER, format!("Error: {e}")),
-        SessionStatus::Starting => (theme::TEXT_MUTED, "Starting".to_string()),
-        SessionStatus::Closed => (theme::TEXT_MUTED, "Closed".to_string()),
+        SessionStatus::Idle => (theme::text_muted(), "Idle".to_string()),
+        SessionStatus::Streaming => (theme::accent(), "Streaming".to_string()),
+        SessionStatus::NeedsApproval => (theme::warn(), "Needs approval".to_string()),
+        SessionStatus::Error(e) => (theme::danger(), format!("Error: {e}")),
+        SessionStatus::Starting => (theme::text_muted(), "Starting".to_string()),
+        SessionStatus::Closed => (theme::text_muted(), "Closed".to_string()),
     };
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
     let mut radius = 4.0;
@@ -183,15 +183,15 @@ fn banner(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     let mut respond = None;
     let mut review = false;
     egui::Frame::new()
-        .fill(theme::BG_RAISED)
-        .stroke(egui::Stroke::new(1.0, theme::WARN))
+        .fill(theme::bg_raised())
+        .stroke(egui::Stroke::new(1.0, theme::warn()))
         .corner_radius(6)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let summary = crate::widgets::tool_card::summary(&p.tool_name, &p.input_json);
-            ui.label(RichText::new(format!("Allow {}?", p.tool_name)).color(theme::WARN));
-            ui.add(egui::Label::new(RichText::new(summary).color(theme::TEXT_MUTED)).truncate());
+            ui.label(RichText::new(format!("Allow {}?", p.tool_name)).color(theme::warn()));
+            ui.add(egui::Label::new(RichText::new(summary).color(theme::text_muted())).truncate());
             ui.horizontal_wrapped(|ui| {
                 if p.reviewable && is_code_change(&p.tool_name) {
                     review = ui
@@ -246,7 +246,7 @@ fn subagent_window(ctx: &egui::Context, vm: &mut SessionVm) {
             ui.label(
                 RichText::new("This is a subagent working for the main chat. Read-only.")
                     .small()
-                    .color(theme::TEXT_MUTED),
+                    .color(theme::text_muted()),
             );
             ui.separator();
             std::mem::swap(&mut vm.messages, &mut vm.subagent_msgs);

@@ -84,7 +84,7 @@ fn view_toggle(app: &mut App, ui: &mut egui::Ui, area: egui::Rect) {
             .layout(Layout::left_to_right(Align::Center)),
     );
     let used = egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0, theme::BORDER_STRONG))
+        .stroke(egui::Stroke::new(1.0, theme::border_strong()))
         .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(4, 2))
         .show(&mut child, |ui| {
@@ -115,8 +115,8 @@ fn view_toggle(app: &mut App, ui: &mut egui::Ui, area: egui::Rect) {
 
 pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
-        .fill(theme::BG_APP)
-        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .fill(theme::bg_app())
+        .stroke(egui::Stroke::new(1.0, theme::border()))
         .inner_margin(egui::Margin::symmetric(12, 8));
     egui::Panel::top("top_bar").frame(frame).show(ui, |ui| {
         let area = ui.max_rect();
@@ -162,9 +162,9 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                         enabled,
                         egui::Button::new(
                             RichText::new(icons::with(icons::NEW_SESSION, "New Session"))
-                                .color(theme::TEXT),
+                                .color(theme::text()),
                         )
-                        .fill(theme::ACCENT),
+                        .fill(theme::accent()),
                     )
                     .on_disabled_hover_text("Select a workspace in the sidebar first");
                 let new = new.on_hover_text(format!(
@@ -286,11 +286,11 @@ fn quota_meter(ui: &mut egui::Ui, kind: QuotaKind, q: Option<&QuotaWindow>) {
     ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
         ui.spacing_mut().item_spacing.y = 2.0;
         ui.horizontal(|ui| {
-            ui.label(RichText::new(label).small().color(theme::TEXT_MUTED));
+            ui.label(RichText::new(label).small().color(theme::text_muted()));
             let used = q.map_or("\u{2014}".to_string(), |q| {
                 format!("{:.0}% Used", quota_pct(q, now))
             });
-            ui.label(RichText::new(used).small().color(theme::TEXT_MUTED));
+            ui.label(RichText::new(used).small().color(theme::text_muted()));
         });
         let fraction = q.map_or(0.0, |q| (quota_pct(q, now) / 100.0).clamp(0.0, 1.0));
         ui.add(
@@ -300,7 +300,7 @@ fn quota_meter(ui: &mut egui::Ui, kind: QuotaKind, q: Option<&QuotaWindow>) {
                 .fill(theme::usage_color(fraction)),
         );
         if let Some(text) = q.and_then(|q| reset_text(q, now)) {
-            ui.label(RichText::new(text).small().color(theme::TEXT_MUTED));
+            ui.label(RichText::new(text).small().color(theme::text_muted()));
         }
     });
     ui.add_space(8.0);
@@ -336,8 +336,8 @@ fn duration_text(secs: i64) -> String {
 
 pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
-        .fill(theme::BG_SIDEBAR)
-        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .fill(theme::bg_sidebar())
+        .stroke(egui::Stroke::new(1.0, theme::border()))
         .inner_margin(egui::Margin::same(12));
     egui::Panel::left("sidebar")
         .frame(frame)
@@ -457,14 +457,14 @@ fn import_button(app: &mut App, ui: &mut egui::Ui) {
             ui.label(
                 RichText::new("Importing\u{2026}")
                     .small()
-                    .color(theme::TEXT_MUTED),
+                    .color(theme::text_muted()),
             );
         });
     } else if let Some((imported, updated)) = app.home.import_result {
         ui.label(
             RichText::new(format!("Imported {imported}, updated {updated}"))
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
         );
     }
 }
@@ -479,8 +479,8 @@ fn origin_label(o: SessionOrigin) -> &'static str {
 /// Small outlined tag naming where a session was created.
 pub fn origin_badge(ui: &mut egui::Ui, origin: SessionOrigin) {
     let color = match origin {
-        SessionOrigin::Xade => theme::ACCENT,
-        SessionOrigin::ClaudeCode => theme::CLAUDE,
+        SessionOrigin::Xade => theme::accent(),
+        SessionOrigin::ClaudeCode => theme::claude(),
     };
     egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, color))
@@ -515,19 +515,19 @@ fn origin_filter(app: &mut App, ui: &mut egui::Ui) {
 }
 
 fn heading(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).small().color(theme::TEXT_MUTED));
+    ui.label(RichText::new(text).small().color(theme::text_muted()));
 }
 
 pub fn grid(app: &mut App, ui: &mut egui::Ui) {
     if let Some(err) = app.home.preflight_error.clone() {
         egui::Frame::new()
-            .fill(theme::BG_RAISED)
-            .stroke(egui::Stroke::new(1.0, theme::DANGER))
+            .fill(theme::bg_raised())
+            .stroke(egui::Stroke::new(1.0, theme::danger()))
             .corner_radius(6)
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
                 ui.label(
-                    RichText::new(format!("Claude is not available: {err}")).color(theme::DANGER),
+                    RichText::new(format!("Claude is not available: {err}")).color(theme::danger()),
                 );
                 if ui.button(icons::with(icons::RETRY, "Retry")).clicked() {
                     app.retry_preflight();
@@ -560,7 +560,7 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
                 }
                 ui.label(
                     RichText::new(format!("Page {} of {}", page + 1, pages))
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                 );
                 if ui
                     .add_enabled(
@@ -593,7 +593,7 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
             "No sessions yet. Select a workspace and start a new session."
         };
         ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
-            ui.label(RichText::new(msg).color(theme::TEXT_MUTED));
+            ui.label(RichText::new(msg).color(theme::text_muted()));
         });
     }
     for (card, rect) in app.home.cards.iter().zip(tile_rects(area)) {
@@ -668,15 +668,15 @@ fn card_ui(
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     let fill = if resp.hovered() {
-        theme::BG_HOVER
+        theme::bg_hover()
     } else {
-        theme::BG_RAISED
+        theme::bg_raised()
     };
     ui.painter().rect(
         rect,
         6,
         fill,
-        egui::Stroke::new(1.0, theme::BORDER),
+        egui::Stroke::new(1.0, theme::border()),
         egui::StrokeKind::Inside,
     );
     let inner = rect.shrink(CARD_PAD);
@@ -714,7 +714,7 @@ fn card_ui(
     let painter = ui.painter().with_clip_rect(inner);
     let small = egui::TextStyle::Small.resolve(ui.style());
     let line_h = painter
-        .layout_no_wrap("Ag".into(), small.clone(), theme::TEXT_MUTED)
+        .layout_no_wrap("Ag".into(), small.clone(), theme::text_muted())
         .size()
         .y;
 
@@ -728,7 +728,7 @@ fn card_ui(
         2,
     );
     let mut y = inner.top();
-    painter.galley(egui::pos2(inner.left(), y), title.clone(), theme::TEXT);
+    painter.galley(egui::pos2(inner.left(), y), title.clone(), theme::text());
     y += title.size().y + ROW_GAP;
 
     let badge_h = line_h + 4.0;
@@ -757,7 +757,7 @@ fn card_ui(
             ui.disable();
             ui.set_opacity(1.0);
             ui.style_mut().override_text_style = Some(egui::TextStyle::Small);
-            ui.visuals_mut().override_text_color = Some(theme::TEXT_MUTED);
+            ui.visuals_mut().override_text_color = Some(theme::text_muted());
             markdown(
                 ui,
                 &mut app.home.md_cache.borrow_mut(),
@@ -784,12 +784,12 @@ fn card_ui(
     };
     row(ui, badges, &mut |ui| {
         origin_badge(ui, card.origin);
-        ui.label(RichText::new("Claude").small().color(theme::CLAUDE));
+        ui.label(RichText::new("Claude").small().color(theme::claude()));
         ui.add(
             egui::Label::new(
                 RichText::new(app.workspace_name(card.workspace_id))
                     .small()
-                    .color(theme::TEXT_MUTED),
+                    .color(theme::text_muted()),
             )
             .truncate(),
         );
@@ -798,7 +798,7 @@ fn card_ui(
         ui.label(
             RichText::new(relative_time(card.updated_at))
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
         );
         if running.is_none() {
             ui.label(running::cache_text(card.updated_at));
@@ -822,11 +822,11 @@ fn card_ui(
         );
         let (color, tip) = match running {
             Some(r) => (
-                theme::TEXT_MUTED.gamma_multiply(0.4),
+                theme::text_muted().gamma_multiply(0.4),
                 format!("Running in {} \u{2014} close it there first", r.location),
             ),
-            None if tr.hovered() => (theme::DANGER, "Delete forever".to_string()),
-            None => (theme::TEXT_MUTED, "Delete forever".to_string()),
+            None if tr.hovered() => (theme::danger(), "Delete forever".to_string()),
+            None => (theme::text_muted(), "Delete forever".to_string()),
         };
         ui.painter().text(
             trash.center(),
@@ -845,12 +845,12 @@ fn card_ui(
 
 fn status_badge(s: &SessionStatus) -> (&'static str, egui::Color32) {
     match s {
-        SessionStatus::Closed => ("Closed", theme::TEXT_MUTED),
-        SessionStatus::Starting => ("Starting", theme::TEXT_MUTED),
-        SessionStatus::Idle => ("Idle", theme::OK),
-        SessionStatus::Streaming => ("Streaming", theme::ACCENT),
-        SessionStatus::NeedsApproval => ("Needs approval", theme::WARN),
-        SessionStatus::Error(_) => ("Error", theme::DANGER),
+        SessionStatus::Closed => ("Closed", theme::text_muted()),
+        SessionStatus::Starting => ("Starting", theme::text_muted()),
+        SessionStatus::Idle => ("Idle", theme::ok()),
+        SessionStatus::Streaming => ("Streaming", theme::accent()),
+        SessionStatus::NeedsApproval => ("Needs approval", theme::warn()),
+        SessionStatus::Error(_) => ("Error", theme::danger()),
     }
 }
 

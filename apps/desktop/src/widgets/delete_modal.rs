@@ -40,8 +40,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             delete = ui
                 .add(
-                    egui::Button::new(RichText::new("Delete").color(theme::BG_APP))
-                        .fill(theme::DANGER),
+                    egui::Button::new(RichText::new("Delete").color(theme::bg_app()))
+                        .fill(theme::danger()),
                 )
                 .clicked();
             cancel = ui.button("Cancel").clicked();

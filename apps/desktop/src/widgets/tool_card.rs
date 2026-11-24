@@ -145,12 +145,12 @@ fn status_icon(ui: &mut egui::Ui, status: CardStatus) {
                 rect.right_bottom(),
             );
             if status == CardStatus::Ok {
-                let s = Stroke::new(1.8, theme::OK);
+                let s = Stroke::new(1.8, theme::ok());
                 let knee = egui::pos2(rect.left() + 4.0, rect.bottom() - 2.0);
                 p.line_segment([egui::pos2(rect.left() + 1.0, rect.center().y), knee], s);
                 p.line_segment([knee, egui::pos2(rect.right() - 1.0, rect.top() + 2.0)], s);
             } else {
-                let s = Stroke::new(1.8, theme::DANGER);
+                let s = Stroke::new(1.8, theme::danger());
                 p.line_segment([a, d], s);
                 p.line_segment([b, c], s);
             }
@@ -172,8 +172,8 @@ pub fn show(
     let id = Id::unique(("tool_card", call.id));
     let mut review = false;
     egui::Frame::new()
-        .fill(theme::BG_RAISED)
-        .stroke(Stroke::new(1.0, theme::BORDER))
+        .fill(theme::bg_terminal())
+        .stroke(Stroke::new(1.0, theme::border()))
         .corner_radius(6)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
@@ -182,7 +182,7 @@ pub fn show(
                 status_icon(ui, status);
                 ui.label(RichText::new(name).strong());
                 let text = summary(name, input);
-                ui.add(egui::Label::new(RichText::new(text).color(theme::TEXT_MUTED)).truncate());
+                ui.add(egui::Label::new(RichText::new(text).color(theme::text_muted())).truncate());
             };
             if is_code_change(name) {
                 ui.horizontal(head);

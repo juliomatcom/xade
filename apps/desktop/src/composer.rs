@@ -103,8 +103,8 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
         }
     }
     let input_box = egui::Frame::new()
-        .fill(theme::BG_HOVER)
-        .stroke(egui::Stroke::new(1.5, theme::BORDER_STRONG))
+        .fill(theme::bg_hover())
+        .stroke(egui::Stroke::new(1.5, theme::border_strong()))
         .corner_radius(8)
         .inner_margin(egui::Margin::same(6))
         .show(ui, |ui| {
@@ -143,9 +143,9 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
                     ui.horizontal(|ui| {
                         let can_send = (idle || running) && !vm.input.trim().is_empty();
                         let btn = egui::Button::new(
-                            RichText::new(icons::SEND).size(26.0).color(theme::TEXT),
+                            RichText::new(icons::SEND).size(26.0).color(theme::text()),
                         )
-                        .fill(theme::ACCENT)
+                        .fill(theme::accent())
                         .min_size(egui::vec2(BUTTON_SIZE, BUTTON_SIZE));
                         let mut resp = ui.add_enabled(can_send, btn);
                         if running {
@@ -159,9 +159,10 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
                         }
                         if streaming {
                             let stop = egui::Button::new(
-                                RichText::new(icons::with(icons::STOP, "Stop")).color(theme::TEXT),
+                                RichText::new(icons::with(icons::STOP, "Stop"))
+                                    .color(theme::text()),
                             )
-                            .fill(theme::DANGER)
+                            .fill(theme::danger())
                             .min_size(egui::vec2(0.0, BUTTON_SIZE));
                             if ui.add(stop).clicked() {
                                 vm.queued.clear();
@@ -198,7 +199,14 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
     }
     queued_rows(ui, vm);
 
-    out.attach = controls(ui, vm, env);
+    // The row under the box ends where the box does, not at the panel edge.
+    let box_width = input_box.response.rect.width();
+    out.attach = ui
+        .scope(|ui| {
+            ui.set_max_width(box_width);
+            controls(ui, vm, env)
+        })
+        .inner;
     out
 }
 
@@ -232,7 +240,7 @@ fn queued_rows(ui: &mut egui::Ui, vm: &mut SessionVm) {
                 egui::Label::new(
                     RichText::new(format!("Queued: {line}"))
                         .small()
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                 )
                 .truncate(),
             );

@@ -227,7 +227,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .filter(|k| app.window_exists(*k))
         .collect();
     if kinds.is_empty() {
-        ui.label(egui::RichText::new("Opening session…").color(theme::TEXT_MUTED));
+        ui.label(egui::RichText::new("Opening session…").color(theme::text_muted()));
         return;
     }
     let tiles = layout(
@@ -468,8 +468,8 @@ fn window<'a>(
         .resizable(!collapsed)
         .frame(
             egui::Frame::new()
-                .fill(theme::BG_WINDOW)
-                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .fill(theme::bg_window())
+                .stroke(egui::Stroke::new(1.0, theme::border()))
                 .corner_radius(8),
         );
     match applying {

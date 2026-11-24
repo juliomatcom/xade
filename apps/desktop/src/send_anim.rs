@@ -142,22 +142,22 @@ fn paint(painter: &egui::Painter, center: Pos2, t: f64) {
             .collect();
         painter.add(Shape::convex_polygon(
             poly,
-            fade(theme::ACCENT, f.crystal),
-            PathStroke::new(1.5 * k, fade(theme::ACCENT_HOVER, f.crystal)),
+            fade(theme::accent(), f.crystal),
+            PathStroke::new(1.5 * k, fade(theme::accent_hover(), f.crystal)),
         ));
         painter.line_segment(
             [
                 center + Vec2::new(-4.0, -3.0) * k,
                 center + Vec2::new(0.0, -9.0) * k,
             ],
-            Stroke::new(1.5 * k, fade(theme::OK, f.crystal)),
+            Stroke::new(1.5 * k, fade(theme::ok(), f.crystal)),
         );
     }
     if let Some((radius, alpha)) = f.flash {
         painter.circle_stroke(
             center,
             radius * k,
-            Stroke::new(2.0 * k, fade(theme::OK, alpha)),
+            Stroke::new(2.0 * k, fade(theme::ok(), alpha)),
         );
     }
     for (offset, spin, alpha) in f.shards {
@@ -172,8 +172,8 @@ fn paint(painter: &egui::Painter, center: Pos2, t: f64) {
         .collect();
         painter.add(Shape::convex_polygon(
             tri,
-            fade(theme::ACCENT, alpha),
-            PathStroke::new(k, fade(theme::ACCENT_HOVER, alpha)),
+            fade(theme::accent(), alpha),
+            PathStroke::new(k, fade(theme::accent_hover(), alpha)),
         ));
     }
     if let Some(a) = f.hammer {
@@ -184,7 +184,7 @@ fn paint(painter: &egui::Painter, center: Pos2, t: f64) {
         let across = Vec2::new(-along.y, along.x);
         painter.line_segment(
             [pivot, head],
-            Stroke::new(3.5 * k, fade(theme::TEXT_MUTED, f.hammer_alpha)),
+            Stroke::new(3.5 * k, fade(theme::text_muted(), f.hammer_alpha)),
         );
         let quad = vec![
             head + across * 9.0 * k - along * 5.0 * k,
@@ -194,7 +194,7 @@ fn paint(painter: &egui::Painter, center: Pos2, t: f64) {
         ];
         painter.add(Shape::convex_polygon(
             quad,
-            fade(theme::TEXT, f.hammer_alpha),
+            fade(theme::text(), f.hammer_alpha),
             Stroke::NONE,
         ));
     }

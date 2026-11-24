@@ -193,7 +193,7 @@ fn note(ui: &mut egui::Ui, depth: usize, text: &str) {
     let (rect, _) = row_rect(ui, Sense::hover());
     if ui.is_rect_visible(rect) {
         let x = rect.left() + INDENT * depth as f32 + CHEVRON_W;
-        paint_text(ui, rect, x, text, theme::TEXT_MUTED);
+        paint_text(ui, rect, x, text, theme::text_muted());
     }
 }
 
@@ -203,7 +203,7 @@ fn row(ui: &mut egui::Ui, root: &Path, depth: usize, e: &Entry, open: bool, dirt
     let (rect, resp) = row_rect(ui, Sense::click());
     if ui.is_rect_visible(rect) {
         if resp.hovered() {
-            ui.painter().rect_filled(rect, 3.0, theme::BG_HOVER);
+            ui.painter().rect_filled(rect, 3.0, theme::bg_hover());
         }
         let x = rect.left() + INDENT * depth as f32;
         let icon = match (e.kind, open) {
@@ -217,14 +217,14 @@ fn row(ui: &mut egui::Ui, root: &Path, depth: usize, e: &Entry, open: bool, dirt
             } else {
                 icons::COLLAPSED
             };
-            paint_text(ui, rect, x, chevron, theme::TEXT_MUTED);
+            paint_text(ui, rect, x, chevron, theme::text_muted());
         }
         paint_text(
             ui,
             rect,
             x + CHEVRON_W,
             &icons::with(icon, &e.name),
-            if dirty { theme::WARN } else { theme::TEXT },
+            if dirty { theme::warn() } else { theme::text() },
         );
     }
     let resp = resp

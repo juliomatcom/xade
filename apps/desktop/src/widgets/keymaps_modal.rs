@@ -14,7 +14,7 @@ pub fn show(ctx: &egui::Context) -> bool {
         ui.label(RichText::new("Keyboard shortcuts").strong().size(16.0));
         ui.add_space(6.0);
         for (group, name) in GROUPS {
-            ui.label(RichText::new(name).small().color(theme::TEXT_MUTED));
+            ui.label(RichText::new(name).small().color(theme::text_muted()));
             egui::Grid::new(("keymaps_group", name))
                 .num_columns(2)
                 .spacing([16.0, 4.0])
@@ -26,7 +26,7 @@ pub fn show(ctx: &egui::Context) -> bool {
                     {
                         ui.label(b.title);
                         egui::Frame::new()
-                            .fill(theme::BG_HOVER)
+                            .fill(theme::bg_hover())
                             .corner_radius(4)
                             .inner_margin(egui::Margin::symmetric(6, 1))
                             .show(ui, |ui| {
@@ -40,7 +40,7 @@ pub fn show(ctx: &egui::Context) -> bool {
         ui.label(
             RichText::new("Press ? outside a text field to open this list.")
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
         );
     });
     resp.should_close()

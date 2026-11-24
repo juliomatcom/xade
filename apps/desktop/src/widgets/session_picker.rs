@@ -76,7 +76,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         changed = edit.changed();
         ui.add_space(4.0);
         if st.results.is_empty() && files.is_empty() {
-            ui.label(RichText::new("No sessions found.").color(theme::TEXT_MUTED));
+            ui.label(RichText::new("No sessions found.").color(theme::text_muted()));
         }
         egui::ScrollArea::vertical()
             .max_height(360.0)
@@ -123,9 +123,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
 
 fn file_row(ui: &mut egui::Ui, name: &str, selected: bool) -> egui::Response {
     let fill = if selected {
-        theme::BG_HOVER
+        theme::bg_hover()
     } else {
-        theme::BG_RAISED
+        theme::bg_raised()
     };
     egui::Frame::new()
         .fill(fill)
@@ -145,9 +145,9 @@ fn file_row(ui: &mut egui::Ui, name: &str, selected: bool) -> egui::Response {
 
 fn row(app: &App, ui: &mut egui::Ui, card: &SessionCard, selected: bool) -> egui::Response {
     let fill = if selected {
-        theme::BG_HOVER
+        theme::bg_hover()
     } else {
-        theme::BG_RAISED
+        theme::bg_raised()
     };
     let inner = egui::Frame::new()
         .fill(fill)
@@ -159,19 +159,19 @@ fn row(app: &App, ui: &mut egui::Ui, card: &SessionCard, selected: bool) -> egui
                 ui.label(
                     RichText::new(home::relative_time(card.updated_at))
                         .small()
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                 );
                 let running = app.running_for(card);
                 if running.is_none() {
                     ui.label(running::cache_text(card.updated_at));
                 }
                 if app.open_windows.contains(&WindowKind::Session(card.id)) {
-                    ui.label(RichText::new("open").small().color(theme::OK));
+                    ui.label(RichText::new("open").small().color(theme::ok()));
                 }
                 ui.label(
                     RichText::new(app.workspace_name(card.workspace_id))
                         .small()
-                        .color(theme::TEXT_MUTED),
+                        .color(theme::text_muted()),
                 );
                 home::origin_badge(ui, card.origin);
                 if let Some(r) = running {

@@ -33,8 +33,8 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             quit = ui
                 .add(
-                    egui::Button::new(RichText::new("Quit").color(theme::BG_APP))
-                        .fill(theme::DANGER),
+                    egui::Button::new(RichText::new("Quit").color(theme::bg_app()))
+                        .fill(theme::danger()),
                 )
                 .clicked();
             cancel = ui.button("Cancel").clicked();

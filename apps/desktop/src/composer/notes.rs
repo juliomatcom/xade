@@ -100,22 +100,22 @@ pub(super) fn running_subagents(vm: &SessionVm) -> usize {
 pub(super) fn subagent_badge(ui: &mut egui::Ui, count: usize, active: bool) -> bool {
     let frame = egui::Frame::new()
         .fill(if active {
-            theme::CLAUDE.gamma_multiply(0.25)
+            theme::claude().gamma_multiply(0.25)
         } else {
             egui::Color32::TRANSPARENT
         })
-        .stroke(egui::Stroke::new(1.0, theme::CLAUDE))
+        .stroke(egui::Stroke::new(1.0, theme::claude()))
         .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(6, 0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.add(egui::Spinner::new().size(10.0).color(theme::CLAUDE));
+                ui.add(egui::Spinner::new().size(10.0).color(theme::claude()));
                 let text = if count == 1 {
                     "Subagent running".to_string()
                 } else {
                     format!("{count} subagents running")
                 };
-                ui.label(RichText::new(text).small().color(theme::CLAUDE));
+                ui.label(RichText::new(text).small().color(theme::claude()));
             });
         });
     let resp = ui
@@ -136,8 +136,8 @@ pub(super) fn subagent_badge(ui: &mut egui::Ui, count: usize, active: bool) -> b
 
 pub(super) fn note_frame(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new()
-        .fill(theme::BG_RAISED)
-        .stroke(egui::Stroke::new(1.0, theme::WARN))
+        .fill(theme::bg_raised())
+        .stroke(egui::Stroke::new(1.0, theme::warn()))
         .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
@@ -145,7 +145,7 @@ pub(super) fn note_frame(ui: &mut egui::Ui, text: &str) {
                 egui::Label::new(
                     RichText::new(icons::with(icons::WARNING, text))
                         .small()
-                        .color(theme::WARN),
+                        .color(theme::warn()),
                 )
                 .wrap(),
             );

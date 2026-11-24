@@ -134,7 +134,7 @@ pub(super) fn mention_popup_show(
                     } else {
                         "Listing files\u{2026}"
                     };
-                    ui.label(RichText::new(msg).small().color(theme::TEXT_MUTED));
+                    ui.label(RichText::new(msg).small().color(theme::text_muted()));
                 }
                 for (i, path) in vm.mention.matches.iter().enumerate() {
                     let row = egui::Button::selectable(i == vm.mention.selected, path)

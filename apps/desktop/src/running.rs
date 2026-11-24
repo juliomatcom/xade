@@ -39,8 +39,8 @@ pub fn cache_label(updated_at: OffsetDateTime, now: OffsetDateTime) -> (String, 
 
 pub fn cache_color(kind: CacheKind) -> egui::Color32 {
     match kind {
-        CacheKind::Fresh => theme::CACHE_FRESH,
-        CacheKind::Expired => theme::TEXT_MUTED,
+        CacheKind::Fresh => theme::cache_fresh(),
+        CacheKind::Expired => theme::text_muted(),
     }
 }
 
@@ -61,8 +61,8 @@ pub fn tooltip(r: &RunningSession) -> String {
 /// The running-elsewhere dot: steady yellow while idle, pulsing yellow (`t` in seconds) while busy.
 pub fn dot_color(state: RunState, t: f32) -> egui::Color32 {
     match state {
-        RunState::Idle => theme::WARN,
-        RunState::Busy => theme::WARN.gamma_multiply(0.55 + 0.45 * (t * 4.0).sin()),
+        RunState::Idle => theme::warn(),
+        RunState::Busy => theme::warn().gamma_multiply(0.55 + 0.45 * (t * 4.0).sin()),
     }
 }
 
@@ -222,7 +222,7 @@ pub fn confirm_modal(app: &mut App, ctx: &egui::Context) {
             RichText::new(format!("{} Session open elsewhere", icons::WARNING))
                 .strong()
                 .size(18.0)
-                .color(theme::WARN),
+                .color(theme::warn()),
         );
         ui.add_space(6.0);
         ui.label(format!(
@@ -233,8 +233,8 @@ pub fn confirm_modal(app: &mut App, ctx: &egui::Context) {
         ui.horizontal(|ui| {
             accept = ui
                 .add(
-                    egui::Button::new(RichText::new("Open anyway").color(theme::BG_APP))
-                        .fill(theme::WARN),
+                    egui::Button::new(RichText::new("Open anyway").color(theme::bg_app()))
+                        .fill(theme::warn()),
                 )
                 .clicked();
             cancel = ui.button("Cancel").clicked();
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn dot_is_yellow_steady_when_idle_and_pulses_when_busy() {
         for t in [0.0, 0.3, 1.0, 7.5] {
-            assert_eq!(dot_color(RunState::Idle, t), theme::WARN);
+            assert_eq!(dot_color(RunState::Idle, t), theme::warn());
         }
         let busy: Vec<_> = [0.0, 0.4, 0.8, 1.2]
             .iter()
@@ -291,7 +291,7 @@ mod tests {
             .collect();
         assert!(busy.iter().any(|c| *c != busy[0]), "busy dot is steady");
         // Same hue as WARN, never brighter.
-        assert!(busy.iter().all(|c| c.r() <= theme::WARN.r() && c.r() > 0));
+        assert!(busy.iter().all(|c| c.r() <= theme::warn().r() && c.r() > 0));
     }
 
     fn entry(id: &str, pid: u32, location: &str) -> RunningSession {

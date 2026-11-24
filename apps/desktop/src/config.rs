@@ -1,5 +1,5 @@
 //! User settings in `<data dir>/settings.json`: parsing, creation, live-reload polling and the
-//! font the file names. Colors and sizes stay in `theme.rs`.
+//! font and colors the file names. The color keys and defaults live in `theme.rs`.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 use serde_json::{json, Value};
 
 use crate::keymap::{self, Keymap};
+use crate::theme::Palette;
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.5;
 /// The family shipped inside the app (JetBrains Mono, SIL OFL); it needs no install.
@@ -46,6 +47,8 @@ pub struct Config {
     /// Whether the status bar shows the frame rate.
     pub show_fps: bool,
     pub shortcuts: Arc<Keymap>,
+    /// The `theme` block: hex colors by name; missing ones keep their defaults.
+    pub theme: Palette,
 }
 
 impl Default for Config {
@@ -56,6 +59,7 @@ impl Default for Config {
             send_while_running: SendMode::default(),
             show_fps: false,
             shortcuts: Arc::default(),
+            theme: Palette::default(),
         }
     }
 }
@@ -99,6 +103,12 @@ impl Config {
             Some(Value::Object(map)) => cfg.shortcuts = Arc::new(Keymap::parse(map)?),
             Some(_) => return Err("shortcuts must be an object".into()),
         }
+        match obj.get("theme") {
+            // A string was an old, unused key; it is ignored.
+            None | Some(Value::String(_)) => {}
+            Some(Value::Object(map)) => cfg.theme = Palette::parse(map)?,
+            Some(_) => return Err("theme must be an object of hex colors".into()),
+        }
         Ok(cfg)
     }
 }
@@ -124,6 +134,7 @@ fn defaults_json() -> String {
         "send_while_running": "queue",
         "show_fps": false,
         "shortcuts": keymap::default_shortcuts(),
+        "theme": Palette::defaults_json(),
     }))
     .unwrap_or_default()
 }
@@ -250,6 +261,24 @@ fn canonical_family(db: &fontdb::Database, family: &str) -> Option<String> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn theme_block_overrides_colors_and_a_bad_one_is_an_error() {
+        let cfg = Config::parse(r##"{"theme":{"bg_window":"#342c2c"}}"##).unwrap();
+        assert_eq!(
+            cfg.theme.bg_window,
+            egui::Color32::from_rgb(0x34, 0x2c, 0x2c)
+        );
+        assert!(Config::parse(r##"{"theme":{"bg_window":"nope"}}"##)
+            .unwrap_err()
+            .contains("theme.bg_window"));
+        assert!(Config::parse(r#"{"theme":5}"#).is_err());
+        assert_eq!(
+            Config::parse(&defaults_json()).unwrap(),
+            Config::default(),
+            "the file as first written means the defaults"
+        );
+    }
 
     #[test]
     fn defaults_partial_and_unknown_keys() {

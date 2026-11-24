@@ -148,7 +148,7 @@ impl Editors {
                 busy: false,
                 close_after_save: false,
                 preview: false,
-                md_cache: CommonMarkCache::default(),
+                md_cache: crate::widgets::markdown::new_cache(),
                 disk_mtime,
                 disk_changed: false,
                 collapsed: false,
@@ -324,7 +324,7 @@ fn disk_bar(ui: &mut egui::Ui, vm: &mut EditorVm) -> Option<String> {
         ui.label(
             RichText::new("Changed on disk")
                 .small()
-                .color(theme::TEXT_MUTED),
+                .color(theme::text_muted()),
         );
         if ui.small_button("Reload").clicked() {
             err = vm.reload().err();
@@ -370,7 +370,7 @@ fn edit(ui: &mut egui::Ui, vm: &mut EditorVm) {
                     egui::Label::new(
                         RichText::new(numbers)
                             .font(font.clone())
-                            .color(theme::TEXT_MUTED),
+                            .color(theme::text_muted()),
                     )
                     .selectable(false),
                 );
@@ -417,12 +417,13 @@ pub fn close_modal(ctx: &egui::Context, name: &str) -> Option<CloseChoice> {
                 .size(16.0),
         );
         ui.label(
-            RichText::new("Your changes are lost if you don't save them.").color(theme::TEXT_MUTED),
+            RichText::new("Your changes are lost if you don't save them.")
+                .color(theme::text_muted()),
         );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             if ui
-                .add(egui::Button::new("Save").fill(theme::ACCENT))
+                .add(egui::Button::new("Save").fill(theme::accent()))
                 .clicked()
             {
                 choice = Some(CloseChoice::Save);

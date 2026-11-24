@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Token colors for code blocks in chat messages. No background here: the block takes bg_terminal from the palette. -->
+<plist version="1.0">
+<dict>
+  <key>name</key><string>xade-code</string>
+  <key>settings</key>
+  <array>
+    <dict>
+      <key>settings</key>
+      <dict>
+        <key>foreground</key><string>#C0C5CE</string>
+        <key>caret</key><string>#C0C5CE</string>
+        <key>selection</key><string>#4F5B66</string>
+      </dict>
+    </dict>
+    <dict><key>scope</key><string>comment, punctuation.definition.comment</string>
+      <key>settings</key><dict><key>foreground</key><string>#65737E</string></dict></dict>
+    <dict><key>scope</key><string>string, constant.other.symbol</string>
+      <key>settings</key><dict><key>foreground</key><string>#A3BE8C</string></dict></dict>
+    <dict><key>scope</key><string>constant.numeric, constant.language, constant.character</string>
+      <key>settings</key><dict><key>foreground</key><string>#D08770</string></dict></dict>
+    <dict><key>scope</key><string>keyword, storage, storage.type</string>
+      <key>settings</key><dict><key>foreground</key><string>#B48EAD</string></dict></dict>
+    <dict><key>scope</key><string>entity.name.function, support.function, variable.function</string>
+      <key>settings</key><dict><key>foreground</key><string>#8FA1B3</string></dict></dict>
+    <dict><key>scope</key><string>entity.name.class, entity.name.type, support.class, support.type</string>
+      <key>settings</key><dict><key>foreground</key><string>#EBCB8B</string></dict></dict>
+    <dict><key>scope</key><string>variable, variable.parameter, entity.name.tag, meta.tag</string>
+      <key>settings</key><dict><key>foreground</key><string>#BF616A</string></dict></dict>
+    <dict><key>scope</key><string>keyword.operator, punctuation, support.constant</string>
+      <key>settings</key><dict><key>foreground</key><string>#96B5B4</string></dict></dict>
+  </array>
+</dict>
+</plist>
