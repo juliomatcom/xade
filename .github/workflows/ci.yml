@@ -57,10 +57,17 @@ jobs:
           if-no-files-found: error
 
   build-linux:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: x86_64
+          - runner: ubuntu-24.04-arm
+            arch: aarch64
     # Runs on pull requests too, so a Linux build break never blocks the release after merge.
     # eframe and rfd load wayland/xkbcommon/X11/GL libraries at runtime; the -dev packages
     # are a safety net for the build.
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -69,16 +76,16 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends libxkbcommon-dev libwayland-dev pkg-config
-      - name: Bundle Xade-linux-x86_64.tar.gz
+      - name: Bundle Xade-linux-${{ matrix.arch }}.tar.gz
         run: ./scripts/bundle-linux.sh "$PWD/dist"
       - uses: actions/upload-artifact@v4
         with:
-          name: xade-linux
-          path: dist/Xade-linux-x86_64.tar.gz
+          name: xade-linux-${{ matrix.arch }}
+          path: dist/Xade-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
   publish:
-    # One release per push to main carries both assets.
+    # One release per push to main carries every asset.
     if: github.event_name == 'push'
     needs: [build-macos, build-linux]
     runs-on: ubuntu-latest
@@ -97,6 +104,7 @@ jobs:
           VERSION="$(grep -m1 '^version' apps/desktop/Cargo.toml | cut -d'"' -f2)"
           TAG="v${VERSION}-build.${{ github.run_number }}"
           gh release create "$TAG" assets/Xade-macos-arm64.zip assets/Xade-linux-x86_64.tar.gz \
+            assets/Xade-linux-aarch64.tar.gz \
             --target "${{ github.sha }}" \
             --title "Xade $VERSION (build ${{ github.run_number }})" \
             --notes "Automated build of ${{ github.sha }}. Unsigned: right-click Xade.app > Open the first time."

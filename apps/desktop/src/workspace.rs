@@ -1,7 +1,7 @@
 //! Workspace view: one `egui::Window` per open session or editor, auto-tiled into a grid.
 
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::{Id, Order, Rect};
@@ -384,7 +384,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         match taken {
             Taken::Session(mut vm) => {
                 if let WindowKind::Session(id) = *kind {
-                    diff_modal_for(&ctx, id, &mut vm, &env);
+                    opens.extend(diff_modal_for(&ctx, id, &mut vm, &env));
                     app.sessions.insert(id, *vm);
                 }
             }
@@ -475,8 +475,13 @@ fn window<'a>(
 }
 
 /// Draws the session's diff modal, when open, and applies its decision.
-fn diff_modal_for(ctx: &egui::Context, id: SessionId, vm: &mut crate::app::SessionVm, env: &Env) {
-    let Some(diff) = &vm.diff else { return };
+fn diff_modal_for(
+    ctx: &egui::Context,
+    id: SessionId,
+    vm: &mut crate::app::SessionVm,
+    env: &Env,
+) -> Option<PathBuf> {
+    let diff = vm.diff.as_ref()?;
     let pending = vm
         .pending_permission
         .as_ref()
@@ -497,12 +502,17 @@ fn diff_modal_for(ctx: &egui::Context, id: SessionId, vm: &mut crate::app::Sessi
         pending.is_some(),
         env.vscode,
     );
+    let mut open = None;
     let decision = match action {
         ModalAction::Accept => Some((true, false)),
         ModalAction::AcceptAuto => Some((true, true)),
         ModalAction::Cancel => Some((false, false)),
         ModalAction::Close => {
             vm.diff = None;
+            None
+        }
+        ModalAction::OpenInXade => {
+            open = vm.diff.take().map(|d| d.data.path);
             None
         }
         ModalAction::None => None,
@@ -520,6 +530,7 @@ fn diff_modal_for(ctx: &egui::Context, id: SessionId, vm: &mut crate::app::Sessi
         vm.pending_permission = None;
         vm.diff = None;
     }
+    open
 }
 
 #[cfg(test)]
@@ -800,7 +811,7 @@ mod tests {
                 win.show(ctx, |ui| {
                     session_view::show(ui, &mut v, &env);
                 });
-                diff_modal_for(ctx, v.session.id, &mut v, &env);
+                let _ = diff_modal_for(ctx, v.session.id, &mut v, &env);
             });
         }
     }

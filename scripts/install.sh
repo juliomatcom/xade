@@ -21,11 +21,12 @@ case "$os-$arch" in
     asset="Xade-macos-arm64.zip"
     command -v unzip >/dev/null 2>&1 || die "unzip is required"
     ;;
-  Linux-x86_64)
-    asset="Xade-linux-x86_64.tar.gz"
+  Linux-x86_64 | Linux-aarch64 | Linux-arm64)
+    case "$arch" in arm64) arch="aarch64" ;; esac
+    asset="Xade-linux-$arch.tar.gz"
     command -v tar >/dev/null 2>&1 || die "tar is required"
     ;;
-  *) die "unsupported platform $os/$arch (supported: macOS arm64, Linux x86_64)" ;;
+  *) die "unsupported platform $os/$arch (supported: macOS arm64, Linux x86_64 and aarch64)" ;;
 esac
 url="${XADE_ASSET_URL:-$RELEASE_URL/$asset}"
 

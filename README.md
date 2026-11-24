@@ -28,7 +28,7 @@ Xade runs the official `claude` CLI that you already have installed and logged i
 
 ## Status
 
-Early MVP. macOS and Linux (x86_64). Claude Code is the only provider today.
+Early MVP. macOS and Linux (x86_64, aarch64). Claude Code is the only provider today.
 
 ## Install
 
@@ -38,7 +38,7 @@ Early MVP. macOS and Linux (x86_64). Claude Code is the only provider today.
 curl -fsSL https://raw.githubusercontent.com/juliomatcom/xade/main/scripts/install.sh | sh
 ```
 
-This installs the latest build: `Xade.app` into `/Applications` on macOS (Apple Silicon), or into `~/.local/share/xade` with a desktop entry on Linux (x86_64). It also installs the `xade` command into `~/.local/bin`; add that folder to your PATH if the script says so. Run the same command again to update.
+This installs the latest build: `Xade.app` into `/Applications` on macOS (Apple Silicon), or into `~/.local/share/xade` with a desktop entry on Linux (x86_64 or aarch64). It also installs the `xade` command into `~/.local/bin`; add that folder to your PATH if the script says so. Run the same command again to update.
 
 ```sh
 xade --help
@@ -48,7 +48,7 @@ xade <path>    # opens that folder as a workspace in a new window; `xade .` for 
 
 ### Downloads
 
-Builds are published on every push to main at https://github.com/juliomatcom/xade/releases/latest: `Xade-macos-arm64.zip` (unsigned: right-click Xade.app > Open the first time) and `Xade-linux-x86_64.tar.gz` (unpack, run `./xade`).
+Builds are published on every push to main at https://github.com/juliomatcom/xade/releases/latest: `Xade-macos-arm64.zip` (unsigned: right-click Xade.app > Open the first time) and `Xade-linux-x86_64.tar.gz` / `Xade-linux-aarch64.tar.gz` (unpack, run `./xade`).
 
 Linux needs a Vulkan-capable GPU driver and, for file dialogs, xdg-desktop-portal.
 

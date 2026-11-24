@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Build Xade in release mode and pack Xade-linux-x86_64.tar.gz into $1 (default: ./dist).
+# Build Xade in release mode and pack Xade-linux-<arch>.tar.gz (x86_64 or aarch64) into $1 (default: ./dist).
 # The archive holds the binary, a desktop entry and the icon; scripts/install.sh unpacks it.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 DEST_DIR="${1:-$ROOT/dist}"
-ARCHIVE="$DEST_DIR/Xade-linux-x86_64.tar.gz"
+ARCH="$(uname -m)"
+ARCHIVE="$DEST_DIR/Xade-linux-$ARCH.tar.gz"
 
 echo "Building xade (release)..."
 cargo build --release -p xade --manifest-path "$ROOT/Cargo.toml"

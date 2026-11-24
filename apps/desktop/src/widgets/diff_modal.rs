@@ -20,6 +20,8 @@ pub enum ModalAction {
     Cancel,
     /// Hide the modal without deciding.
     Close,
+    /// Hide the modal and open the file in Xade's editor.
+    OpenInXade,
 }
 
 /// `code` binary: `$PATH`, then the usual macOS locations (GUI apps lack the shell PATH).
@@ -78,6 +80,12 @@ pub fn show(
         ui.set_max_size(size);
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Review File Changes: {rel_path}")).strong());
+            if ui
+                .button(icons::with(icons::FILE, "Open in Xade"))
+                .clicked()
+            {
+                action = ModalAction::OpenInXade;
+            }
             if let Some(code) = vscode {
                 if ui
                     .button(icons::with(icons::VSCODE, "Open in VS Code"))
