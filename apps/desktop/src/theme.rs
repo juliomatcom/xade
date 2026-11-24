@@ -5,11 +5,11 @@ use egui::{Color32, CornerRadius, FontId, Stroke, TextStyle, Theme, Visuals};
 pub const BG_APP: Color32 = Color32::from_rgb(0x0F, 0x12, 0x16);
 pub const BG_PANEL: Color32 = Color32::from_rgb(0x16, 0x1A, 0x20);
 /// Session window frame and body, one step above `BG_PANEL`.
-pub const BG_WINDOW: Color32 = Color32::from_rgb(0x1A, 0x1F, 0x26);
-pub const BG_RAISED: Color32 = Color32::from_rgb(0x1E, 0x23, 0x2B);
+pub const BG_WINDOW: Color32 = Color32::from_rgb(0x23, 0x2A, 0x33);
+pub const BG_RAISED: Color32 = Color32::from_rgb(0x2B, 0x32, 0x3C);
 /// Hover fill, one step above `BG_RAISED`.
-pub const BG_HOVER: Color32 = Color32::from_rgb(0x27, 0x2D, 0x37);
-pub const BORDER: Color32 = Color32::from_rgb(0x2A, 0x30, 0x3A);
+pub const BG_HOVER: Color32 = Color32::from_rgb(0x34, 0x3C, 0x48);
+pub const BORDER: Color32 = Color32::from_rgb(0x3A, 0x42, 0x4E);
 /// Border of the message input: clearly visible against `BG_HOVER`.
 pub const BORDER_STRONG: Color32 = Color32::from_rgb(0x4B, 0x55, 0x63);
 pub const TEXT: Color32 = Color32::from_rgb(0xD6, 0xDA, 0xE1);

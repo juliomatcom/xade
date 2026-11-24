@@ -4912,7 +4912,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "xade"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "arboard",
  "dirs",
@@ -4943,7 +4943,7 @@ dependencies = [
 
 [[package]]
 name = "xade-claude"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "libc",
  "serde",
@@ -4958,7 +4958,7 @@ dependencies = [
 
 [[package]]
 name = "xade-core"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "serde",
  "serde_json",
@@ -4970,7 +4970,7 @@ dependencies = [
 
 [[package]]
 name = "xade-runtime"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "tempfile",
  "time",
@@ -4984,7 +4984,7 @@ dependencies = [
 
 [[package]]
 name = "xade-store"
-version = "0.3.4"
+version = "0.3.5"
 dependencies = [
  "nucleo-matcher",
  "rusqlite",
