@@ -4942,6 +4942,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "xade-antigravity"
+version = "0.3.10"
+dependencies = [
+ "serde_json",
+ "tracing",
+ "xade-core",
+]
+
+[[package]]
 name = "xade-claude"
 version = "0.3.10"
 dependencies = [

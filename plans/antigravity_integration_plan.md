@@ -233,7 +233,7 @@ Writes to stdin go through one writer (a mutex or channel). Read lines with no l
 - `import_sessions()` and `running_sessions()`: the trait defaults (empty) for v1.
 - `delete_session(id)`:
   - Validate the id against `[A-Za-z0-9_-]{1,128}`.
-  - Remove `~/.gemini/antigravity-cli/conversations/<id>.db` together with its `-wal`/`-shm` siblings, and the directory `~/.gemini/antigravity-cli/brain/<id>`. Both paths were verified to be per-conversation.
+  - Remove `~/.gemini/antigravity-cli/conversations/<id>.db` together with its `-wal`/`-shm` siblings, `annotations/<id>.pbtxt`, and the directory `brain/<id>`. Never write agy's own `conversation_summaries.db`.
   - Never follow symlinks. A missing file is `Ok`.
   - Resolve `~` from `$HOME`; no `$HOME` → `Ok` (nothing to delete).
 
