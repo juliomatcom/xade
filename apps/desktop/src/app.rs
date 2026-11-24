@@ -2037,9 +2037,10 @@ impl eframe::App for App {
         }
         let (tx, rx) = tokio::sync::oneshot::channel();
         if self.cmd_tx.send(ManagerCmd::ShutdownAll(tx)).is_ok() {
+            // The timer must be built inside the runtime; on this thread there is none.
             let waited = self
                 .rt
-                .block_on(tokio::time::timeout(Duration::from_secs(5), rx));
+                .block_on(async { tokio::time::timeout(Duration::from_secs(5), rx).await });
             if waited.is_err() {
                 tracing::warn!("sessions did not shut down within 5 s");
             }
@@ -2371,6 +2372,27 @@ mod tests {
         let ctx = egui::Context::default();
         let app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
         (app, dir)
+    }
+
+    #[test]
+    fn closing_the_window_waits_for_shutdown_without_panicking() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = test_app(&rt);
+        // `for_test` drops the manager's end, which would skip the wait entirely.
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        rt.spawn(async move {
+            if let Some(ManagerCmd::ShutdownAll(done)) = cmds.recv().await {
+                let _ = done.send(());
+            }
+        });
+        let started = Instant::now();
+        eframe::App::on_exit(&mut app);
+        assert!(
+            started.elapsed() < Duration::from_secs(4),
+            "did not wait for the ack"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Waits for the next bridge message and folds it in.

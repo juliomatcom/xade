@@ -315,13 +315,14 @@ fn quota_pct(q: &QuotaWindow, now: OffsetDateTime) -> f32 {
     }
 }
 
+/// Nothing once the window has ended: no session has started a new one, so there is no reset to
+/// count down to.
 fn reset_text(q: &QuotaWindow, now: OffsetDateTime) -> Option<String> {
-    let at = q.resets_at?;
-    Some(if at <= now {
-        "reset".into()
-    } else {
-        format!("Resets in {}", duration_text((at - now).whole_seconds()))
-    })
+    let at = q.resets_at.filter(|at| *at > now)?;
+    Some(format!(
+        "Resets in {}",
+        duration_text((at - now).whole_seconds())
+    ))
 }
 
 fn duration_text(secs: i64) -> String {
@@ -877,11 +878,11 @@ mod tests {
     }
 
     #[test]
-    fn past_reset_shows_zero_and_reset() {
+    fn past_reset_shows_zero_and_no_reset_text() {
         let now = OffsetDateTime::now_utc();
         let past = window(80.0, Some(-60), now);
         assert_eq!(quota_pct(&past, now), 0.0);
-        assert_eq!(reset_text(&past, now).as_deref(), Some("reset"));
+        assert_eq!(reset_text(&past, now), None);
         let future = window(80.0, Some(5400), now);
         assert_eq!(quota_pct(&future, now), 80.0);
         assert_eq!(
