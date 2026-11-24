@@ -1,5 +1,6 @@
 //! Reusable pieces of the session windows.
 
+pub mod about_modal;
 pub mod changes_summary;
 pub mod delete_modal;
 pub mod diff_modal;

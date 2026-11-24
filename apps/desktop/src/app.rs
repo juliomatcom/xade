@@ -27,6 +27,7 @@ use crate::file_tree::{self, FileTree, Listing, TreeAction};
 use crate::home::HomeState;
 use crate::keymap::{self, Action, Chord};
 use crate::running::{self, PendingOpen};
+use crate::widgets::about_modal;
 use crate::widgets::delete_modal::{self, PendingDelete};
 use crate::widgets::file_picker::{self, FilePicker};
 use crate::widgets::keymaps_modal;
@@ -292,6 +293,7 @@ pub struct App {
     pub fps: crate::status_bar::FpsMeter,
     pub sidebar_visible: bool,
     pub keymaps_open: bool,
+    pub about_open: bool,
     /// The session picker, when open.
     pub picker: Option<PickerState>,
     picker_generation: u64,
@@ -390,6 +392,7 @@ impl App {
             fps: crate::status_bar::FpsMeter::new(),
             sidebar_visible: true,
             keymaps_open: false,
+            about_open: false,
             picker: None,
             picker_generation: 0,
             file_picker: None,
@@ -468,6 +471,7 @@ impl App {
             fps: crate::status_bar::FpsMeter::new(),
             sidebar_visible: true,
             keymaps_open: false,
+            about_open: false,
             picker: None,
             picker_generation: 0,
             file_picker: None,
@@ -773,6 +777,15 @@ impl App {
         self.home.importing = self.cmd_tx.send(ManagerCmd::Import).is_ok();
     }
 
+    /// The Refresh button: imports every provider's history now and re-reads the lists, the
+    /// running sessions included, without waiting for their timers.
+    pub fn refresh_sessions(&mut self) {
+        self.start_import();
+        self.refresh_workspaces();
+        self.refresh_cards();
+        self.running_checked = None;
+    }
+
     /// Polls running sessions every `running::POLL`; one poll in flight at a time.
     fn poll_running(&mut self) {
         let due = self
@@ -781,9 +794,10 @@ impl App {
         if !due || self.running_inflight {
             return;
         }
-        let Some(provider) = self.providers.first().cloned() else {
+        if self.providers.is_empty() {
             return;
-        };
+        }
+        let providers = self.providers.clone();
         self.running_checked = Some(Instant::now());
         self.running_inflight = true;
         let live = self.live_provider_ids();
@@ -801,8 +815,11 @@ impl App {
             .collect();
         let bridge = self.bridge.clone();
         self.rt.spawn_blocking(move || {
-            let list =
-                running::exclude_own(provider.running_sessions(), &live, running::is_own_process);
+            let found = providers
+                .iter()
+                .flat_map(|p| p.running_sessions())
+                .collect();
+            let list = running::exclude_own(found, &live, running::is_own_process);
             let transcripts = running::stat_transcripts(jobs);
             bridge.send(UiMsg::Running { list, transcripts });
         });
@@ -1815,7 +1832,6 @@ impl App {
             }
             (_, AppEventKind::ImportDone { imported, updated }) => {
                 self.home.importing = false;
-                self.home.import_result = Some((imported, updated));
                 tracing::info!(imported, updated, "import done");
                 self.refresh_workspaces();
                 self.refresh_cards();
@@ -2293,6 +2309,7 @@ impl App {
         running::confirm_modal(self, &ctx);
         delete_modal::show(self, &ctx);
         quit_modal::show(self, &ctx);
+        about_modal::show(self, &ctx);
         self.editor_modal(&ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {
             self.keymaps_open = false;
@@ -2388,6 +2405,23 @@ mod tests {
         let cmd_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
         frame(&mut app, vec![p(true, cmd_shift)]);
         assert!(app.picker.is_some() && app.file_picker.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_forces_the_next_running_poll_and_a_new_list_read() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-app-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        app.running_checked = Some(Instant::now());
+        let before = app.home.generation;
+        app.refresh_sessions();
+        assert!(app.running_checked.is_none());
+        assert!(app.home.generation > before);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

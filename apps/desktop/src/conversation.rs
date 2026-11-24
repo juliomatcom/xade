@@ -43,6 +43,22 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
         status,
         SessionStatus::Streaming | SessionStatus::NeedsApproval
     );
+    let runs = tool_runs(messages);
+    // A call's result and how its card reads.
+    let outcome = |m: &Message| {
+        let result = m
+            .tool_use_id
+            .as_deref()
+            .and_then(|t| results.get(t))
+            .copied();
+        let status = match result {
+            Some(r) if r.is_error => CardStatus::Error,
+            Some(_) => CardStatus::Ok,
+            None if busy => CardStatus::Running,
+            None => CardStatus::Unknown,
+        };
+        (result, status)
+    };
     egui::ScrollArea::vertical()
         .id_salt("conversation")
         .stick_to_bottom(true)
@@ -57,48 +73,77 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                         if m.role == Role::User {
                             turn_start = i;
                         }
-                        row(ui, |ui| match m.role {
-                            Role::User => {
-                                open = open
-                                    .take()
-                                    .or(user_bubble(ui, md_cache, path_links, cwd, m));
-                            }
-                            Role::Assistant => {
-                                let id = m.id;
-                                let text = &m.content_text;
-                                let clicked = assistant(ui, |ui| {
-                                    path_links.markdown(ui, md_cache, cwd, id, text)
-                                });
-                                open = open.take().or(clicked);
-                            }
-                            Role::ToolCall => {
-                                let result = m.tool_use_id.as_deref().and_then(|t| results.get(t));
-                                let card_status = match result {
-                                    Some(r) if r.is_error => CardStatus::Error,
-                                    Some(_) => CardStatus::Ok,
-                                    None if busy => CardStatus::Running,
-                                    None => CardStatus::Unknown,
-                                };
-                                let awaiting = pending_permission.as_ref().is_some_and(|p| {
-                                    m.tool_use_id.as_deref() == Some(&*p.tool_use_id)
-                                });
-                                if tool_card::show(
-                                    ui,
-                                    md_cache,
-                                    m,
-                                    result.copied(),
-                                    card_status,
-                                    awaiting,
-                                ) {
-                                    review = m.tool_use_id.clone();
+                        let run = runs.iter().find(|(a, b)| (*a..=*b).contains(&i));
+                        // A group is drawn once, with its first call.
+                        let draw = run.is_none_or(|(a, _)| *a == i);
+                        if draw {
+                            row(ui, |ui| match m.role {
+                                _ if run.is_some() => {
+                                    let (a, b) = *run.unwrap_or(&(i, i));
+                                    let calls: Vec<tool_card::GroupCall> = messages[a..=b]
+                                        .iter()
+                                        .filter(|c| c.role == Role::ToolCall)
+                                        .map(|call| {
+                                            let (result, status) = outcome(call);
+                                            tool_card::GroupCall {
+                                                call,
+                                                result,
+                                                status,
+                                            }
+                                        })
+                                        .collect();
+                                    tool_card::group(ui, md_cache, &calls);
                                 }
-                            }
-                            Role::System => {
-                                ui.label(RichText::new(&m.content_text).color(theme::text_muted()));
-                            }
-                            Role::ToolResult => {}
-                        });
-                        ui.add_space(6.0);
+                                Role::User => {
+                                    open = open
+                                        .take()
+                                        .or(user_bubble(ui, md_cache, path_links, cwd, m));
+                                }
+                                Role::Assistant => {
+                                    let id = m.id;
+                                    let text = &m.content_text;
+                                    let clicked = assistant(ui, |ui| {
+                                        path_links.markdown(ui, md_cache, cwd, id, text)
+                                    });
+                                    open = open.take().or(clicked);
+                                }
+                                Role::ToolCall => {
+                                    let (result, card_status) = outcome(m);
+                                    let awaiting = pending_permission.as_ref().is_some_and(|p| {
+                                        m.tool_use_id.as_deref() == Some(&*p.tool_use_id)
+                                    });
+                                    if tool_card::show(
+                                        ui,
+                                        md_cache,
+                                        m,
+                                        result,
+                                        card_status,
+                                        awaiting,
+                                    ) {
+                                        review = m.tool_use_id.clone();
+                                    }
+                                }
+                                Role::System => {
+                                    ui.label(
+                                        RichText::new(&m.content_text).color(theme::text_muted()),
+                                    );
+                                }
+                                Role::ToolResult => {}
+                            });
+                        }
+                        // Results draw nothing; cards of one run sit close together.
+                        let next_call = messages[i + 1..]
+                            .iter()
+                            .find(|n| n.role != Role::ToolResult)
+                            .is_some_and(|n| n.role == Role::ToolCall);
+                        let end = run.map_or(i, |(_, b)| *b);
+                        if i == end && (run.is_some() || m.role != Role::ToolResult) {
+                            ui.add_space(if m.role == Role::ToolCall && next_call {
+                                2.0
+                            } else {
+                                6.0
+                            });
+                        }
                         // A finished turn ends before the next user message, or at the last one once idle.
                         let ends = messages.get(i + 1).map_or(!busy, |n| n.role == Role::User);
                         if ends {
@@ -185,6 +230,38 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
         vm.open_changes(&calls);
     }
     open
+}
+
+/// Runs of two or more consecutive tool calls other than code changes (their results
+/// interleaved), as `(first, last)` message indexes. Anything else ends a run: code changes keep
+/// their own review card.
+fn tool_runs(messages: &[Message]) -> Vec<(usize, usize)> {
+    let groupable = |m: &Message| {
+        m.role == Role::ToolCall
+            && !crate::diff::is_code_change(m.tool_name.as_deref().unwrap_or(""))
+    };
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < messages.len() {
+        if !groupable(&messages[i]) {
+            i += 1;
+            continue;
+        }
+        let (start, mut end, mut calls) = (i, i, 0);
+        while i < messages.len()
+            && (groupable(&messages[i]) || messages[i].role == Role::ToolResult)
+        {
+            if groupable(&messages[i]) {
+                calls += 1;
+            }
+            end = i;
+            i += 1;
+        }
+        if calls >= 2 {
+            runs.push((start, end));
+        }
+    }
+    runs
 }
 
 /// One transcript row in its own scope, so its allocated rect is observable in tests.
@@ -552,6 +629,43 @@ mod tests {
         }
         assert!(heights[1] > heights[0] + 100.0, "{heights:?}");
         assert!(heights[2] > heights[1] * 4.0, "{heights:?}");
+    }
+
+    #[test]
+    fn consecutive_tool_calls_group_unless_a_code_change_or_text_splits_them() {
+        let call = |name: &str, id: &str| msg(Role::ToolCall, "", Some((name, id)), Some("{}"));
+        let result = |name: &str, id: &str| msg(Role::ToolResult, "ok", Some((name, id)), None);
+        let messages = vec![
+            msg(Role::User, "go", None, None),
+            call("Bash", "a"),
+            result("Bash", "a"),
+            call("Read", "b"),
+            result("Read", "b"),
+            msg(Role::Assistant, "text", None, None),
+            call("Bash", "c"),
+            result("Bash", "c"),
+            call("Edit", "d"),
+            result("Edit", "d"),
+            call("Bash", "e"),
+            call("Bash", "f"),
+        ];
+        assert_eq!(tool_runs(&messages), [(1, 4), (10, 11)]);
+    }
+
+    #[test]
+    fn a_group_is_one_collapsed_line_even_with_a_failure_inside() {
+        let mut messages = vec![msg(Role::User, "go", None, None)];
+        for (i, failed) in [false, true, false].into_iter().enumerate() {
+            let id = format!("t{i}");
+            let input = format!(r#"{{"command":"step {i}"}}"#);
+            messages.push(msg(Role::ToolCall, "", Some(("Bash", &id)), Some(&input)));
+            let mut r = msg(Role::ToolResult, "out", Some(("Bash", &id)), None);
+            r.is_error = failed;
+            messages.push(r);
+        }
+        let rows = render(&mut vm(messages), Cards::Collapsed);
+        assert_stacked(&rows, 2);
+        assert!(rows[1].allocated.height() < 60.0, "{:?}", rows[1]);
     }
 
     #[test]

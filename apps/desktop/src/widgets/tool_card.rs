@@ -175,7 +175,7 @@ pub fn show(
         .fill(theme::bg_terminal())
         .stroke(Stroke::new(1.0, theme::border()))
         .corner_radius(6)
-        .inner_margin(egui::Margin::same(8))
+        .inner_margin(egui::Margin::symmetric(8, 5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let head = |ui: &mut egui::Ui| {
@@ -221,9 +221,214 @@ pub fn show(
     review
 }
 
+/// One call of a group, with what it produced.
+pub struct GroupCall<'a> {
+    pub call: &'a Message,
+    pub result: Option<&'a Message>,
+    pub status: CardStatus,
+}
+
+/// What the collapsed group line says.
+#[derive(Debug, PartialEq)]
+struct GroupInfo {
+    total: usize,
+    /// Tool names in first-use order with their counts, "Bash x3 · Read".
+    names: String,
+    failed: usize,
+    /// Name and summary of the first failed call.
+    first_failed: Option<String>,
+    /// Name and summary of the call still running (the latest), if any.
+    current: Option<String>,
+    status: CardStatus,
+}
+
+fn describe(c: &GroupCall) -> String {
+    let name = c.call.tool_name.as_deref().unwrap_or("tool");
+    let input = c.call.tool_payload_json.as_deref().unwrap_or("");
+    format!("{name} {}", summary(name, input))
+}
+
+fn group_info(calls: &[GroupCall]) -> GroupInfo {
+    let mut counts: Vec<(&str, usize)> = Vec::new();
+    for c in calls {
+        let name = c.call.tool_name.as_deref().unwrap_or("tool");
+        match counts.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, k)) => *k += 1,
+            None => counts.push((name, 1)),
+        }
+    }
+    let names = counts
+        .iter()
+        .map(|(n, k)| {
+            if *k > 1 {
+                format!("{n} \u{d7}{k}")
+            } else {
+                n.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" \u{b7} ");
+    let is = |s: CardStatus| calls.iter().filter(move |c| c.status == s);
+    let failed = is(CardStatus::Error).count();
+    let status = if is(CardStatus::Running).next().is_some() {
+        CardStatus::Running
+    } else if failed > 0 {
+        CardStatus::Error
+    } else if is(CardStatus::Unknown).next().is_some() {
+        CardStatus::Unknown
+    } else {
+        CardStatus::Ok
+    };
+    GroupInfo {
+        total: calls.len(),
+        names,
+        failed,
+        first_failed: is(CardStatus::Error).next().map(describe),
+        current: is(CardStatus::Running).next_back().map(describe),
+        status,
+    }
+}
+
+/// The single line a collapsed group shows: count, tools, failures, and the running call.
+fn group_line(ui: &egui::Ui, info: &GroupInfo) -> egui::text::LayoutJob {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_rows = 1;
+    job.wrap.break_anywhere = true;
+    job.wrap.overflow_character = Some('\u{2026}');
+    let mut add = |text: &str, color: egui::Color32| {
+        job.append(
+            text,
+            0.0,
+            egui::TextFormat {
+                font_id: font.clone(),
+                color,
+                ..Default::default()
+            },
+        );
+    };
+    add(&format!("{} tool calls", info.total), theme::text());
+    add(&format!("  \u{b7}  {}", info.names), theme::text_muted());
+    if let Some(first) = &info.first_failed {
+        let more = if info.failed > 1 {
+            format!(" (+{} more)", info.failed - 1)
+        } else {
+            String::new()
+        };
+        add(
+            &format!("  \u{b7}  {} failed: {first}{more}", info.failed),
+            theme::danger(),
+        );
+    }
+    if let Some(now) = &info.current {
+        add(&format!("  \u{b7}  {now}"), theme::text_muted());
+    }
+    job
+}
+
+/// Several consecutive tool calls as one line that expands into their cards. Failed calls are
+/// named on that line even while it is collapsed.
+pub fn group(ui: &mut egui::Ui, cache: &mut CommonMarkCache, calls: &[GroupCall]) {
+    let Some(first) = calls.first() else { return };
+    let id = Id::unique(("tool_group", first.call.id));
+    let open_id = id.with("open");
+    let open = ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
+    let info = group_info(calls);
+    let header = egui::Frame::new()
+        .fill(theme::bg_terminal())
+        .stroke(Stroke::new(1.0, theme::border()))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 5))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                let chevron = if open {
+                    icons::EXPANDED
+                } else {
+                    icons::COLLAPSED
+                };
+                ui.label(RichText::new(chevron).color(theme::text_muted()));
+                status_icon(ui, info.status);
+                ui.add(egui::Label::new(group_line(ui, &info)).truncate());
+            });
+        })
+        .response
+        .interact(egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if header.clicked() {
+        ui.data_mut(|d| d.insert_temp(open_id, !open));
+    }
+    if open {
+        ui.indent(id, |ui| {
+            for c in calls {
+                ui.add_space(2.0);
+                show(ui, cache, c.call, c.result, c.status, false);
+            }
+        });
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn call(name: &str, input: &str) -> Message {
+        Message {
+            id: uuid::Uuid::new_v4(),
+            session_id: xade_core::SessionId::new(),
+            seq: 0,
+            role: xade_core::Role::ToolCall,
+            content_text: String::new(),
+            thinking_text: None,
+            tool_name: Some(name.into()),
+            tool_use_id: Some(name.into()),
+            tool_payload_json: Some(input.into()),
+            is_error: false,
+            created_at: time::OffsetDateTime::now_utc(),
+        }
+    }
+
+    #[test]
+    fn a_group_names_its_tools_and_its_failures() {
+        let msgs = [
+            call("Bash", r#"{"command":"ls"}"#),
+            call("Read", r#"{"file_path":"/a.rs"}"#),
+            call("Bash", r#"{"command":"cargo test"}"#),
+        ];
+        let calls = |statuses: [CardStatus; 3]| -> Vec<GroupCall> {
+            msgs.iter()
+                .zip(statuses)
+                .map(|(call, status)| GroupCall {
+                    call,
+                    result: None,
+                    status,
+                })
+                .collect()
+        };
+        let ok = group_info(&calls([CardStatus::Ok; 3]));
+        assert_eq!(
+            (ok.total, ok.names.as_str()),
+            (3, "Bash \u{d7}2 \u{b7} Read")
+        );
+        assert_eq!((ok.status, ok.failed), (CardStatus::Ok, 0));
+        let bad = group_info(&calls([CardStatus::Ok, CardStatus::Ok, CardStatus::Error]));
+        assert_eq!((bad.status, bad.failed), (CardStatus::Error, 1));
+        assert_eq!(bad.first_failed.as_deref(), Some("Bash cargo test"));
+        let live = group_info(&calls([
+            CardStatus::Error,
+            CardStatus::Ok,
+            CardStatus::Running,
+        ]));
+        assert_eq!(live.status, CardStatus::Running);
+        assert_eq!(live.current.as_deref(), Some("Bash cargo test"));
+        assert_eq!(live.failed, 1);
+        let idle = group_info(&calls([
+            CardStatus::Ok,
+            CardStatus::Unknown,
+            CardStatus::Ok,
+        ]));
+        assert_eq!(idle.status, CardStatus::Unknown);
+    }
 
     #[test]
     fn summary_picks_the_main_field() {

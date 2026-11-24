@@ -302,7 +302,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         } else {
             prev_min
         };
-        let win = window(win_id(*kind), collapsed, area, applying, default_pos);
+        let fill = match kind {
+            WindowKind::Session(_) => theme::bg_window(),
+            WindowKind::Editor(_) => theme::bg_file(),
+        };
+        let win = window(win_id(*kind), fill, collapsed, area, applying, default_pos);
         let mut out = session_view::ViewOut::default();
         let shown = catch_unwind(AssertUnwindSafe(|| {
             win.show(&ctx, |ui| match &mut taken {
@@ -453,6 +457,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 /// One session window; `applying` forces its rect for this frame only.
 fn window<'a>(
     id: Id,
+    fill: egui::Color32,
     collapsed: bool,
     area: Rect,
     applying: Option<Rect>,
@@ -468,7 +473,7 @@ fn window<'a>(
         .resizable(!collapsed)
         .frame(
             egui::Frame::new()
-                .fill(theme::bg_window())
+                .fill(fill)
                 .stroke(egui::Stroke::new(1.0, theme::border()))
                 .corner_radius(8),
         );
@@ -771,6 +776,7 @@ mod tests {
                     let applying = (f == 0).then_some(tiles[i]);
                     let win = window(
                         win_id(WindowKind::Session(vm.session.id)),
+                        theme::bg_window(),
                         false,
                         area,
                         applying,
@@ -812,6 +818,7 @@ mod tests {
             frame(&ctx, |ctx| {
                 let win = window(
                     win_id(WindowKind::Session(v.session.id)),
+                    theme::bg_window(),
                     v.collapsed,
                     area,
                     None,

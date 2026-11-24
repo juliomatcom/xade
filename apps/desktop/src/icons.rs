@@ -23,7 +23,7 @@ pub const PREV: &str = "\u{23F4}";
 pub const NEXT: &str = "\u{23F5}";
 pub const AUTO: &str = "\u{1F680}";
 pub const MENU: &str = "\u{2630}";
-pub const IMPORT: &str = "\u{1F4E5}";
+pub const ABOUT: &str = "\u{2139}";
 pub const OPEN_SESSION: &str = "\u{1F4C2}";
 pub const SHORTCUTS: &str = "\u{2328}";
 pub const SETTINGS: &str = "\u{2699}";
@@ -71,7 +71,7 @@ mod tests {
             NEXT,
             AUTO,
             MENU,
-            IMPORT,
+            ABOUT,
             OPEN_SESSION,
             SHORTCUTS,
             SETTINGS,

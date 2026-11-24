@@ -93,6 +93,8 @@ palette! {
     bg_panel = "#161a20";
     /// Session window frame and body.
     bg_window = "#141313";
+    /// File (editor) window frame and body: a bit darker than `bg_window`.
+    bg_file = "#0f0e0e";
     bg_raised = "#1f1e1e";
     /// Tool and command cards and code blocks in the chat: darker than the window around them.
     bg_terminal = "#0d0c0c";
@@ -263,6 +265,10 @@ mod palette_tests {
             .all(|v| v.as_str().is_some_and(|s| s.starts_with('#'))));
         assert_eq!(Palette::parse(map).unwrap(), Palette::default());
         assert_eq!(map["bg_window"], "#141313");
+        // File windows sit a step darker than session windows.
+        let p = Palette::default();
+        let lum = |c: Color32| u32::from(c.r()) + u32::from(c.g()) + u32::from(c.b());
+        assert!(lum(p.bg_file) < lum(p.bg_window));
     }
 
     #[test]

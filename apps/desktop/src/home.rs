@@ -42,8 +42,6 @@ pub struct HomeState {
     /// `None` lists every origin.
     pub origin: Option<SessionOrigin>,
     pub importing: bool,
-    /// `(imported, updated)` of the last finished import.
-    pub import_result: Option<(u32, u32)>,
     /// Parsed card previews; a `RefCell` because cards are drawn from `&App`.
     pub md_cache: std::cell::RefCell<egui_commonmark::CommonMarkCache>,
 }
@@ -344,74 +342,100 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         .size_range(SIDEBAR_MIN..=(ui.available_width() * 0.4).max(SIDEBAR_MIN))
         .resizable(true)
         .show(ui, |ui| {
-            ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                heading(ui, "Workspaces");
-                if ui
-                    .selectable_label(app.home.scope.is_none(), "All Workspaces")
-                    .clicked()
-                {
-                    set_scope(app, None);
-                }
-                let rows: Vec<(WorkspaceId, PathBuf, String, usize)> = app
-                    .home
-                    .workspaces
-                    .iter()
-                    .filter(|w| w.is_open)
-                    .map(|w| {
-                        let name = w.display_name.clone();
-                        (w.id, w.root_path.clone(), name, app.live_count(w.id))
-                    })
-                    .collect();
-                // Only expanded folders are walked and off-screen rows are not painted, so
-                // uneven row heights rule out `show_rows`.
-                let mut actions = Vec::new();
-                let mut close = None;
-                egui::ScrollArea::vertical()
-                    .id_salt("workspaces")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for (id, root, name, live) in &rows {
-                            let chevron = if app.tree.is_expanded(root) {
-                                icons::EXPANDED
-                            } else {
-                                icons::COLLAPSED
-                            };
-                            let name = if *live > 0 {
-                                format!("{name}  ({live})")
-                            } else {
-                                name.clone()
-                            };
-                            let selected = app.home.scope == Some(*id);
-                            let text = icons::with(chevron, &name);
-                            let resp = ui.add(egui::Button::selectable(selected, text).truncate());
-                            if resp.clicked() {
-                                set_scope(app, Some(*id));
-                                actions.push(TreeAction::Toggle(root.clone()));
-                            }
-                            resp.context_menu(|ui| {
-                                if ui.button("Close workspace").clicked() {
-                                    close = Some(*id);
-                                    ui.close();
+            ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+                refresh_button(app, ui);
+                // bottom_up: later items sit higher, so the workspace list below takes all
+                // remaining height.
+                ui.add_space(8.0);
+                ui.separator();
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    heading(ui, "Workspaces");
+                    if ui
+                        .selectable_label(app.home.scope.is_none(), "All Workspaces")
+                        .clicked()
+                    {
+                        set_scope(app, None);
+                    }
+                    let rows: Vec<(WorkspaceId, PathBuf, String, usize)> = app
+                        .home
+                        .workspaces
+                        .iter()
+                        .filter(|w| w.is_open)
+                        .map(|w| {
+                            let name = w.display_name.clone();
+                            (w.id, w.root_path.clone(), name, app.live_count(w.id))
+                        })
+                        .collect();
+                    // Only expanded folders are walked and off-screen rows are not painted, so
+                    // uneven row heights rule out `show_rows`.
+                    let mut actions = Vec::new();
+                    let mut close = None;
+                    egui::ScrollArea::vertical()
+                        .id_salt("workspaces")
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            for (id, root, name, live) in &rows {
+                                let chevron = if app.tree.is_expanded(root) {
+                                    icons::EXPANDED
+                                } else {
+                                    icons::COLLAPSED
+                                };
+                                let name = if *live > 0 {
+                                    format!("{name}  ({live})")
+                                } else {
+                                    name.clone()
+                                };
+                                let selected = app.home.scope == Some(*id);
+                                let text = icons::with(chevron, &name);
+                                let resp =
+                                    ui.add(egui::Button::selectable(selected, text).truncate());
+                                if resp.clicked() {
+                                    set_scope(app, Some(*id));
+                                    actions.push(TreeAction::Toggle(root.clone()));
                                 }
-                            });
-                            let changed = match app.git.get(root) {
-                                Some(GitState::Repo { changed, .. }) => Some(changed),
-                                _ => None,
-                            };
-                            file_tree::show(ui, &app.tree, root, 1, changed, &mut actions);
-                        }
-                    });
-                for action in actions {
-                    app.tree_action(action);
-                }
-                if let Some(id) = close {
-                    app.close_workspace(id);
-                }
+                                resp.context_menu(|ui| {
+                                    if ui.button("Close workspace").clicked() {
+                                        close = Some(*id);
+                                        ui.close();
+                                    }
+                                });
+                                let changed = match app.git.get(root) {
+                                    Some(GitState::Repo { changed, .. }) => Some(changed),
+                                    _ => None,
+                                };
+                                file_tree::show(ui, &app.tree, root, 1, changed, &mut actions);
+                            }
+                        });
+                    for action in actions {
+                        app.tree_action(action);
+                    }
+                    if let Some(id) = close {
+                        app.close_workspace(id);
+                    }
+                });
             });
         });
 }
 
-/// The top-left menu: adding a folder and importing Claude Code history.
+/// Forces a refresh of every provider's sessions; shows progress while it runs.
+fn refresh_button(app: &mut App, ui: &mut egui::Ui) {
+    let busy = app.home.importing;
+    let label = if busy {
+        "Refreshing\u{2026}"
+    } else {
+        "Refresh sessions"
+    };
+    let btn = egui::Button::new(icons::with(icons::RETRY, label)).truncate();
+    let resp = ui
+        .add_enabled_ui(!busy, |ui| ui.add_sized([ui.available_width(), 28.0], btn))
+        .inner
+        .on_hover_text("Re-read the sessions of every provider now");
+    if resp.clicked() {
+        app.refresh_sessions();
+    }
+}
+
+/// The top-left menu: adding a folder and About.
 fn app_menu(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button(icons::MENU, |ui| {
         if ui
@@ -420,26 +444,8 @@ fn app_menu(app: &mut App, ui: &mut egui::Ui) {
         {
             app.add_directory();
         }
-        let enabled = !app.home.importing && app.home.preflight_error.is_none();
-        let import = egui::Button::new(icons::with(icons::IMPORT, "Import from Claude Code"));
-        if ui.add_enabled(enabled, import).clicked() {
-            app.start_import();
-        }
-        if app.home.importing {
-            ui.horizontal(|ui| {
-                ui.spinner();
-                ui.label(
-                    RichText::new("Importing\u{2026}")
-                        .small()
-                        .color(theme::text_muted()),
-                );
-            });
-        } else if let Some((imported, updated)) = app.home.import_result {
-            ui.label(
-                RichText::new(format!("Imported {imported}, updated {updated}"))
-                    .small()
-                    .color(theme::text_muted()),
-            );
+        if ui.button(icons::with(icons::ABOUT, "About Xade")).clicked() {
+            app.about_open = true;
         }
     })
     .response
