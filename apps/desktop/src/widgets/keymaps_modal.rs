@@ -9,7 +9,7 @@ use crate::theme;
 pub fn show(ctx: &egui::Context) -> bool {
     let mac = cfg!(target_os = "macos");
     let km = keymap::current();
-    let resp = egui::Modal::new(egui::Id::unique("keymaps")).show(ctx, |ui| {
+    let resp = crate::widgets::modal(ctx, egui::Id::unique("keymaps")).show(ctx, |ui| {
         ui.set_width(460.0);
         ui.label(RichText::new("Keyboard shortcuts").strong().size(16.0));
         ui.add_space(6.0);

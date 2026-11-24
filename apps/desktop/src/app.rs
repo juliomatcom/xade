@@ -86,10 +86,10 @@ pub enum UiMsg {
         anchor: uuid::Uuid,
         changes: crate::turn_files::TurnChanges,
     },
-    /// The file list the quick-open indexed under `root`.
+    /// The files the quick-open listed, one list per root.
     PickerFiles {
-        root: PathBuf,
-        files: Vec<String>,
+        roots: Vec<PathBuf>,
+        files: Vec<Vec<String>>,
     },
     /// A session folder's file list for `@` autocomplete.
     Files {
@@ -1191,23 +1191,41 @@ impl App {
         });
     }
 
-    /// Opens the file quick-open over `target_dir()`, listing its files in the background.
+    /// Opens the file quick-open over the selected workspace, or every listed one when none is
+    /// selected, listing their files in the background.
     fn open_file_picker(&mut self) {
-        let root = self.target_dir();
-        self.file_picker = Some(FilePicker::new(root.clone()));
+        let roots: Vec<(String, PathBuf)> = self
+            .home
+            .workspaces
+            .iter()
+            .filter(|w| self.home.scope.is_none_or(|id| id == w.id))
+            .map(|w| (w.display_name.clone(), w.root_path.clone()))
+            .collect();
+        let paths: Vec<PathBuf> = roots.iter().map(|(_, p)| p.clone()).collect();
+        self.file_picker = Some(FilePicker::new(roots, self.home.scope.is_some()));
+        if paths.is_empty() {
+            return;
+        }
         let bridge = self.bridge.clone();
         self.rt.spawn(async move {
-            let walk = root.clone();
-            let listed =
-                tokio::task::spawn_blocking(move || crate::mention::list_files(&walk)).await;
+            let walk = paths.clone();
+            let listed = tokio::task::spawn_blocking(move || {
+                walk.iter()
+                    .map(|p| crate::mention::list_files(p))
+                    .collect::<Vec<_>>()
+            })
+            .await;
             match listed {
-                Ok(files) => bridge.send(UiMsg::PickerFiles { root, files }),
+                Ok(files) => bridge.send(UiMsg::PickerFiles {
+                    roots: paths,
+                    files,
+                }),
                 Err(e) => {
                     let report = ErrorReport::new("Could not list files", e.to_string());
                     bridge.send(UiMsg::Report(report));
                     bridge.send(UiMsg::PickerFiles {
-                        root,
-                        files: Vec::new(),
+                        files: vec![Vec::new(); paths.len()],
+                        roots: paths,
                     });
                 }
             }
@@ -1642,8 +1660,8 @@ impl App {
                     p.selected = p.selected.min(p.results.len().saturating_sub(1));
                 }
             }
-            UiMsg::PickerFiles { root, files } => {
-                if let Some(p) = self.file_picker.as_mut().filter(|p| p.root == root) {
+            UiMsg::PickerFiles { roots, files } => {
+                if let Some(p) = self.file_picker.as_mut().filter(|p| p.has_roots(&roots)) {
                     p.set_files(files);
                 }
             }

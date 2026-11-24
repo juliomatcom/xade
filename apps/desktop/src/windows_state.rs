@@ -32,16 +32,20 @@ pub fn load(path: &Path) -> Vec<Saved> {
         .collect()
 }
 
-/// The newest list not yet written; a write task takes it, so writes land in order and a burst
-/// of changes costs one write.
-static PENDING: Mutex<Option<(PathBuf, Vec<Saved>)>> = Mutex::new(None);
+/// The newest list not yet written, by file; a write task drains it, so writes land in order
+/// and a burst of changes costs one write.
+static PENDING: Mutex<Vec<(PathBuf, Vec<Saved>)>> = Mutex::new(Vec::new());
 
 /// Writes `windows` on the blocking pool, newest list last.
 pub fn save_later(rt: &tokio::runtime::Handle, path: PathBuf, windows: Vec<Saved>) {
-    *PENDING.lock().unwrap_or_else(PoisonError::into_inner) = Some((path, windows));
+    {
+        let mut pending = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
+        pending.retain(|(p, _)| *p != path);
+        pending.push((path, windows));
+    }
     rt.spawn_blocking(|| {
         let mut pending = PENDING.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some((path, windows)) = pending.take() {
+        for (path, windows) in pending.drain(..) {
             if let Err(e) = save(&path, &windows) {
                 tracing::warn!(error = %e, "could not save the open windows");
             }

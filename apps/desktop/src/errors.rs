@@ -221,7 +221,7 @@ pub fn modal(ctx: &egui::Context, queue: &ErrorQueue) -> ModalAction {
     };
     let mut action = ModalAction::None;
     let more = queue.pending() - 1;
-    let resp = egui::Modal::new(egui::Id::unique("error_modal")).show(ctx, |ui| {
+    let resp = crate::widgets::modal(ctx, egui::Id::unique("error_modal")).show(ctx, |ui| {
         ui.set_width(560.0);
         ui.horizontal(|ui| {
             ui.label(

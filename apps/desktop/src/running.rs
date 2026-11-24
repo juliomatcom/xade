@@ -216,30 +216,31 @@ pub fn confirm_modal(app: &mut App, ctx: &egui::Context) {
     };
     let location = p.location.clone();
     let (mut accept, mut cancel) = (false, false);
-    let resp = egui::Modal::new(egui::Id::unique("confirm_open_running")).show(ctx, |ui| {
-        ui.set_min_width(MODAL_MIN_WIDTH);
-        ui.label(
-            RichText::new(format!("{} Session open elsewhere", icons::WARNING))
-                .strong()
-                .size(18.0)
-                .color(theme::warn()),
-        );
-        ui.add_space(6.0);
-        ui.label(format!(
-            "This session is running in {location}. If you send messages here and there, the \
+    let resp =
+        crate::widgets::modal(ctx, egui::Id::unique("confirm_open_running")).show(ctx, |ui| {
+            ui.set_min_width(MODAL_MIN_WIDTH);
+            ui.label(
+                RichText::new(format!("{} Session open elsewhere", icons::WARNING))
+                    .strong()
+                    .size(18.0)
+                    .color(theme::warn()),
+            );
+            ui.add_space(6.0);
+            ui.label(format!(
+                "This session is running in {location}. If you send messages here and there, the \
              conversation forks: each side only sees its own replies until it reopens the session."
-        ));
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            accept = ui
-                .add(
-                    egui::Button::new(RichText::new("Open anyway").color(theme::bg_app()))
-                        .fill(theme::warn()),
-                )
-                .clicked();
-            cancel = ui.button("Cancel").clicked();
+            ));
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                accept = ui
+                    .add(
+                        egui::Button::new(RichText::new("Open anyway").color(theme::bg_app()))
+                            .fill(theme::warn()),
+                    )
+                    .clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
         });
-    });
     if accept {
         if let Some(p) = app.pending_open.take() {
             app.open_confirmed(p.id, p.background);

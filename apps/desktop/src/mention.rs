@@ -123,8 +123,23 @@ pub fn rank(files: &[String], query: &str) -> Vec<String> {
 
 /// The best `limit` files for `query`; the first files when it is empty.
 pub fn rank_top(files: &[String], query: &str, limit: usize) -> Vec<String> {
+    rank_indices(files, query, limit)
+        .into_iter()
+        .map(|i| files[i].clone())
+        .collect()
+}
+
+/// Like `rank_top`, as indexes into `files`. Fuzzy matches only count when every character is
+/// found in order; among them a file whose name contains the query as typed comes first, then
+/// one whose path does, then the best fuzzy score, then the shorter path.
+pub fn rank_indices(files: &[String], query: &str, limit: usize) -> Vec<usize> {
+    rank_counted(files, query, limit).0
+}
+
+/// `rank_indices` plus how many files match in all (`limit` 0 only counts).
+pub fn rank_counted(files: &[String], query: &str, limit: usize) -> (Vec<usize>, usize) {
     if query.is_empty() {
-        return files.iter().take(limit).cloned().collect();
+        return ((0..files.len().min(limit)).collect(), files.len());
     }
     let pattern = Pattern::new(
         query,
@@ -132,21 +147,37 @@ pub fn rank_top(files: &[String], query: &str, limit: usize) -> Vec<String> {
         Normalization::Smart,
         AtomKind::Fuzzy,
     );
+    let needle = query.to_lowercase();
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let mut buf = Vec::new();
-    let mut scored: Vec<(u32, &String)> = files
+    let mut scored: Vec<(u8, u32, usize, usize)> = files
         .iter()
-        .filter_map(|f| {
+        .enumerate()
+        .filter_map(|(i, f)| {
             let score = pattern.score(Utf32Str::new(f, &mut buf), &mut matcher)?;
-            Some((score, f))
+            let lower = f.to_lowercase();
+            let name = lower.rsplit('/').next().unwrap_or(&lower);
+            let tier = if name.contains(&needle) {
+                0
+            } else if lower.contains(&needle) {
+                1
+            } else {
+                2
+            };
+            Some((tier, score, f.len(), i))
         })
         .collect();
-    scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())));
-    scored
-        .into_iter()
-        .take(limit)
-        .map(|(_, f)| f.clone())
-        .collect()
+    let total = scored.len();
+    if limit == 0 {
+        return (Vec::new(), total);
+    }
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(b.1.cmp(&a.1))
+            .then(a.2.cmp(&b.2))
+            .then(a.3.cmp(&b.3))
+    });
+    (scored.into_iter().take(limit).map(|t| t.3).collect(), total)
 }
 
 /// `@path`, quoted when the path has whitespace.
@@ -175,6 +206,8 @@ pub fn apply(input: &str, start: usize, cursor: usize, path: &str) -> (String, u
 pub fn list_files(root: &Path) -> Vec<String> {
     let walk = ignore::WalkBuilder::new(root)
         .hidden(false)
+        // A `.gitignore` counts in a folder that is not a git repository too.
+        .require_git(false)
         .filter_entry(|e| !SKIP_DIRS.iter().any(|s| e.file_name() == *s))
         .build();
     let mut files = Vec::new();
@@ -248,6 +281,20 @@ mod tests {
     }
 
     #[test]
+    fn a_name_containing_the_query_beats_a_scattered_fuzzy_match() {
+        let mut files: Vec<String> = (0..30).map(|i| format!("a2/b0/c{i}/d2/e6/f.md")).collect();
+        files.push("notes/long/folder/name/2026-11-23.md".into());
+        // Every file fuzzy-matches "2026" through scattered digits; only one contains it.
+        assert_eq!(
+            rank_top(&files, "2026", 1),
+            ["notes/long/folder/name/2026-11-23.md"]
+        );
+        let found = rank_indices(&files, "2026", 100);
+        assert_eq!(found.len(), files.len());
+        assert_eq!(files[found[0]], "notes/long/folder/name/2026-11-23.md");
+    }
+
+    #[test]
     fn apply_replaces_the_token_and_places_the_cursor_after_it() {
         let (text, cursor) = apply("look at @ma and more", 8, 11, "src/main.rs");
         assert_eq!(text, "look at @src/main.rs  and more");
@@ -291,6 +338,16 @@ mod tests {
         std::fs::write(dir.join(".env.example"), "").unwrap();
         std::fs::write(dir.join("node_modules/x/y.js"), "").unwrap();
         assert_eq!(list_files(&dir), [".env.example", "src/a.rs", "top.txt"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn listing_honors_gitignore_outside_a_git_repo() {
+        let dir = temp_dir();
+        std::fs::write(dir.join(".gitignore"), "ignored.txt\n").unwrap();
+        std::fs::write(dir.join("ignored.txt"), "").unwrap();
+        std::fs::write(dir.join("kept.rs"), "").unwrap();
+        assert_eq!(list_files(&dir), [".gitignore", "kept.rs"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

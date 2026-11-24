@@ -24,7 +24,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         ),
     };
     let (mut quit, mut cancel) = (false, false);
-    let resp = egui::Modal::new(egui::Id::unique("confirm_quit")).show(ctx, |ui| {
+    let resp = crate::widgets::modal(ctx, egui::Id::unique("confirm_quit")).show(ctx, |ui| {
         ui.set_min_width(MIN_WIDTH);
         ui.label(RichText::new("Quit Xade?").strong().size(18.0));
         ui.add_space(6.0);

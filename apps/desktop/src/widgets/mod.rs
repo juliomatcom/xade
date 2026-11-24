@@ -10,3 +10,13 @@ pub mod path_links;
 pub mod quit_modal;
 pub mod session_picker;
 pub mod tool_card;
+
+/// Space between a modal's edge and its content, so dialogs do not feel tight.
+pub const MODAL_MARGIN: i8 = 24;
+
+/// A modal with the project's padding; every dialog starts here.
+pub fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
+    egui::Modal::new(id).frame(
+        egui::Frame::popup(&ctx.global_style()).inner_margin(egui::Margin::same(MODAL_MARGIN)),
+    )
+}

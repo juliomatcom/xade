@@ -74,8 +74,10 @@ pub fn show(
     vscode: Option<&Path>,
 ) -> ModalAction {
     let mut action = ModalAction::None;
-    let size = ctx.content_rect().size() * 0.8;
-    let resp = egui::Modal::new(id).show(ctx, |ui| {
+    // The padding sits outside this size, so the whole modal stays within 80%.
+    let size =
+        ctx.content_rect().size() * 0.8 - egui::Vec2::splat(2.0 * f32::from(super::MODAL_MARGIN));
+    let resp = crate::widgets::modal(ctx, id).show(ctx, |ui| {
         ui.set_min_size(size);
         ui.set_max_size(size);
         ui.horizontal(|ui| {

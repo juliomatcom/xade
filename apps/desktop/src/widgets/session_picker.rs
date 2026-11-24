@@ -62,7 +62,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .then(|| files.get(st.selected - sessions).map(|f| f.0))
         .flatten();
     let mut changed = false;
-    let resp = egui::Modal::new(egui::Id::unique("session_picker")).show(ctx, |ui| {
+    let resp = crate::widgets::modal(ctx, egui::Id::unique("session_picker")).show(ctx, |ui| {
         ui.set_width(560.0);
         ui.label(RichText::new("Open session").strong().size(16.0));
         let edit = ui.add(

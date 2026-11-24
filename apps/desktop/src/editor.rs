@@ -409,7 +409,7 @@ pub enum CloseChoice {
 /// "Save changes to <name>?"; Esc cancels.
 pub fn close_modal(ctx: &egui::Context, name: &str) -> Option<CloseChoice> {
     let mut choice = None;
-    let resp = egui::Modal::new(egui::Id::unique("editor_close")).show(ctx, |ui| {
+    let resp = crate::widgets::modal(ctx, egui::Id::unique("editor_close")).show(ctx, |ui| {
         ui.set_width(380.0);
         ui.label(
             RichText::new(format!("Save changes to {name}?"))

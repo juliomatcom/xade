@@ -31,22 +31,23 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
          be deleted. This can't be undone."
     );
     let (mut delete, mut cancel) = (false, false);
-    let resp = egui::Modal::new(egui::Id::unique("confirm_delete_session")).show(ctx, |ui| {
-        ui.set_min_width(MIN_WIDTH);
-        ui.label(RichText::new("Delete session forever?").strong().size(18.0));
-        ui.add_space(6.0);
-        ui.label(body);
-        ui.add_space(12.0);
-        ui.horizontal(|ui| {
-            delete = ui
-                .add(
-                    egui::Button::new(RichText::new("Delete").color(theme::bg_app()))
-                        .fill(theme::danger()),
-                )
-                .clicked();
-            cancel = ui.button("Cancel").clicked();
+    let resp =
+        crate::widgets::modal(ctx, egui::Id::unique("confirm_delete_session")).show(ctx, |ui| {
+            ui.set_min_width(MIN_WIDTH);
+            ui.label(RichText::new("Delete session forever?").strong().size(18.0));
+            ui.add_space(6.0);
+            ui.label(body);
+            ui.add_space(12.0);
+            ui.horizontal(|ui| {
+                delete = ui
+                    .add(
+                        egui::Button::new(RichText::new("Delete").color(theme::bg_app()))
+                            .fill(theme::danger()),
+                    )
+                    .clicked();
+                cancel = ui.button("Cancel").clicked();
+            });
         });
-    });
     if delete {
         if let Some(p) = app.pending_delete.take() {
             let _ = app
