@@ -1,7 +1,11 @@
 import { useState } from "react";
 import LazyLogo from "./LazyLogo";
+import LazyRain from "./LazyRain";
+import Carousel from "./Carousel";
 import { faq } from "./faq";
 
+// Legal name shown in the footer.
+const OWNER = "Julio César Martín";
 const REPO = "https://github.com/juliomatcom/xade";
 const RELEASES = `${REPO}/releases/latest`;
 const INSTALL = `curl -fsSL https://raw.githubusercontent.com/juliomatcom/xade/main/scripts/install.sh | sh`;
@@ -73,21 +77,24 @@ function Copy({ text }: { text: string }) {
 
 export default function App() {
   return (
-    <div className="relative overflow-hidden">
+    <div className="relative overflow-x-clip">
+      <LazyRain />
       <div className="pointer-events-none absolute inset-x-0 top-0 h-[900px] bg-[radial-gradient(60%_50%_at_50%_20%,rgb(16_185_129/0.18),transparent)]" />
 
-      <header className="relative mx-auto flex max-w-6xl items-center justify-between px-6 py-6">
+      <header className="sticky top-0 z-50 border-b border-edge/60 bg-ink/70 backdrop-blur-md">
+        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
         <a href="/" className="flex items-center gap-2.5 text-lg font-semibold text-white">
           <img src="/favicon.svg" alt="Xade logo" className="size-7" /> Xade
         </a>
-        <nav aria-label="Main" className="flex items-center gap-5 text-sm text-slate-400">
-          <a href="#why" className="hidden hover:text-white sm:inline">Why Xade</a>
-          <a href="#install" className="hover:text-white">Install</a>
-          <a href="#download" className="hover:text-white">Download</a>
+        <nav aria-label="Main" className="flex items-center gap-5 text-sm font-medium text-white">
+          <a href="#why" className="hidden transition hover:text-jade sm:inline">Why Xade</a>
+          <a href="#install" className="transition hover:text-jade">Install</a>
+          <a href="#download" className="transition hover:text-jade">Download</a>
           <a href={REPO} rel="noopener" className="flex items-center gap-2 rounded-lg border border-edge px-3 py-1.5 text-white transition hover:border-slate-500">
             <GitHubIcon className="size-4" /> GitHub
           </a>
         </nav>
+        </div>
       </header>
 
       <main className="relative mx-auto max-w-6xl px-6">
@@ -108,16 +115,11 @@ export default function App() {
           </div>
           <p className="mt-4 text-sm text-slate-500">Free and open source · Powered by Rust · macOS and Linux · Pronounced "zade"</p>
 
-          <figure className="mx-auto mt-14 max-w-5xl overflow-hidden rounded-2xl border border-edge bg-slab shadow-[0_30px_120px_-20px_rgb(16_185_129/0.25)]">
-            <div className="flex items-center gap-1.5 border-b border-edge px-4 py-3">
-              <span className="size-3 rounded-full bg-slate-700" />
-              <span className="size-3 rounded-full bg-slate-700" />
-              <span className="size-3 rounded-full bg-slate-700" />
-            </div>
+          <figure className="mx-auto mt-14 max-w-6xl">
             {VIDEO_SRC ? (
-              <video src={VIDEO_SRC} poster="/og.png" autoPlay muted loop playsInline className="w-full" aria-label="Xade running several agent sessions side by side" />
+              <video src={VIDEO_SRC} poster="/app.webp" autoPlay muted loop playsInline className="w-full rounded-2xl shadow-[0_30px_120px_-20px_rgb(16_185_129/0.3)]" aria-label="Xade running Claude, Codex and Google sessions side by side" />
             ) : (
-              <img src="/og.png" alt="Xade running several AI coding agent sessions side by side with a diff review" className="w-full" width={1024} height={572} />
+              <Carousel />
             )}
           </figure>
         </section>
@@ -146,7 +148,7 @@ export default function App() {
           </div>
         </section>
 
-        <section id="why" className="scroll-mt-8 pb-24">
+        <section id="why" className="scroll-mt-24 pb-24">
           <h2 className="mx-auto max-w-3xl text-center text-3xl font-semibold tracking-tight text-white sm:text-4xl">One place for every agent, subscription and model</h2>
           <p className="mx-auto mt-3 max-w-2xl text-center text-slate-400">
             Today Xade drives Claude Code. It is built for a multi-provider future, so the workspace you learn now is the one you keep.
@@ -177,7 +179,7 @@ export default function App() {
           </div>
         </section>
 
-        <section id="install" className="scroll-mt-8 pb-24">
+        <section id="install" className="scroll-mt-24 pb-24">
           <h2 className="text-3xl font-semibold tracking-tight text-white">Install</h2>
           <p className="mt-3 text-slate-400">macOS (Apple Silicon) and Linux (x86_64, aarch64). Run it again to update.</p>
           <div className="mt-6 flex items-center gap-3 overflow-x-auto rounded-xl border border-edge bg-slab p-4">
@@ -189,7 +191,7 @@ export default function App() {
           </p>
         </section>
 
-        <section id="download" className="scroll-mt-8 pb-24">
+        <section id="download" className="scroll-mt-24 pb-24">
           <h2 className="text-3xl font-semibold tracking-tight text-white">Download</h2>
           <p className="mt-3 text-slate-400">Builds are published on every push to main.</p>
           <div className="mt-6 grid gap-4 sm:grid-cols-3">
@@ -212,7 +214,7 @@ export default function App() {
           </div>
         </section>
 
-        <section id="faq" className="scroll-mt-8 pb-24" aria-labelledby="faq-title">
+        <section id="faq" className="scroll-mt-24 pb-24" aria-labelledby="faq-title">
           <h2 id="faq-title" className="text-3xl font-semibold tracking-tight text-white">Frequently asked questions</h2>
           <div className="mt-8 divide-y divide-edge rounded-2xl border border-edge">
             {faq.map(([q, a]) => (
@@ -255,16 +257,45 @@ export default function App() {
         </section>
       </main>
 
-      <footer className="relative border-t border-edge">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center justify-between gap-4 px-6 py-8 text-sm text-slate-500">
-          <p className="max-w-xl leading-relaxed">
-            © {new Date().getFullYear()} Julio César. Source code released under the <a href={`${REPO}/blob/main/LICENSE`} className="underline hover:text-white">MIT License</a>. Xade™ is a trademark of Julio César; the license does not grant rights to the name or logo.
-          </p>
-          <nav aria-label="Footer" className="flex gap-6">
-            <a href={REPO} rel="noopener" className="flex items-center gap-1.5 hover:text-white"><GitHubIcon className="size-4" /> GitHub</a>
-            <a href={RELEASES} className="hover:text-white">Releases</a>
-            <a href={`${REPO}/blob/main/LICENSE`} className="hover:text-white">License</a>
-          </nav>
+      <footer className="relative border-t border-edge bg-ink/80">
+        <div className="mx-auto max-w-6xl px-6 py-14">
+          <div className="grid gap-10 sm:grid-cols-2 lg:grid-cols-4">
+            <div className="lg:col-span-2">
+              <a href="/" className="flex items-center gap-2.5 text-lg font-semibold text-white">
+                <img src="/favicon.svg" alt="" className="size-7" /> Xade
+              </a>
+              <p className="mt-4 max-w-sm text-sm leading-relaxed text-slate-400">
+                One fast, native workspace for all your AI coding agents. Free and open source.
+              </p>
+              <a href={REPO} rel="noopener" className="mt-5 inline-flex items-center gap-2 rounded-lg border border-edge px-4 py-2 text-sm font-medium text-white transition hover:border-slate-500">
+                <GitHubIcon className="size-4" /> Star on GitHub
+              </a>
+            </div>
+            <nav aria-label="Product">
+              <h2 className="text-sm font-semibold text-white">Product</h2>
+              <ul className="mt-4 space-y-3 text-sm text-slate-400">
+                <li><a href="#why" className="hover:text-white">Why Xade</a></li>
+                <li><a href="#install" className="hover:text-white">Install</a></li>
+                <li><a href="#download" className="hover:text-white">Download</a></li>
+                <li><a href="#faq" className="hover:text-white">FAQ</a></li>
+              </ul>
+            </nav>
+            <nav aria-label="Project">
+              <h2 className="text-sm font-semibold text-white">Project</h2>
+              <ul className="mt-4 space-y-3 text-sm text-slate-400">
+                <li><a href={REPO} rel="noopener" className="hover:text-white">GitHub</a></li>
+                <li><a href={RELEASES} rel="noopener" className="hover:text-white">Releases</a></li>
+                <li><a href={`${REPO}/issues`} rel="noopener" className="hover:text-white">Report an issue</a></li>
+                <li><a href={`${REPO}/blob/main/LICENSE`} rel="noopener" className="hover:text-white">MIT License</a></li>
+              </ul>
+            </nav>
+          </div>
+          <div className="mt-12 space-y-2 border-t border-edge pt-8 text-xs leading-relaxed text-slate-500">
+            <p>© {new Date().getFullYear()} {OWNER}. All rights reserved.</p>
+            <p>
+              The Xade source code is released under the <a href={`${REPO}/blob/main/LICENSE`} rel="noopener" className="underline hover:text-white">MIT License</a>. Xade™ and the Xade logo are trademarks of {OWNER}; the license does not grant rights to the name or logo.
+            </p>
+          </div>
         </div>
       </footer>
     </div>
