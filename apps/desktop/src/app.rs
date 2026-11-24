@@ -28,10 +28,12 @@ use crate::home::HomeState;
 use crate::keymap::{self, Action, Chord};
 use crate::running::{self, PendingOpen};
 use crate::widgets::delete_modal::{self, PendingDelete};
+use crate::widgets::file_picker::{self, FilePicker};
 use crate::widgets::keymaps_modal;
 use crate::widgets::path_links::PathLinks;
 use crate::widgets::quit_modal;
 use crate::widgets::session_picker::{self, PickerState};
+use crate::windows_state::Saved;
 use crate::workspace::{Tiling, WindowKind};
 use crate::{composer, home, logging, status_bar, theme, workspace};
 
@@ -83,6 +85,11 @@ pub enum UiMsg {
         session: SessionId,
         anchor: uuid::Uuid,
         changes: crate::turn_files::TurnChanges,
+    },
+    /// The file list the quick-open indexed under `root`.
+    PickerFiles {
+        root: PathBuf,
+        files: Vec<String>,
     },
     /// A session folder's file list for `@` autocomplete.
     Files {
@@ -251,6 +258,11 @@ pub struct App {
     pub home: HomeState,
     pub sessions: HashMap<SessionId, SessionVm>,
     pub open_windows: Vec<WindowKind>,
+    /// Where the open windows are saved; `None` for a launch with a path, which leaves the plain window's list alone.
+    windows_file: Option<PathBuf>,
+    windows_saved: Vec<crate::windows_state::Saved>,
+    /// Restored windows still opening; one that fails is dropped quietly instead of reported.
+    restoring: HashSet<Saved>,
     pub focused: Option<WindowKind>,
     pub editors: Editors,
     pub tree: FileTree,
@@ -283,6 +295,8 @@ pub struct App {
     /// The session picker, when open.
     pub picker: Option<PickerState>,
     picker_generation: u64,
+    /// The file quick-open, when open.
+    pub file_picker: Option<FilePicker>,
     /// Sessions running outside Xade, by provider session id.
     pub running: HashMap<String, RunningSession>,
     /// Awaiting confirmation to open a session that is running elsewhere.
@@ -346,6 +360,9 @@ impl App {
             },
             sessions: HashMap::new(),
             open_windows: Vec::new(),
+            windows_file: None,
+            windows_saved: Vec::new(),
+            restoring: HashSet::new(),
             focused: None,
             editors: Editors::default(),
             tree: FileTree::default(),
@@ -368,13 +385,14 @@ impl App {
                 font_family: None,
                 ..Config::default()
             },
-            config_watch: Some(config::Watch::new(config_path)),
+            config_watch: Some(config::Watch::new(config_path.clone())),
             chord: Chord::default(),
             fps: crate::status_bar::FpsMeter::new(),
             sidebar_visible: true,
             keymaps_open: false,
             picker: None,
             picker_generation: 0,
+            file_picker: None,
             running: HashMap::new(),
             pending_open: None,
             pending_delete: None,
@@ -404,6 +422,8 @@ impl App {
         app.load_saved_quota();
         if let Some(root) = initial_workspace {
             app.open_folder(root);
+        } else {
+            app.restore_windows(crate::windows_state::path(&config_path));
         }
         if app.home.preflight_error.is_none() {
             app.start_import();
@@ -422,6 +442,9 @@ impl App {
             home: HomeState::default(),
             sessions: HashMap::new(),
             open_windows: Vec::new(),
+            windows_file: None,
+            windows_saved: Vec::new(),
+            restoring: HashSet::new(),
             focused: None,
             editors: Editors::default(),
             tree: FileTree::default(),
@@ -447,6 +470,7 @@ impl App {
             keymaps_open: false,
             picker: None,
             picker_generation: 0,
+            file_picker: None,
             running: HashMap::new(),
             pending_open: None,
             pending_delete: None,
@@ -1040,7 +1064,49 @@ impl App {
             self.open_windows.push(kind);
             self.maximized = None;
             self.tiling.retile();
+            self.save_windows();
         }
+    }
+
+    /// Reopens the windows saved by the last plain launch (tiled, in order) and keeps saving.
+    /// With no working provider nothing reopens and nothing is saved, so the list survives;
+    /// with `restore_windows` off nothing reopens and the saved list is emptied on the next change.
+    fn restore_windows(&mut self, file: PathBuf) {
+        if self.home.preflight_error.is_some() {
+            return;
+        }
+        let saved = crate::windows_state::load(&file);
+        self.windows_file = Some(file);
+        let reopen = self.config.restore_windows;
+        for w in saved.iter().filter(|_| reopen) {
+            self.restoring.insert(w.clone());
+            match w {
+                Saved::Session(id) => self.open_session(*id),
+                Saved::File(path) => self.open_path(path.clone()),
+            }
+        }
+        self.windows_saved = saved;
+    }
+
+    /// Writes the open windows when they changed (unsaved new files are not kept).
+    fn save_windows(&mut self) {
+        let Some(file) = self.windows_file.clone() else {
+            return;
+        };
+        let now: Vec<Saved> = self
+            .open_windows
+            .iter()
+            .filter(|_| self.config.restore_windows)
+            .filter_map(|k| match k {
+                WindowKind::Session(id) => Some(Saved::Session(*id)),
+                WindowKind::Editor(id) => self.editors.map.get(id)?.path.clone().map(Saved::File),
+            })
+            .collect();
+        if now == self.windows_saved {
+            return;
+        }
+        self.windows_saved = now.clone();
+        crate::windows_state::save_later(&self.rt, file, now);
     }
 
     pub fn focus(&mut self, kind: WindowKind) {
@@ -1079,6 +1145,7 @@ impl App {
         if self.open_windows.is_empty() {
             self.view = View::Home;
         }
+        self.save_windows();
     }
 
     // ----- editors -----
@@ -1117,6 +1184,29 @@ impl App {
                     bridge.send(UiMsg::Report(report));
                     bridge.send(UiMsg::Files {
                         session,
+                        files: Vec::new(),
+                    });
+                }
+            }
+        });
+    }
+
+    /// Opens the file quick-open over `target_dir()`, listing its files in the background.
+    fn open_file_picker(&mut self) {
+        let root = self.target_dir();
+        self.file_picker = Some(FilePicker::new(root.clone()));
+        let bridge = self.bridge.clone();
+        self.rt.spawn(async move {
+            let walk = root.clone();
+            let listed =
+                tokio::task::spawn_blocking(move || crate::mention::list_files(&walk)).await;
+            match listed {
+                Ok(files) => bridge.send(UiMsg::PickerFiles { root, files }),
+                Err(e) => {
+                    let report = ErrorReport::new("Could not list files", e.to_string());
+                    bridge.send(UiMsg::Report(report));
+                    bridge.send(UiMsg::PickerFiles {
+                        root,
                         files: Vec::new(),
                     });
                 }
@@ -1190,7 +1280,11 @@ impl App {
     }
 
     fn on_file_opened(&mut self, path: PathBuf, text: Result<String, String>) {
+        let restoring = self.restoring.remove(&Saved::File(path.clone()));
         match text {
+            Err(e) if restoring => {
+                tracing::warn!(error = %e, "skipping a window that did not reopen")
+            }
             Err(e) => self.report(ErrorReport::new("Could not open the file", e)),
             Ok(text) => {
                 let id = match self.editors.find_path(&path) {
@@ -1421,6 +1515,11 @@ impl App {
                     self.refresh_picker();
                 }
             }
+            Action::QuickOpen => {
+                if self.file_picker.take().is_none() {
+                    self.open_file_picker();
+                }
+            }
             Action::Stop => {
                 if let Some(vm) = focused.and_then(|id| self.sessions.get(&id)) {
                     if vm.status == SessionStatus::Streaming {
@@ -1541,6 +1640,11 @@ impl App {
                 {
                     p.results = page.items;
                     p.selected = p.selected.min(p.results.len().saturating_sub(1));
+                }
+            }
+            UiMsg::PickerFiles { root, files } => {
+                if let Some(p) = self.file_picker.as_mut().filter(|p| p.root == root) {
+                    p.set_files(files);
                 }
             }
             UiMsg::Running { list, transcripts } => self.on_running(list, transcripts),
@@ -1708,6 +1812,10 @@ impl App {
                     self.refresh_git(dir);
                 }
             }
+            (Some(id), AppEventKind::Error(msg)) if self.restoring.remove(&Saved::Session(id)) => {
+                tracing::warn!(error = %msg, "skipping a window that did not reopen");
+                self.drop_session(id);
+            }
             (_, AppEventKind::Error(msg)) => {
                 self.report(ErrorReport::new("Something went wrong", msg))
             }
@@ -1727,6 +1835,7 @@ impl App {
                 self.refresh_cards();
             }
             (Some(_), AppEventKind::SessionOpened { session, messages }) => {
+                self.restoring.remove(&Saved::Session(session.id));
                 self.insert_vm(session, messages);
                 self.refresh_workspaces();
             }
@@ -2162,6 +2271,7 @@ impl App {
             });
         let ctx = ui.ctx().clone();
         session_picker::show(self, &ctx);
+        file_picker::show(self, &ctx);
         running::confirm_modal(self, &ctx);
         delete_modal::show(self, &ctx);
         quit_modal::show(self, &ctx);
@@ -2246,7 +2356,127 @@ mod tests {
         frame(&mut app, vec![key(egui::Key::S)]);
         assert!(app.keymaps_open);
         frame(&mut app, vec![key(egui::Key::P)]);
-        assert!(app.picker.is_some());
+        assert!(app.file_picker.is_some() && app.picker.is_none());
+        app.file_picker = None;
+        // Cmd+P must be released first, or egui reads the next P press as a key repeat.
+        let p = |pressed, modifiers| egui::Event::Key {
+            key: egui::Key::P,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        };
+        frame(&mut app, vec![p(false, egui::Modifiers::COMMAND)]);
+        let cmd_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
+        frame(&mut app, vec![p(true, cmd_shift)]);
+        assert!(app.picker.is_some() && app.file_picker.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn open_windows_are_saved_and_restored_in_order() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-app-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let file = crate::windows_state::path(&dir.join("settings.json"));
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        app.windows_file = Some(file.clone());
+        let (a, b) = (SessionId::new(), SessionId::new());
+        app.add_window(WindowKind::Session(a));
+        app.add_window(WindowKind::Session(b));
+        app.drop_window(WindowKind::Session(a));
+        app.add_window(WindowKind::Session(a));
+        let want = vec![Saved::Session(b), Saved::Session(a)];
+        // The write runs on the blocking pool.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while crate::windows_state::load(&file) != want && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(crate::windows_state::load(&file), want);
+        let mut again = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace2.db"));
+        again.restore_windows(file);
+        assert_eq!(
+            again.open_windows,
+            vec![WindowKind::Session(b), WindowKind::Session(a)]
+        );
+        assert!(again.view == View::Workspace);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn restore_windows_off_reopens_nothing_and_clears_the_list() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-app-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let file = crate::windows_state::path(&dir.join("settings.json"));
+        crate::windows_state::save(&file, &[Saved::Session(SessionId::new())]).unwrap();
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        app.config.restore_windows = false;
+        app.restore_windows(file.clone());
+        assert!(app.open_windows.is_empty() && app.restoring.is_empty());
+        app.add_window(WindowKind::Session(SessionId::new()));
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !crate::windows_state::load(&file).is_empty() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(crate::windows_state::load(&file).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_window_that_fails_to_reopen_is_skipped_quietly() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-app-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let file = crate::windows_state::path(&dir.join("settings.json"));
+        let (gone, good) = (SessionId::new(), SessionId::new());
+        let (missing, present) = (dir.join("missing.rs"), dir.join("present.rs"));
+        crate::windows_state::save(
+            &file,
+            &[
+                Saved::Session(gone),
+                Saved::File(missing.clone()),
+                Saved::Session(good),
+                Saved::File(present.clone()),
+            ],
+        )
+        .unwrap();
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        app.restore_windows(file);
+        let event = |id, kind| {
+            UiMsg::App(Box::new(AppEvent {
+                session_id: Some(id),
+                kind,
+            }))
+        };
+        app.on_msg(event(gone, AppEventKind::Error("not found".into())));
+        app.on_msg(UiMsg::FileOpened {
+            path: missing,
+            text: Err("No such file".into()),
+        });
+        app.on_msg(UiMsg::FileOpened {
+            path: present.clone(),
+            text: Ok("fn main() {}".into()),
+        });
+        // Only the failed ones went, with no error shown; the rest kept their place.
+        assert!(app.errors.current().is_none());
+        let editor = app.editors.find_path(&present).expect("editor opened");
+        assert_eq!(
+            app.open_windows,
+            vec![WindowKind::Session(good), WindowKind::Editor(editor)]
+        );
+        // An error for a session that was not being restored is reported as usual.
+        app.on_msg(event(SessionId::new(), AppEventKind::Error("other".into())));
+        assert!(app.errors.current().is_some());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

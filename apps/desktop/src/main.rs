@@ -20,6 +20,7 @@ mod status_bar;
 mod theme;
 mod turn_files;
 mod widgets;
+mod windows_state;
 mod workspace;
 
 use std::path::{Path, PathBuf};

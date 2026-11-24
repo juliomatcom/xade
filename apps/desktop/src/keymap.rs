@@ -18,6 +18,7 @@ pub enum Action {
     Save,
     SaveAs,
     OpenPicker,
+    QuickOpen,
     Send,
     /// While a turn runs: queue instead of steer, or the reverse.
     SendOther,
@@ -197,6 +198,13 @@ static DEFS: &[Def] = &[
         Action::OpenPicker,
         Group::Sessions,
         "Open session picker",
+        "cmd+shift+p",
+    ),
+    row(
+        "quick_open",
+        Action::QuickOpen,
+        Group::Files,
+        "Open file by name or path",
         "cmd+p",
     ),
     row(

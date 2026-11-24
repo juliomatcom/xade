@@ -118,8 +118,13 @@ pub fn active(input: &str, cursor: usize) -> Option<Active> {
 
 /// The best `MAX_SHOWN` files for `query`; the first files when it is empty.
 pub fn rank(files: &[String], query: &str) -> Vec<String> {
+    rank_top(files, query, MAX_SHOWN)
+}
+
+/// The best `limit` files for `query`; the first files when it is empty.
+pub fn rank_top(files: &[String], query: &str, limit: usize) -> Vec<String> {
     if query.is_empty() {
-        return files.iter().take(MAX_SHOWN).cloned().collect();
+        return files.iter().take(limit).cloned().collect();
     }
     let pattern = Pattern::new(
         query,
@@ -139,7 +144,7 @@ pub fn rank(files: &[String], query: &str) -> Vec<String> {
     scored.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.len().cmp(&b.1.len())));
     scored
         .into_iter()
-        .take(MAX_SHOWN)
+        .take(limit)
         .map(|(_, f)| f.clone())
         .collect()
 }

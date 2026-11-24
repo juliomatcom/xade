@@ -143,12 +143,13 @@ fn body(ui: &mut egui::Ui, data: &DiffData) {
         .or_else(|| data.path.file_name())
         .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
     let area_h = ui.available_height();
+    // `show_rows` sizes its viewport with this spacing, and the rows are drawn without any.
+    ui.spacing_mut().item_spacing.y = 0.0;
     egui::ScrollArea::vertical()
         .id_salt(("diff_rows", &data.path))
         .auto_shrink([false, false])
         .max_height(area_h)
         .show_rows(ui, row_h, data.rows.len(), |ui, range| {
-            ui.spacing_mut().item_spacing.y = 0.0;
             let width = ui.available_width();
             let half = (width - 8.0) / 2.0;
             for row in &data.rows[range] {

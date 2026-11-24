@@ -1,4 +1,4 @@
-//! Quick-open popup (Cmd+P): fuzzy search over every session; Enter opens the selection.
+//! Quick-open popup (Cmd+Shift+P): fuzzy search over every session; Enter opens the selection.
 
 use egui::{Align, Key, Layout, Modifiers, RichText};
 use xade_store::SessionCard;
