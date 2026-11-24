@@ -1,40 +1,98 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" dir="ltr">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <title>Xade: one workspace for all your AI coding agents</title>
-    <meta name="description" content="Xade is a fast native desktop app for running Claude Code and other AI coding agents side by side. Use the subscriptions you already pay for, hand tasks between providers, and review every change in a diff. macOS and Linux." />
-    <meta name="keywords" content="AI coding agents, Claude Code, multi-agent IDE, agentic development environment, Codex, Gemini CLI, local models, AI coding subscriptions, desktop app" />
-    <meta name="author" content="Xade" />
-    <link rel="canonical" href="https://xade.pro/" />
+    <meta name="description" content="Xade is a fast native desktop app, written in Rust, that runs Claude Code and other AI coding agents side by side. Use the subscriptions you already pay for and review every change in a diff. Free, open source, macOS and Linux." />
+    <meta name="keywords" content="AI coding agents, Claude Code, Claude Code GUI, multi-agent IDE, agentic development environment, run multiple AI agents, Codex, Gemini CLI, local models, AI coding subscriptions, Rust desktop app, open source" />
+    <meta name="author" content="Julio César" />
+    <meta name="robots" content="index, follow, max-image-preview:large, max-snippet:-1, max-video-preview:-1" />
+    <meta name="googlebot" content="index, follow, max-image-preview:large, max-snippet:-1" />
+    <meta name="application-name" content="Xade" />
+    <meta name="apple-mobile-web-app-title" content="Xade" />
+    <meta name="format-detection" content="telephone=no" />
+    <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#020617" />
+    <link rel="canonical" href="https://xade.pro/" />
+    <link rel="alternate" hreflang="en" href="https://xade.pro/" />
+    <link rel="alternate" hreflang="x-default" href="https://xade.pro/" />
+    <link rel="sitemap" type="application/xml" href="/sitemap.xml" />
+    <link rel="manifest" href="/site.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="preload" as="image" href="/og.png" fetchpriority="high" />
 
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="Xade" />
+    <meta property="og:locale" content="en_US" />
     <meta property="og:title" content="Xade: one workspace for all your AI coding agents" />
-    <meta property="og:description" content="Run Claude Code and other AI coding agents side by side in a fast native app. All your subscriptions in one place." />
+    <meta property="og:description" content="Run Claude Code and other AI coding agents side by side in a fast native Rust app. All your subscriptions in one place." />
     <meta property="og:url" content="https://xade.pro/" />
     <meta property="og:image" content="https://xade.pro/og.png" />
+    <meta property="og:image:secure_url" content="https://xade.pro/og.png" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Xade running several AI coding agent sessions side by side with a diff review" />
     <meta name="twitter:card" content="summary_large_image" />
     <meta name="twitter:title" content="Xade: one workspace for all your AI coding agents" />
-    <meta name="twitter:description" content="Run Claude Code and other AI coding agents side by side in a fast native app." />
+    <meta name="twitter:description" content="Run Claude Code and other AI coding agents side by side in a fast native Rust app." />
     <meta name="twitter:image" content="https://xade.pro/og.png" />
+    <meta name="twitter:image:alt" content="Xade running several AI coding agent sessions side by side with a diff review" />
 
     <script type="application/ld+json">
       {
         "@context": "https://schema.org",
-        "@type": "SoftwareApplication",
-        "name": "Xade",
-        "alternateName": "X-provider Agentic Development Environment",
-        "applicationCategory": "DeveloperApplication",
-        "operatingSystem": "macOS, Linux",
-        "description": "A fast native desktop app for running several AI coding agent sessions side by side.",
-        "url": "https://xade.pro/",
-        "downloadUrl": "https://github.com/juliomatcom/xade/releases/latest",
-        "license": "https://opensource.org/licenses/MIT",
-        "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" }
+        "@graph": [
+          {
+            "@type": "WebSite",
+            "@id": "https://xade.pro/#website",
+            "url": "https://xade.pro/",
+            "name": "Xade",
+            "description": "One workspace for all your AI coding agents.",
+            "inLanguage": "en",
+            "publisher": { "@id": "https://xade.pro/#author" }
+          },
+          {
+            "@type": "Person",
+            "@id": "https://xade.pro/#author",
+            "name": "Julio César",
+            "url": "https://github.com/juliomatcom"
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "https://xade.pro/#app",
+            "name": "Xade",
+            "alternateName": ["X-provider Agentic Development Environment", "Xade IDE"],
+            "applicationCategory": "DeveloperApplication",
+            "applicationSubCategory": "AI coding agent workspace",
+            "operatingSystem": "macOS, Linux",
+            "softwareRequirements": "Claude Code CLI installed and logged in, git",
+            "programmingLanguage": "Rust",
+            "description": "A fast native desktop app, written in Rust, for running several AI coding agent sessions side by side.",
+            "url": "https://xade.pro/",
+            "image": "https://xade.pro/og.png",
+            "screenshot": "https://xade.pro/og.png",
+            "downloadUrl": "https://github.com/juliomatcom/xade/releases/latest",
+            "installUrl": "https://github.com/juliomatcom/xade/releases/latest",
+            "codeRepository": "https://github.com/juliomatcom/xade",
+            "license": "https://opensource.org/licenses/MIT",
+            "isAccessibleForFree": true,
+            "author": { "@id": "https://xade.pro/#author" },
+            "sameAs": ["https://github.com/juliomatcom/xade"],
+            "featureList": [
+              "Run multiple Claude Code sessions side by side",
+              "Uses your existing CLI login, settings, MCP servers and skills",
+              "Side-by-side diff review of every change",
+              "Per-session auto-approve",
+              "Searchable local session history",
+              "Model and effort picker with context and cost meters",
+              "Native Rust app, no Electron"
+            ],
+            "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD", "availability": "https://schema.org/InStock" }
+          }
+        ]
       }
     </script>
   </head>

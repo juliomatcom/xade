@@ -1,5 +1,6 @@
 import { useState } from "react";
 import LazyLogo from "./LazyLogo";
+import { faq } from "./faq";
 
 const REPO = "https://github.com/juliomatcom/xade";
 const RELEASES = `${REPO}/releases/latest`;
@@ -83,7 +84,7 @@ export default function App() {
           <a href="#why" className="hidden hover:text-white sm:inline">Why Xade</a>
           <a href="#install" className="hover:text-white">Install</a>
           <a href="#download" className="hover:text-white">Download</a>
-          <a href={REPO} className="flex items-center gap-2 rounded-lg border border-edge px-3 py-1.5 text-white transition hover:border-slate-500">
+          <a href={REPO} rel="noopener" className="flex items-center gap-2 rounded-lg border border-edge px-3 py-1.5 text-white transition hover:border-slate-500">
             <GitHubIcon className="size-4" /> GitHub
           </a>
         </nav>
@@ -101,7 +102,7 @@ export default function App() {
           </p>
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <a href="#download" className="rounded-lg bg-jade px-6 py-3 text-sm font-semibold text-ink transition hover:bg-emerald-300">Download Xade</a>
-            <a href={REPO} className="flex items-center gap-2 rounded-lg border border-edge px-6 py-3 text-sm font-semibold text-white transition hover:border-slate-500">
+            <a href={REPO} rel="noopener" className="flex items-center gap-2 rounded-lg border border-edge px-6 py-3 text-sm font-semibold text-white transition hover:border-slate-500">
               <GitHubIcon /> Star on GitHub
             </a>
           </div>
@@ -211,13 +212,37 @@ export default function App() {
           </div>
         </section>
 
+        <section id="faq" className="scroll-mt-8 pb-24" aria-labelledby="faq-title">
+          <h2 id="faq-title" className="text-3xl font-semibold tracking-tight text-white">Frequently asked questions</h2>
+          <div className="mt-8 divide-y divide-edge rounded-2xl border border-edge">
+            {faq.map(([q, a]) => (
+              <details key={q} className="group p-6" open>
+                <summary className="cursor-pointer list-none text-lg font-medium text-white">
+                  <h3 className="inline">{q}</h3>
+                </summary>
+                <p className="mt-2 leading-relaxed text-slate-400">{a}</p>
+              </details>
+            ))}
+          </div>
+          <script
+            type="application/ld+json"
+            dangerouslySetInnerHTML={{
+              __html: JSON.stringify({
+                "@context": "https://schema.org",
+                "@type": "FAQPage",
+                mainEntity: faq.map(([q, a]) => ({ "@type": "Question", name: q, acceptedAnswer: { "@type": "Answer", text: a } })),
+              }),
+            }}
+          />
+        </section>
+
         <section className="pb-24" aria-label="Built from jade">
           <div className="grid items-center gap-6 overflow-hidden rounded-3xl border border-edge bg-gradient-to-br from-slab to-ink p-8 md:grid-cols-2 md:p-12">
             <div>
               <h2 className="text-3xl font-semibold tracking-tight text-white">Open source, built in the open</h2>
               <p className="mt-3 text-slate-400">Xade is MIT licensed and written in Rust. Read the code, file an issue, or send a pull request.</p>
               <div className="mt-6 flex flex-wrap gap-3">
-                <a href={REPO} className="flex items-center gap-2 rounded-lg bg-jade px-5 py-2.5 text-sm font-semibold text-ink transition hover:bg-emerald-300">
+                <a href={REPO} rel="noopener" className="flex items-center gap-2 rounded-lg bg-jade px-5 py-2.5 text-sm font-semibold text-ink transition hover:bg-emerald-300">
                   <GitHubIcon /> Star on GitHub
                 </a>
                 <a href={`${REPO}/issues`} className="rounded-lg border border-edge px-5 py-2.5 text-sm font-semibold text-white transition hover:border-slate-500">Report an issue</a>
@@ -236,7 +261,7 @@ export default function App() {
             © {new Date().getFullYear()} Julio César. Source code released under the <a href={`${REPO}/blob/main/LICENSE`} className="underline hover:text-white">MIT License</a>. Xade™ is a trademark of Julio César; the license does not grant rights to the name or logo.
           </p>
           <nav aria-label="Footer" className="flex gap-6">
-            <a href={REPO} className="flex items-center gap-1.5 hover:text-white"><GitHubIcon className="size-4" /> GitHub</a>
+            <a href={REPO} rel="noopener" className="flex items-center gap-1.5 hover:text-white"><GitHubIcon className="size-4" /> GitHub</a>
             <a href={RELEASES} className="hover:text-white">Releases</a>
             <a href={`${REPO}/blob/main/LICENSE`} className="hover:text-white">License</a>
           </nav>
