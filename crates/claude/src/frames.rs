@@ -10,9 +10,14 @@ pub enum InFrame {
     System(SystemFrame),
     StreamEvent {
         event: StreamEvent,
+        /// Set on frames written by a subagent: the id of the tool call that started it.
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
     },
     Assistant {
         message: AssistantMessage,
+        #[serde(default)]
+        parent_tool_use_id: Option<String>,
     },
     User(UserFrame),
     Result(ResultFrame),
@@ -97,6 +102,8 @@ pub enum AssistantBlock {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UserFrame {
     pub message: UserMessage,
+    #[serde(default)]
+    pub parent_tool_use_id: Option<String>,
     #[serde(default)]
     pub tool_use_result: Option<Value>,
 }

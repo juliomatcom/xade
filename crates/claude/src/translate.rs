@@ -49,13 +49,20 @@ impl Translator {
                     .collect(),
                 _ => vec![],
             },
-            InFrame::StreamEvent { event } => text_delta(event).into_iter().collect(),
-            InFrame::Assistant { message } => {
-                if let Some(u) = &message.usage {
+            InFrame::StreamEvent {
+                event,
+                parent_tool_use_id,
+            } => wrap(parent_tool_use_id, text_delta(event).into_iter().collect()),
+            InFrame::Assistant {
+                message,
+                parent_tool_use_id,
+            } => {
+                // A subagent's usage is its own context, not the session's.
+                if let (Some(u), None) = (&message.usage, &parent_tool_use_id) {
                     self.context_tokens_used =
                         u.input_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens;
                 }
-                message
+                let events = message
                     .content
                     .into_iter()
                     .filter_map(|b| match b {
@@ -71,9 +78,13 @@ impl Translator {
                         }
                         AssistantBlock::Thinking {} | AssistantBlock::Other => None,
                     })
-                    .collect()
+                    .collect();
+                wrap(parent_tool_use_id, events)
             }
-            InFrame::User(u) => tool_results(u),
+            InFrame::User(u) => {
+                let parent = u.parent_tool_use_id.clone();
+                wrap(parent, tool_results(u))
+            }
             InFrame::Result(r) => vec![self.turn_complete(r)],
             InFrame::ControlRequest {
                 request_id,
@@ -189,6 +200,20 @@ fn quota(kind: QuotaKind, w: RateWindow) -> QuotaWindow {
     }
 }
 
+/// Marks `events` as coming from the subagent `parent`, when there is one.
+fn wrap(parent: Option<String>, events: Vec<ProviderEvent>) -> Vec<ProviderEvent> {
+    match parent {
+        None => events,
+        Some(parent_tool_use_id) => events
+            .into_iter()
+            .map(|e| ProviderEvent::Subagent {
+                parent_tool_use_id: parent_tool_use_id.clone(),
+                event: Box::new(e),
+            })
+            .collect(),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)]
 mod tests {
@@ -197,6 +222,28 @@ mod tests {
 
     fn feed(t: &mut Translator, line: &str) -> Vec<ProviderEvent> {
         t.on_frame(parse_line(line).expect("parse"))
+    }
+
+    #[test]
+    fn subagent_frames_are_tagged_and_keep_the_session_context() {
+        let mut t = Translator::default();
+        let main = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":10}}}"#;
+        assert!(matches!(
+            feed(&mut t, main).as_slice(),
+            [ProviderEvent::AssistantText { .. }]
+        ));
+        let sub = r#"{"type":"assistant","parent_tool_use_id":"toolu_1","message":{"content":[{"type":"text","text":"deep"}],"usage":{"input_tokens":999}}}"#;
+        match feed(&mut t, sub).as_slice() {
+            [ProviderEvent::Subagent {
+                parent_tool_use_id,
+                event,
+            }] => {
+                assert_eq!(parent_tool_use_id, "toolu_1");
+                assert!(matches!(**event, ProviderEvent::AssistantText { .. }));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(t.context_tokens_used, 10);
     }
 
     #[test]

@@ -17,7 +17,7 @@ use crate::schema::{self, fmt_ts, to_i64};
 use crate::throwaway;
 use crate::StoreError;
 
-const PREVIEW_CHARS: usize = 200;
+const PREVIEW_CHARS: usize = 800;
 
 pub enum WriteOp {
     /// Insert, or update display name, last-opened time and `is_open` by `root_path`.

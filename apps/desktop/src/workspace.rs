@@ -621,13 +621,22 @@ mod tests {
                     data,
                 }
             }),
+            changes: Default::default(),
             settings_pending: true,
+            turn_base: None,
+            turn_snapshotting: false,
+            turn_files: Default::default(),
+            turn_shared: false,
+            sent_model: String::new(),
+            sent_effort: xade_core::Effort::Default,
             collapsed: false,
             window_rect: None,
             apply_rect: None,
             sync: Default::default(),
             mention: Default::default(),
             attach_note: None,
+            subagent_msgs: Vec::new(),
+            view_subagents: false,
         }
     }
 

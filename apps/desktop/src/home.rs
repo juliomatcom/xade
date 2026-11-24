@@ -12,6 +12,7 @@ use xade_store::SessionCard;
 use crate::app::{App, View};
 use crate::file_tree::{self, TreeAction};
 use crate::keymap::{self, Action};
+use crate::widgets::markdown::markdown;
 use crate::{icons, running, theme};
 
 /// The home grid is `GRID` x `GRID` tiles per page.
@@ -45,6 +46,8 @@ pub struct HomeState {
     pub importing: bool,
     /// `(imported, updated)` of the last finished import.
     pub import_result: Option<(u32, u32)>,
+    /// Parsed card previews; a `RefCell` because cards are drawn from `&App`.
+    pub md_cache: std::cell::RefCell<egui_commonmark::CommonMarkCache>,
 }
 
 /// Room the provider dropdown and the right-hand cluster (buttons, quota meters) take; the
@@ -132,6 +135,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             provider_dropdown(ui);
             let left_end = ui.min_rect().right();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                settings_button(app, ui);
                 if ui
                     .button(icons::SHORTCUTS)
                     .on_hover_text(format!(
@@ -181,8 +185,15 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 {
                     app.run_action(Action::OpenPicker);
                 }
-                for kind in [QuotaKind::SevenDay, QuotaKind::FiveHour] {
-                    quota_meter(ui, kind, app.quota.iter().find(|q| q.kind == kind));
+                // The meters give way when the centered toggle would not fit beside them.
+                let toggle = ui
+                    .data(|d| d.get_temp::<f32>(egui::Id::unique("view_toggle_width")))
+                    .unwrap_or(190.0);
+                let room = ui.min_rect().left() - left_end;
+                if room >= QUOTA_METERS_WIDTH + toggle + 24.0 {
+                    for kind in [QuotaKind::SevenDay, QuotaKind::FiveHour] {
+                        quota_meter(ui, kind, app.quota.iter().find(|q| q.kind == kind));
+                    }
                 }
                 let right_start = ui.min_rect().left();
                 ui.data_mut(|d| {
@@ -190,6 +201,27 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 });
             });
         });
+    });
+}
+
+/// The gear at the top right: click opens `settings.json`, right-click offers the defaults.
+fn settings_button(app: &mut App, ui: &mut egui::Ui) {
+    let gear = ui.button(icons::SETTINGS).on_hover_text(format!(
+        "Settings ({}). Right-click to restore the defaults.",
+        keymap::shortcut_text(Action::OpenSettings)
+    ));
+    if gear.clicked() {
+        app.open_settings();
+    }
+    gear.context_menu(|ui| {
+        if ui
+            .button("Restore default settings")
+            .on_hover_text("The current file is kept as settings.json.bak")
+            .clicked()
+        {
+            app.restore_default_settings();
+            ui.close();
+        }
     });
 }
 
@@ -239,7 +271,10 @@ fn provider_dropdown(ui: &mut egui::Ui) {
         });
 }
 
-/// Always drawn; `q` is `None` until the first quota report arrives.
+/// Both meters side by side: two 150 px slots and their 8 px gaps.
+const QUOTA_METERS_WIDTH: f32 = 316.0;
+
+/// Drawn whenever the bar has room; `q` is `None` until the first quota report arrives.
 fn quota_meter(ui: &mut egui::Ui, kind: QuotaKind, q: Option<&QuotaWindow>) {
     let label = match kind {
         QuotaKind::FiveHour => "5h Session Use",
@@ -663,7 +698,6 @@ fn card_ui(
         .get(&card.id)
         .map_or(SessionStatus::Closed, |vm| vm.status.clone());
     let excerpt = card.excerpt.as_deref().unwrap_or(&card.preview_snippet);
-    let excerpt: String = excerpt.split_whitespace().collect::<Vec<_>>().join(" ");
     let title = if card.title.is_empty() {
         "New session"
     } else {
@@ -703,16 +737,26 @@ fn card_ui(
     );
     y += badge_h + ROW_GAP;
     let rows = ((bottom.top() - ROW_GAP - y) / line_h).floor();
-    if rows >= 1.0 && !excerpt.is_empty() {
-        let g = clipped_text(
-            &painter,
-            &excerpt,
-            small,
-            theme::TEXT_MUTED,
-            inner.width(),
-            rows as usize,
+    if rows >= 1.0 && !excerpt.trim().is_empty() {
+        let r = egui::Rect::from_min_size(
+            egui::pos2(inner.left(), y),
+            egui::vec2(inner.width(), rows * line_h),
         );
-        painter.galley(egui::pos2(inner.left(), y), g, theme::TEXT_MUTED);
+        // Disabled, so the preview never takes a click or hover from the card; the text is
+        // put back to full opacity.
+        ui.scope_builder(egui::UiBuilder::new().max_rect(r), |ui| {
+            ui.shrink_clip_rect(r);
+            ui.disable();
+            ui.set_opacity(1.0);
+            ui.style_mut().override_text_style = Some(egui::TextStyle::Small);
+            ui.visuals_mut().override_text_color = Some(theme::TEXT_MUTED);
+            markdown(
+                ui,
+                &mut app.home.md_cache.borrow_mut(),
+                ("card_md", card.id),
+                excerpt,
+            );
+        });
     }
 
     let row = |ui: &mut egui::Ui, r: egui::Rect, content: &mut dyn FnMut(&mut egui::Ui)| {
@@ -967,6 +1011,30 @@ mod tests {
             walk(&c.shape, &mut texts, &mut circles);
         }
         (texts, circles)
+    }
+
+    #[test]
+    fn card_preview_renders_markdown() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-card-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let mut card = test_card(None, 60);
+        card.preview_snippet = "Some **bold** and `code`\n\n- item one".into();
+        // The second frame lays out what the first only measured.
+        render_card(&app, &ctx, &card);
+        let (texts, _) = render_card(&app, &ctx, &card);
+        let _ = std::fs::remove_dir_all(&dir);
+        let all = texts.join("|");
+        assert!(all.contains("bold") && all.contains("item one"), "{all}");
+        assert!(
+            !all.contains("**") && !all.contains('`'),
+            "raw markdown: {all}"
+        );
     }
 
     #[test]

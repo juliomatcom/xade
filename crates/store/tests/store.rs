@@ -463,10 +463,33 @@ fn m_roundtrip(sent: &Message, got: &Message) -> Message {
 }
 
 #[test]
+fn last_model_choice_carries_model_effort_and_auto() {
+    let f = Fixture::new();
+    f.writer.flush().unwrap();
+    assert!(block_on(f.reader.last_model_choice()).unwrap().is_none());
+    let id = f.add_session("Last", 5);
+    f.writer
+        .send(WriteOp::UpdateSession {
+            id,
+            title: None,
+            provider_session_id: None,
+            model_id: Some("opus".into()),
+            effort: Some(Effort::High),
+            auto_mode: Some(true),
+            preview_snippet: None,
+            usage: None,
+        })
+        .unwrap();
+    f.writer.flush().unwrap();
+    let last = block_on(f.reader.last_model_choice()).unwrap();
+    assert_eq!(last, Some(("opus".to_string(), Effort::High, true)));
+}
+
+#[test]
 fn update_session_and_usage_accumulate() {
     let f = Fixture::new();
     let id = f.add_session("Usage", 5);
-    f.add_message(id, 1, Role::User, "x".repeat(300).as_str());
+    f.add_message(id, 1, Role::User, "x".repeat(1000).as_str());
     f.writer
         .send(WriteOp::UpdateSession {
             id,
@@ -502,7 +525,7 @@ fn update_session_and_usage_accumulate() {
     assert_eq!(s.effort, Effort::XHigh);
     assert!(s.auto_mode);
     assert_eq!(s.title, "Usage", "None fields are left unchanged");
-    assert_eq!(s.preview_snippet.chars().count(), 200);
+    assert_eq!(s.preview_snippet.chars().count(), 800);
     assert_eq!(s.usage.input_tokens, 11);
     assert_eq!(s.usage.output_tokens, 4);
     assert_eq!(s.usage.cost_usd, 0.5);

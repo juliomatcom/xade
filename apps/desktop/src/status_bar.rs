@@ -1,17 +1,107 @@
 //! Bottom status bar: active providers and the git state of the active directory.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use egui::{Align, Layout, RichText};
 use xade_runtime::GitState;
 
 use crate::app::App;
-use crate::keymap::{self, Action};
-use crate::{icons, theme};
+use crate::keymap;
+use crate::theme;
 
-/// Draws the bar; returns whether the Settings button was clicked.
-pub fn show(app: &App, ui: &mut egui::Ui) -> bool {
-    let mut settings = false;
+/// Width reserved for the FPS text, wide enough for "~999+ fps" in any font.
+const FPS_SLOT_WIDTH: f32 = 64.0;
+
+/// A gap longer than this between frames means the UI was idle, not animating.
+const IDLE_GAP: Duration = Duration::from_millis(250);
+
+/// The shown number changes at most this often, so it can be read.
+const FPS_REFRESH: Duration = Duration::from_millis(500);
+
+/// Frame rate readout. Xade only repaints on demand, so an idle UI has no rate: while frames
+/// follow each other it shows the measured rate, otherwise the rate it could sustain
+/// (1 / the last frame's CPU time, prefixed "~").
+pub struct FpsMeter {
+    last_start: Option<Instant>,
+    /// Gap between the last two frame starts.
+    gap: Duration,
+    /// CPU time of the last frame, smoothed.
+    work: Duration,
+    started: Option<Instant>,
+    /// The text on screen and when it was set; see `FPS_REFRESH`.
+    shown: String,
+    shown_at: Option<Instant>,
+}
+
+impl FpsMeter {
+    pub fn new() -> Self {
+        FpsMeter {
+            last_start: None,
+            gap: IDLE_GAP,
+            work: Duration::ZERO,
+            started: None,
+            shown: String::new(),
+            shown_at: None,
+        }
+    }
+
+    pub fn frame_start(&mut self, now: Instant) {
+        if let Some(prev) = self.last_start {
+            self.gap = now.saturating_duration_since(prev);
+        }
+        self.last_start = Some(now);
+        self.started = Some(now);
+    }
+
+    pub fn frame_end(&mut self, now: Instant) {
+        let Some(start) = self.started.take() else {
+            return;
+        };
+        let took = now.saturating_duration_since(start);
+        self.work = if self.work.is_zero() {
+            took
+        } else {
+            self.work.mul_f32(0.8) + took.mul_f32(0.2)
+        };
+        if self
+            .shown_at
+            .is_none_or(|at| now.saturating_duration_since(at) >= FPS_REFRESH)
+        {
+            self.shown = self.current();
+            self.shown_at = Some(now);
+        }
+    }
+
+    /// "120 fps" while animating, "~900 fps" (capacity) when idle; empty before a frame ran.
+    pub fn label(&self) -> String {
+        self.shown.clone()
+    }
+
+    fn current(&self) -> String {
+        if self.last_start.is_none() {
+            return String::new();
+        }
+        if self.gap < IDLE_GAP {
+            return format!("{} fps", fps_text(1.0 / self.gap.as_secs_f32().max(1e-4)));
+        }
+        if self.work.is_zero() {
+            return String::new();
+        }
+        format!("~{} fps", fps_text(1.0 / self.work.as_secs_f32().max(1e-4)))
+    }
+}
+
+/// At most three digits; anything above 999 reads "999+".
+fn fps_text(fps: f32) -> String {
+    let n = fps.round();
+    if n > 999.0 {
+        "999+".into()
+    } else {
+        format!("{n}")
+    }
+}
+
+pub fn show(app: &App, ui: &mut egui::Ui) {
     let frame = egui::Frame::new()
         .fill(theme::BG_STATUS)
         .inner_margin(egui::Margin::symmetric(12, 4));
@@ -20,18 +110,29 @@ pub fn show(app: &App, ui: &mut egui::Ui) -> bool {
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 left(app, ui);
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    settings = ui
-                        .small_button(icons::SETTINGS)
-                        .on_hover_text(format!(
-                            "Settings ({})",
-                            keymap::shortcut_text(Action::OpenSettings)
-                        ))
-                        .clicked();
-                });
+                if app.config.show_fps {
+                    // Rightmost, in a fixed-width slot so the number never shifts anything.
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(FPS_SLOT_WIDTH, ui.spacing().interact_size.y),
+                            Layout::right_to_left(Align::Center),
+                            |ui| {
+                                ui.set_min_width(FPS_SLOT_WIDTH);
+                                ui.label(
+                                    RichText::new(app.fps.label())
+                                        .small()
+                                        .color(theme::TEXT_MUTED),
+                                )
+                                .on_hover_text(
+                                    "Frames per second. Idle: the rate Xade could sustain, \
+                                     from the last frame's CPU time.",
+                                );
+                            },
+                        );
+                    });
+                }
             });
         });
-    settings
 }
 
 /// One dot and name per provider: green when preflight passed, red (error on hover) when not.
@@ -263,18 +364,70 @@ mod tests {
     }
 
     #[test]
-    fn settings_button_sits_at_the_right_edge() {
-        let w = crate::MIN_WINDOW_SIZE[0];
-        let texts = bar("# branch.oid x\n# branch.head main\n", "w", w);
-        let (_, gear) = texts
-            .iter()
-            .find(|(t, _)| t == icons::SETTINGS)
-            .expect("gear drawn");
-        assert!(gear.max.x > w - 40.0 && gear.max.x <= w, "{gear:?}");
+    fn fps_label_shows_measured_rate_when_animating_and_capacity_when_idle() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let mut m = FpsMeter::new();
+        assert_eq!(m.label(), "");
+        m.frame_start(t0);
+        m.frame_end(t0 + ms(2));
+        // First frame has no previous one: capacity from a 2 ms frame.
+        assert_eq!(m.label(), "~500 fps");
+        // Frames 10 ms apart: the number is held for 500 ms, then shows the measured 100 fps.
+        let frame = |m: &mut FpsMeter, at: u64| {
+            m.frame_start(t0 + ms(at));
+            m.frame_end(t0 + ms(at + 2));
+        };
+        for at in (1000..=1100).step_by(10) {
+            frame(&mut m, at);
+        }
+        assert_eq!(m.label(), "~500 fps", "held within the refresh interval");
+        for at in (1110..=1600).step_by(10) {
+            frame(&mut m, at);
+        }
+        assert_eq!(m.label(), "100 fps");
+        // A long pause means idle again.
+        frame(&mut m, 5000);
+        assert!(m.label().starts_with('~'), "{}", m.label());
     }
 
     #[test]
-    fn provider_label_git_info_warning_and_gear_do_not_overlap() {
+    fn fps_text_caps_at_999_plus() {
+        assert_eq!(fps_text(999.4), "999");
+        assert_eq!(fps_text(1000.0), "999+");
+        assert_eq!(fps_text(50_000.0), "999+");
+    }
+
+    #[test]
+    fn widest_fps_label_fits_its_slot() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut w = 0.0;
+        let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let g = ui.painter().layout_no_wrap(
+                "~999+ fps".into(),
+                egui::TextStyle::Small.resolve(ui.style()),
+                egui::Color32::WHITE,
+            );
+            w = g.size().x;
+        });
+        out.drop_without_applying_deltas();
+        assert!(w <= FPS_SLOT_WIDTH, "{w} > {FPS_SLOT_WIDTH}");
+    }
+
+    #[test]
+    fn the_provider_dot_leads_the_bar() {
+        let w = crate::MIN_WINDOW_SIZE[0];
+        let texts = bar_with("# branch.oid x\n# branch.head main\n", "w", w, None, true);
+        let (_, dot) = texts
+            .iter()
+            .find(|(t, _)| t == "\u{25CF}")
+            .expect("provider dot drawn");
+        assert!(dot.min.x < 24.0, "{dot:?}");
+    }
+
+    #[test]
+    fn provider_label_git_info_and_warning_do_not_overlap() {
         let w = crate::MIN_WINDOW_SIZE[0];
         let long = "a-rather-long-workspace-directory-name-for-a-checkout";
         let porcelain = "# branch.oid x\n# branch.head feat/some-branch\n? a\n? b\n";
@@ -302,9 +455,8 @@ mod tests {
                 pair[1]
             );
         }
-        let gear = rects.last().unwrap();
-        assert_eq!(gear.0, icons::SETTINGS);
-        assert!(gear.1.max.x <= w, "{gear:?}");
+        let last = rects.last().unwrap();
+        assert!(last.1.max.x <= w, "{last:?}");
         assert!(provider.1.min.x < 40.0, "{provider:?}");
     }
 }

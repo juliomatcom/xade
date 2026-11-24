@@ -3,11 +3,12 @@
 use std::path::{Path, PathBuf};
 
 use egui::{Key, Modifiers, RichText};
-use xade_core::{Delivery, Effort, ModelOption, SessionStatus, UsageTotals};
+use xade_core::{Delivery, Effort, ModelOption, Role, SessionStatus, UsageTotals};
 use xade_runtime::ManagerCmd;
 
 use crate::app::{push_user_message, SessionVm};
 use crate::config::SendMode;
+use crate::keymap::{self, Action};
 use crate::running::{self, CacheKind};
 use crate::workspace::Env;
 use crate::{attach, icons, mention, send_anim, theme};
@@ -40,10 +41,13 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
     let mut send: Option<bool> = None;
     let input_id = ui.scope_id().with("composer_input");
     let focused = ui.memory(|m| m.has_focus(input_id));
-    // The Shift variant first: Cmd+Enter would also match it.
-    let hotkey_other = focused
-        && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND | Modifiers::SHIFT, Key::Enter));
-    let hotkey = focused && ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::Enter));
+    let pressed = if focused {
+        ui.input_mut(keymap::take_send)
+    } else {
+        None
+    };
+    let hotkey_other = pressed == Some(Action::SendOther);
+    let hotkey = pressed == Some(Action::Send);
     // Pasting copied files or an image attaches them, like the attach button.
     if focused {
         if let Some(files) = ui.input_mut(|i| take_pasted_files(&mut i.events, clipboard_files)) {
@@ -60,6 +64,15 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
                 .request_repaint_after(ATTACH_NOTE_TTL.saturating_sub(at.elapsed()));
             note_frame(ui, text);
         }
+    }
+    if let Some(text) = settings_note(vm, env) {
+        note_frame(ui, &text);
+    }
+    let agents = running_subagents(vm);
+    if agents == 0 {
+        vm.view_subagents = false;
+    } else if subagent_badge(ui, agents, vm.view_subagents) {
+        vm.view_subagents = !vm.view_subagents;
     }
     if idle {
         let last = vm
@@ -98,11 +111,11 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
                                         .frame(egui::Frame::NONE)
                                         .desired_width(f32::INFINITY)
                                         .desired_rows(INPUT_MIN_ROWS)
-                                        .hint_text(if running {
-                                            "Message (Cmd+Enter to queue or steer)"
-                                        } else {
-                                            "Message (Cmd+Enter to send)"
-                                        }),
+                                        .hint_text(format!(
+                                            "Message ({} to {})",
+                                            keymap::shortcut_text(Action::Send),
+                                            if running { "queue or steer" } else { "send" }
+                                        )),
                                 );
                             });
                     })
@@ -468,7 +481,7 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool {
         let pill = egui::Button::new(RichText::new(text).small().color(fg))
             .fill(fill)
             .stroke(egui::Stroke::new(1.0, stroke))
-            .corner_radius(10);
+            .corner_radius(3);
         if ui.add(pill).clicked() {
             vm.session.auto_mode = !on;
             let _ = env.cmd_tx.send(ManagerCmd::SetAutoMode {
@@ -505,6 +518,110 @@ pub fn mention(cwd: &Path, path: &Path) -> String {
 }
 
 /// A warning line with the warning icon, above the input.
+/// Says what changed since the last message and what the next one costs for it: a different
+/// model or thinking effort resends the whole context at full price.
+fn settings_note(vm: &SessionVm, env: &Env) -> Option<String> {
+    let context = vm.session.usage.context_tokens_used;
+    if context == 0 {
+        return None;
+    }
+    let models = env
+        .providers
+        .iter()
+        .find(|p| p.id() == vm.session.provider_id)
+        .map(|p| p.models())
+        .unwrap_or_default();
+    let label = |id: &str| {
+        models
+            .iter()
+            .find(|m| m.id == id)
+            .map_or_else(|| id.to_string(), |m| m.label.clone())
+    };
+    let mut changes = Vec::new();
+    if vm.session.effort != vm.sent_effort {
+        changes.push(format!(
+            "Thinking effort changed from {} to {}",
+            effort_label(vm.sent_effort),
+            effort_label(vm.session.effort)
+        ));
+    }
+    if vm.session.model_id != vm.sent_model {
+        changes.push(format!(
+            "Model changed from {} to {}",
+            label(&vm.sent_model),
+            label(&vm.session.model_id)
+        ));
+    }
+    if changes.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{}. The next message resends ~{} tokens of context at full price.",
+        changes.join("; "),
+        fmt_tokens(context)
+    ))
+}
+
+/// Subagents (the `Task` / `Agent` tool) whose call has no result yet; none once the turn ended.
+fn running_subagents(vm: &SessionVm) -> usize {
+    if !matches!(
+        vm.status,
+        SessionStatus::Streaming | SessionStatus::NeedsApproval
+    ) {
+        return 0;
+    }
+    let done: std::collections::HashSet<&str> = vm
+        .messages
+        .iter()
+        .filter(|m| m.role == Role::ToolResult)
+        .filter_map(|m| m.tool_use_id.as_deref())
+        .collect();
+    vm.messages
+        .iter()
+        .filter(|m| m.role == Role::ToolCall)
+        .filter(|m| matches!(m.tool_name.as_deref(), Some("Task" | "Agent")))
+        .filter(|m| m.tool_use_id.as_deref().is_some_and(|t| !done.contains(t)))
+        .count()
+}
+
+/// A pill toggling the subagent chat; returns whether it was clicked.
+fn subagent_badge(ui: &mut egui::Ui, count: usize, active: bool) -> bool {
+    let frame = egui::Frame::new()
+        .fill(if active {
+            theme::CLAUDE.gamma_multiply(0.25)
+        } else {
+            egui::Color32::TRANSPARENT
+        })
+        .stroke(egui::Stroke::new(1.0, theme::CLAUDE))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::symmetric(6, 0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add(egui::Spinner::new().size(10.0).color(theme::CLAUDE));
+                let text = if count == 1 {
+                    "Subagent running".to_string()
+                } else {
+                    format!("{count} subagents running")
+                };
+                ui.label(RichText::new(text).small().color(theme::CLAUDE));
+            });
+        });
+    let resp = ui
+        .interact(
+            frame.response.rect,
+            ui.scope_id().with("subagent_badge"),
+            egui::Sense::click(),
+        )
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(if active {
+            "Close the subagent window"
+        } else {
+            "Open the subagent chat in its own window"
+        });
+    ui.add_space(4.0);
+    resp.clicked()
+}
+
 fn note_frame(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new()
         .fill(theme::BG_RAISED)
@@ -692,13 +809,22 @@ mod tests {
             md_cache: egui_commonmark::CommonMarkCache::default(),
             path_links: Default::default(),
             diff: None,
+            changes: Default::default(),
             settings_pending: false,
+            turn_base: None,
+            turn_snapshotting: false,
+            turn_files: Default::default(),
+            turn_shared: false,
+            sent_model: String::new(),
+            sent_effort: xade_core::Effort::Default,
             collapsed: false,
             window_rect: None,
             apply_rect: None,
             sync: Default::default(),
             mention: Default::default(),
             attach_note: None,
+            subagent_msgs: Vec::new(),
+            view_subagents: false,
         }
     }
 
@@ -825,6 +951,35 @@ mod tests {
         let old = now - ATTACH_NOTE_TTL - std::time::Duration::from_secs(1);
         let expired = height_with_note(Some(("stale".into(), old)));
         assert!((expired - plain).abs() < 1.0, "expired note is gone");
+    }
+
+    #[test]
+    fn a_changed_effort_is_named_with_the_previous_one_and_clears_on_send() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            vscode: None,
+            maximized: None,
+            send_mode: crate::config::SendMode::Queue,
+        };
+        let mut v = vm(String::new());
+        v.sent_model.clone_from(&v.session.model_id);
+        v.sent_effort = Effort::High;
+        v.session.effort = Effort::Low;
+        assert!(settings_note(&v, &env).is_none(), "nothing to resend yet");
+        v.session.usage.context_tokens_used = 42_000;
+        let note = settings_note(&v, &env).unwrap();
+        assert!(note.contains("changed from High to Low"), "{note}");
+        assert!(note.contains("42"), "{note}");
+        v.session.effort = Effort::High;
+        assert!(settings_note(&v, &env).is_none(), "changed back");
+        v.session.effort = Effort::Low;
+        send_now(&mut v, &env, "go".into(), None);
+        assert!(
+            settings_note(&v, &env).is_none(),
+            "the message went out with Low"
+        );
     }
 
     #[test]
@@ -1004,6 +1159,24 @@ mod tests {
             "uncapped: {one:?} {many:?}"
         );
         assert!(many.width() <= 700.0);
+    }
+
+    #[test]
+    fn subagents_count_calls_without_results_while_busy() {
+        let mut v = vm(String::new());
+        let call = |v: &mut SessionVm, role, name: Option<&str>, id: &str| {
+            let mut m = crate::app::new_message(v, role, String::new(), Some(id.into()));
+            m.tool_name = name.map(Into::into);
+            v.messages.push(m);
+        };
+        call(&mut v, Role::ToolCall, Some("Agent"), "a");
+        call(&mut v, Role::ToolCall, Some("Agent"), "b");
+        call(&mut v, Role::ToolCall, Some("Bash"), "c");
+        call(&mut v, Role::ToolResult, None, "a");
+        v.status = SessionStatus::Streaming;
+        assert_eq!(running_subagents(&v), 1);
+        v.status = SessionStatus::Idle;
+        assert_eq!(running_subagents(&v), 0);
     }
 
     #[test]

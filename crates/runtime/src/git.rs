@@ -68,7 +68,7 @@ pub async fn git_status(dir: &Path) -> GitState {
     }
 }
 
-async fn toplevel(dir: &Path) -> Option<PathBuf> {
+pub async fn toplevel(dir: &Path) -> Option<PathBuf> {
     let mut cmd = Command::new("git");
     cmd.arg("-C")
         .arg(dir)

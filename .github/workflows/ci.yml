@@ -35,13 +35,11 @@ jobs:
       - name: Build
         run: cargo build --workspace --release
 
-  release-macos:
-    # Every push to main publishes Xade.app as a zip on a new GitHub Release.
+  build-macos:
+    # Every push to main builds Xade.app; the publish job attaches it to the release.
     if: github.event_name == 'push'
     needs: check
     runs-on: macos-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -52,13 +50,53 @@ jobs:
           ./scripts/bundle-macos.sh "$PWD/dist"
       - name: Zip
         run: ditto -c -k --keepParent dist/Xade.app Xade-macos-arm64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xade-macos
+          path: Xade-macos-arm64.zip
+          if-no-files-found: error
+
+  build-linux:
+    # Runs on pull requests too, so a Linux build break never blocks the release after merge.
+    # eframe and rfd load wayland/xkbcommon/X11/GL libraries at runtime; the -dev packages
+    # are a safety net for the build.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libxkbcommon-dev libwayland-dev pkg-config
+      - name: Bundle Xade-linux-x86_64.tar.gz
+        run: ./scripts/bundle-linux.sh "$PWD/dist"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xade-linux
+          path: dist/Xade-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  publish:
+    # One release per push to main carries both assets.
+    if: github.event_name == 'push'
+    needs: [build-macos, build-linux]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="$(grep -m1 '^version' apps/desktop/Cargo.toml | cut -d'"' -f2)"
           TAG="v${VERSION}-build.${{ github.run_number }}"
-          gh release create "$TAG" Xade-macos-arm64.zip \
+          gh release create "$TAG" assets/Xade-macos-arm64.zip assets/Xade-linux-x86_64.tar.gz \
             --target "${{ github.sha }}" \
             --title "Xade $VERSION (build ${{ github.run_number }})" \
             --notes "Automated build of ${{ github.sha }}. Unsigned: right-click Xade.app > Open the first time."

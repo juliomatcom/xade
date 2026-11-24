@@ -9,6 +9,7 @@ use xade_core::{Delivery, Message, Role, SessionStatus};
 
 use crate::app::SessionVm;
 use crate::theme;
+use crate::widgets::changes_summary;
 use crate::widgets::markdown::markdown;
 use crate::widgets::path_links::PathLinks;
 use crate::widgets::tool_card::{self, CardStatus};
@@ -17,11 +18,15 @@ use crate::widgets::tool_card::{self, CardStatus};
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
     let mut review = None;
     let mut open = None;
+    let mut changes_review = None;
+    let mut turn_review: Option<(uuid::Uuid, usize)> = None;
     let SessionVm {
         cwd,
         messages,
         md_cache,
         path_links,
+        changes,
+        turn_files,
         live_text,
         thinking_tokens,
         status,
@@ -47,7 +52,11 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                 .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    for m in messages.iter() {
+                    let mut turn_start = 0;
+                    for (i, m) in messages.iter().enumerate() {
+                        if m.role == Role::User {
+                            turn_start = i;
+                        }
                         row(ui, |ui| match m.role {
                             Role::User => {
                                 open = open
@@ -90,6 +99,42 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                             Role::ToolResult => {}
                         });
                         ui.add_space(6.0);
+                        // A finished turn ends before the next user message, or at the last one once idle.
+                        let ends = messages.get(i + 1).map_or(!busy, |n| n.role == Role::User);
+                        if ends {
+                            // What the working tree shows (Bash edits included) beats what the
+                            // edit tools reported; the latter is all a reopened session has.
+                            let tree = turn_files.get(&m.id).filter(|c| !c.files.is_empty());
+                            if let Some(c) = tree {
+                                let list: Vec<changes_summary::FileChange> = c
+                                    .files
+                                    .iter()
+                                    .map(changes_summary::FileChange::from)
+                                    .collect();
+                                let source = changes_summary::Source::Tree { shared: c.shared };
+                                row(ui, |ui| {
+                                    if let Some(n) = changes_summary::show(ui, cwd, &list, source) {
+                                        turn_review = Some((m.id, n));
+                                    }
+                                });
+                                ui.add_space(6.0);
+                            } else {
+                                let files = changes.get(&messages[turn_start..=i], cwd);
+                                if !files.is_empty() {
+                                    row(ui, |ui| {
+                                        if let Some(n) = changes_summary::show(
+                                            ui,
+                                            cwd,
+                                            files,
+                                            changes_summary::Source::Edits,
+                                        ) {
+                                            changes_review = Some(files[n].calls.clone());
+                                        }
+                                    });
+                                    ui.add_space(6.0);
+                                }
+                            }
+                        }
                     }
                     if !live_text.is_empty() {
                         assistant(ui, |ui| {
@@ -113,6 +158,12 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
         });
     if let Some(id) = review {
         vm.open_diff(&id);
+    }
+    if let Some((anchor, n)) = turn_review {
+        vm.open_turn_file(anchor, n);
+    }
+    if let Some(calls) = changes_review {
+        vm.open_changes(&calls);
     }
     open
 }
@@ -208,7 +259,7 @@ fn assistant(
 const CLAUDE_SYMBOL: &[u8] = include_bytes!("../../../assets/claude-symbol.png");
 
 /// The symbol as a texture, decoded and uploaded on first use.
-fn claude_symbol(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+pub(crate) fn claude_symbol(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let id = egui::Id::unique("claude_symbol_texture");
     if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return Some(tex);
@@ -361,13 +412,22 @@ mod tests {
             md_cache: CommonMarkCache::default(),
             path_links: Default::default(),
             diff: None,
+            changes: Default::default(),
             settings_pending: false,
+            turn_base: None,
+            turn_snapshotting: false,
+            turn_files: Default::default(),
+            turn_shared: false,
+            sent_model: String::new(),
+            sent_effort: xade_core::Effort::Default,
             collapsed: false,
             window_rect: None,
             apply_rect: None,
             sync: Default::default(),
             mention: Default::default(),
             attach_note: None,
+            subagent_msgs: Vec::new(),
+            view_subagents: false,
         }
     }
 
@@ -524,5 +584,100 @@ mod tests {
             msg(Role::Assistant, &format!("```\n{token}\n```"), None, None),
         ]);
         assert_stacked(&render(&mut v, Cards::Collapsed), 3);
+    }
+
+    /// A turn editing a.rs twice and b.rs once, each call with a result.
+    fn edit_turn() -> Vec<Message> {
+        let call = |id: &str, file: &str| {
+            let input = format!(r#"{{"file_path":"{file}","old_string":"a","new_string":"b"}}"#);
+            [
+                msg(Role::ToolCall, "", Some(("Edit", id)), Some(&input)),
+                msg(Role::ToolResult, "ok", Some(("Edit", id)), Some("{}")),
+            ]
+        };
+        let mut t = vec![msg(Role::User, "go", None, None)];
+        for (id, file) in [
+            ("e1", "/tmp/a.rs"),
+            ("e2", "/tmp/b.rs"),
+            ("e3", "/tmp/a.rs"),
+        ] {
+            t.extend(call(id, file));
+        }
+        t.push(msg(Role::Assistant, "done", None, None));
+        t
+    }
+
+    #[test]
+    fn a_finished_turn_ends_with_a_changes_summary_but_a_running_one_does_not() {
+        let mut v = vm(edit_turn());
+        let rows = render(&mut v, Cards::Collapsed);
+        assert_stacked(&rows, 9);
+        assert!(rows[8].allocated.height() > 30.0, "{:?}", rows[8]);
+        assert_eq!(v.changes.get(&v.messages, &v.cwd).len(), 2);
+        let mut v = vm(edit_turn());
+        v.status = SessionStatus::Streaming;
+        assert_stacked(&render(&mut v, Cards::Collapsed), 8);
+    }
+
+    #[test]
+    fn a_turn_that_edited_through_bash_still_ends_with_a_changes_summary() {
+        let tf = |name: &str| crate::turn_files::TurnFile {
+            path: PathBuf::from(format!("/tmp/{name}")),
+            added: 2,
+            removed: 1,
+            old: "a\n".into(),
+            new: "b\n".into(),
+        };
+        let mut v = vm(vec![
+            msg(Role::User, "fix", None, None),
+            msg(Role::Assistant, "done", None, None),
+        ]);
+        let anchor = v.messages[1].id;
+        assert_stacked(&render(&mut v, Cards::Collapsed), 2);
+        let files = vec![tf("a.rs"), tf("b.rs")];
+        v.turn_files.insert(
+            anchor,
+            crate::turn_files::TurnChanges {
+                files,
+                shared: false,
+            },
+        );
+        let rows = render(&mut v, Cards::Collapsed);
+        assert_stacked(&rows, 3);
+        assert!(rows[2].allocated.height() > 30.0, "{:?}", rows[2]);
+        v.open_turn_file(anchor, 1);
+        let d = v.diff.as_ref().unwrap();
+        assert_eq!(d.data.path, Path::new("/tmp/b.rs"));
+        assert_eq!((d.data.added, d.data.removed), (1, 1));
+
+        let mut v = vm(vec![
+            msg(Role::User, "fix", None, None),
+            msg(Role::Assistant, "done", None, None),
+        ]);
+        let anchor = v.messages[1].id;
+        v.turn_files.insert(
+            anchor,
+            crate::turn_files::TurnChanges {
+                files: vec![tf("a.rs")],
+                shared: false,
+            },
+        );
+        assert_stacked(&render(&mut v, Cards::Collapsed), 3);
+    }
+
+    #[test]
+    fn opening_a_file_from_the_summary_merges_its_edits_read_only() {
+        let mut v = vm(edit_turn());
+        let calls = v.changes.get(&v.messages, &v.cwd)[0].calls.clone();
+        v.open_changes(&calls);
+        let d = v.diff.as_ref().unwrap();
+        assert!(d.tool_use_id.is_empty());
+        assert_eq!(d.data.path, Path::new("/tmp/a.rs"));
+        let seps = d
+            .data
+            .rows
+            .iter()
+            .filter(|r| matches!(r, crate::diff::Row::Sep(_)));
+        assert_eq!(seps.count(), 2);
     }
 }

@@ -55,6 +55,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
         .frame(egui::Frame::NONE)
         .show(ui, |ui| out.open_file = conversation::show(ui, vm));
     send_anim::show(ui, vm.session.id, chat.response.rect);
+    subagent_window(ui.ctx(), vm);
     out
 }
 
@@ -78,9 +79,11 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
     chrome::header(ui, maximized, vm.collapsed, "Close session", out, |ui| {
         status_dot(ui, &vm.status);
         home::origin_badge(ui, vm.session.origin);
-        ui.add(
-            egui::Label::new(RichText::new(format!("{title} • {provider}")).strong()).truncate(),
-        );
+        ui.add(egui::Label::new(RichText::new(format!("{title} •")).strong()).truncate());
+        if let Some(tex) = conversation::claude_symbol(ui.ctx()) {
+            ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)));
+        }
+        ui.add(egui::Label::new(RichText::new(provider).strong()).truncate());
         if !cwd.is_empty() {
             ui.label(RichText::new(cwd).small().color(theme::TEXT_MUTED))
                 .on_hover_text(vm.cwd.display().to_string());
@@ -209,4 +212,30 @@ fn banner(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
         }
         vm.pending_permission = None;
     }
+}
+
+/// The subagent chat in its own floating window: read-only, so no composer, with a note saying
+/// whose chat it is. Shown while the composer's subagent badge is on.
+fn subagent_window(ctx: &egui::Context, vm: &mut SessionVm) {
+    if !vm.view_subagents {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Subagent")
+        .id(egui::Id::unique(("subagent_window", vm.session.id)))
+        .open(&mut open)
+        .default_size([480.0, 520.0])
+        .resizable(true)
+        .show(ctx, |ui| {
+            ui.label(
+                RichText::new("This is a subagent working for the main chat. Read-only.")
+                    .small()
+                    .color(theme::TEXT_MUTED),
+            );
+            ui.separator();
+            std::mem::swap(&mut vm.messages, &mut vm.subagent_msgs);
+            conversation::show(ui, vm);
+            std::mem::swap(&mut vm.messages, &mut vm.subagent_msgs);
+        });
+    vm.view_subagents = open && vm.view_subagents;
 }

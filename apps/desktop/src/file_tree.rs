@@ -132,9 +132,22 @@ pub fn click_action(e: &Entry) -> TreeAction {
 }
 
 /// Draws the children of the expanded folder `dir` at `depth`, walking only expanded folders.
+/// `dir` is the workspace root: the right-click menu copies paths relative to it.
 pub fn show(
     ui: &mut egui::Ui,
     tree: &FileTree,
+    dir: &Path,
+    depth: usize,
+    changed: Option<&HashSet<PathBuf>>,
+    out: &mut Vec<TreeAction>,
+) {
+    show_in(ui, tree, dir, dir, depth, changed, out);
+}
+
+fn show_in(
+    ui: &mut egui::Ui,
+    tree: &FileTree,
+    root: &Path,
     dir: &Path,
     depth: usize,
     changed: Option<&HashSet<PathBuf>>,
@@ -148,11 +161,11 @@ pub fn show(
             for e in &l.entries {
                 let open = e.kind == Kind::Dir && tree.is_expanded(&e.path);
                 let dirty = changed.is_some_and(|c| c.contains(&e.path));
-                if row(ui, depth, e, open, dirty) {
+                if row(ui, root, depth, e, open, dirty) {
                     out.push(click_action(e));
                 }
                 if open {
-                    show(ui, tree, &e.path, depth + 1, changed, out);
+                    show_in(ui, tree, root, &e.path, depth + 1, changed, out);
                 }
             }
             if l.more > 0 {
@@ -186,7 +199,7 @@ fn note(ui: &mut egui::Ui, depth: usize, text: &str) {
 
 /// One entry row; `true` when clicked. Rows scrolled out of view are allocated, not painted.
 /// `dirty`: the entry (or a file inside it) has uncommitted changes.
-fn row(ui: &mut egui::Ui, depth: usize, e: &Entry, open: bool, dirty: bool) -> bool {
+fn row(ui: &mut egui::Ui, root: &Path, depth: usize, e: &Entry, open: bool, dirty: bool) -> bool {
     let (rect, resp) = row_rect(ui, Sense::click());
     if ui.is_rect_visible(rect) {
         if resp.hovered() {
@@ -214,9 +227,27 @@ fn row(ui: &mut egui::Ui, depth: usize, e: &Entry, open: bool, dirty: bool) -> b
             if dirty { theme::WARN } else { theme::TEXT },
         );
     }
-    resp.on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(&e.name)
-        .clicked()
+    let resp = resp
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .on_hover_text(&e.name);
+    resp.context_menu(|ui| {
+        let (relative, full) = path_texts(root, &e.path);
+        if ui.button("Copy relative path").clicked() {
+            ui.ctx().copy_text(relative);
+            ui.close();
+        }
+        if ui.button("Copy full path").clicked() {
+            ui.ctx().copy_text(full);
+            ui.close();
+        }
+    });
+    resp.clicked()
+}
+
+/// `(relative to root, full)` text of an entry's path.
+fn path_texts(root: &Path, path: &Path) -> (String, String) {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    (relative.display().to_string(), path.display().to_string())
 }
 
 #[cfg(test)]
@@ -234,6 +265,20 @@ mod tests {
 
     fn names(l: &Listing) -> Vec<&str> {
         l.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    #[test]
+    fn copied_paths_are_relative_to_the_workspace_root_or_full() {
+        let (rel, full) = path_texts(Path::new("/w/proj"), Path::new("/w/proj/src/a.rs"));
+        assert_eq!(
+            (rel.as_str(), full.as_str()),
+            ("src/a.rs", "/w/proj/src/a.rs")
+        );
+        let (rel, _) = path_texts(Path::new("/w/proj"), Path::new("/elsewhere/b.rs"));
+        assert_eq!(
+            rel, "/elsewhere/b.rs",
+            "outside the root there is nothing to cut"
+        );
     }
 
     #[test]

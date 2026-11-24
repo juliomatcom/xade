@@ -1,6 +1,8 @@
 //! The single source of keyboard shortcuts: the dispatcher (`App::run_action`), the keymaps
-//! modal and the button tooltips all read `BINDINGS`. There is no user remapping.
+//! modal and the button tooltips all read the current `Keymap`, built from the defaults below
+//! and the `shortcuts` block of `settings.json`.
 
+use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use egui::{Event, Key, Modifiers};
@@ -74,37 +76,42 @@ pub struct Stroke {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Show {
     Row,
-    /// One row for a run of bindings, shown as "first ... last".
-    Through(Stroke),
+    /// One row for a run of bindings, shown as "first ... last" (the last is this action's).
+    Through(Action),
     Hidden,
 }
 
+#[derive(Clone, PartialEq, Debug)]
 pub struct Binding {
     pub action: Action,
     pub group: Group,
     pub title: &'static str,
+    /// The `settings.json` name; `None` for the fixed bindings.
+    pub name: Option<&'static str>,
     /// One stroke, or two for a chord.
-    pub keys: &'static [Stroke],
+    pub keys: Vec<Stroke>,
     pub show: Show,
 }
 
-const CMD: Modifiers = Modifiers::COMMAND;
-const CMD_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
-
-#[cfg(debug_assertions)]
-const CMD_SHIFT_ALT: Modifiers = CMD_SHIFT.plus(Modifiers::ALT);
-
-const fn k(mods: Modifiers, key: Key) -> Stroke {
-    Stroke { mods, key }
-}
-
-const fn row(
+/// A binding as shipped: static metadata plus the default keys as `settings.json` text.
+struct Def {
+    name: Option<&'static str>,
     action: Action,
     group: Group,
     title: &'static str,
-    keys: &'static [Stroke],
-) -> Binding {
-    Binding {
+    keys: &'static str,
+    show: Show,
+}
+
+const fn row(
+    name: &'static str,
+    action: Action,
+    group: Group,
+    title: &'static str,
+    keys: &'static str,
+) -> Def {
+    Def {
+        name: Some(name),
         action,
         group,
         title,
@@ -113,165 +120,356 @@ const fn row(
     }
 }
 
-/// A binding the keymaps modal never lists.
-#[cfg(debug_assertions)]
-const fn hidden(action: Action, keys: &'static [Stroke]) -> Binding {
-    Binding {
-        action,
-        group: Group::General,
-        title: "Debug",
-        keys,
-        show: Show::Hidden,
-    }
-}
-
-const fn focus(n: u8, keys: &'static [Stroke]) -> Binding {
-    Binding {
+const fn focus(name: &'static str, n: u8, keys: &'static str) -> Def {
+    Def {
+        name: Some(name),
         action: Action::FocusWindow(n),
         group: Group::Layout,
         title: "Focus window 1-9",
         keys,
         show: if n == 1 {
-            Show::Through(k(CMD, Key::Num9))
+            Show::Through(Action::FocusWindow(9))
         } else {
             Show::Hidden
         },
     }
 }
 
-pub static BINDINGS: &[Binding] = &[
+/// A binding `settings.json` cannot change.
+const fn fixed(action: Action, group: Group, title: &'static str, keys: &'static str) -> Def {
+    Def {
+        name: None,
+        action,
+        group,
+        title,
+        keys,
+        show: Show::Row,
+    }
+}
+
+/// A fixed binding the keymaps modal never lists.
+#[cfg(debug_assertions)]
+const fn hidden(action: Action, keys: &'static str) -> Def {
+    Def {
+        show: Show::Hidden,
+        ..fixed(action, Group::General, "Debug", keys)
+    }
+}
+
+static DEFS: &[Def] = &[
     row(
+        "new_session",
         Action::NewSession,
         Group::Sessions,
         "New session in the selected workspace",
-        &[k(CMD, Key::T)],
+        "cmd+t",
     ),
-    row(Action::NewFile, Group::Files, "New file", &[k(CMD, Key::N)]),
     row(
+        "new_file",
+        Action::NewFile,
+        Group::Files,
+        "New file",
+        "cmd+n",
+    ),
+    row(
+        "open_file",
         Action::OpenFile,
         Group::Files,
         "Open file",
-        &[k(CMD, Key::O)],
+        "cmd+o",
     ),
     row(
+        "save",
         Action::Save,
         Group::Files,
         "Save the focused file",
-        &[k(CMD, Key::S)],
+        "cmd+s",
     ),
     row(
+        "save_as",
         Action::SaveAs,
         Group::Files,
         "Save the focused file as",
-        &[k(CMD_SHIFT, Key::S)],
+        "cmd+shift+s",
     ),
     row(
+        "open_picker",
         Action::OpenPicker,
         Group::Sessions,
         "Open session picker",
-        &[k(CMD, Key::P)],
+        "cmd+p",
     ),
     row(
+        "close_window",
         Action::CloseWindow,
         Group::Sessions,
         "Close the focused window",
-        &[k(CMD, Key::W)],
+        "cmd+w",
     ),
     row(
+        "send",
         Action::Send,
         Group::Chat,
         "Send prompt",
-        &[k(CMD, Key::Enter)],
+        "cmd+enter",
     ),
     row(
+        "send_other",
         Action::SendOther,
         Group::Chat,
         "Send the other way while running (queue / steer)",
-        &[k(CMD_SHIFT, Key::Enter)],
+        "cmd+shift+enter",
     ),
     row(
+        "stop",
         Action::Stop,
         Group::Chat,
         "Stop the current turn",
-        &[k(CMD, Key::Period)],
+        "cmd+period",
     ),
     row(
+        "toggle_auto",
         Action::ToggleAuto,
         Group::Chat,
         "Toggle Auto mode (focused session)",
-        &[k(CMD_SHIFT, Key::A)],
+        "cmd+shift+a",
     ),
-    focus(1, &[k(CMD, Key::Num1)]),
-    focus(2, &[k(CMD, Key::Num2)]),
-    focus(3, &[k(CMD, Key::Num3)]),
-    focus(4, &[k(CMD, Key::Num4)]),
-    focus(5, &[k(CMD, Key::Num5)]),
-    focus(6, &[k(CMD, Key::Num6)]),
-    focus(7, &[k(CMD, Key::Num7)]),
-    focus(8, &[k(CMD, Key::Num8)]),
-    focus(9, &[k(CMD, Key::Num9)]),
+    focus("focus_window_1", 1, "cmd+1"),
+    focus("focus_window_2", 2, "cmd+2"),
+    focus("focus_window_3", 3, "cmd+3"),
+    focus("focus_window_4", 4, "cmd+4"),
+    focus("focus_window_5", 5, "cmd+5"),
+    focus("focus_window_6", 6, "cmd+6"),
+    focus("focus_window_7", 7, "cmd+7"),
+    focus("focus_window_8", 8, "cmd+8"),
+    focus("focus_window_9", 9, "cmd+9"),
     row(
+        "next_window",
         Action::NextWindow,
         Group::Layout,
         "Next window",
-        &[k(Modifiers::CTRL, Key::Tab)],
+        "ctrl+tab",
     ),
     row(
+        "prev_window",
         Action::PrevWindow,
         Group::Layout,
         "Previous window",
-        &[k(Modifiers::CTRL.plus(Modifiers::SHIFT), Key::Tab)],
+        "ctrl+shift+tab",
     ),
     row(
+        "maximize",
         Action::Maximize,
         Group::Layout,
         "Maximize / restore the focused window",
-        &[k(CMD, Key::K), k(CMD, Key::M)],
+        "cmd+k cmd+m",
     ),
     row(
+        "retile",
         Action::Retile,
         Group::Layout,
         "Re-tile windows",
-        &[k(CMD, Key::K), k(CMD, Key::T)],
+        "cmd+k cmd+t",
     ),
     row(
+        "toggle_sidebar",
         Action::ToggleSidebar,
         Group::Layout,
         "Toggle the sidebar",
-        &[k(CMD, Key::B)],
+        "cmd+b",
     ),
     row(
+        "toggle_view",
         Action::ToggleView,
         Group::General,
         "Home / Workspace",
-        &[k(CMD_SHIFT, Key::H)],
+        "cmd+shift+h",
     ),
     row(
+        "shortcuts",
         Action::Shortcuts,
         Group::General,
         "Keyboard shortcuts",
-        &[k(CMD, Key::K), k(CMD, Key::S)],
+        "cmd+k cmd+s",
     ),
     row(
+        "open_settings",
         Action::OpenSettings,
         Group::General,
         "Open settings (settings.json)",
-        &[k(CMD, Key::Comma)],
+        "cmd+comma",
     ),
-    row(
+    fixed(
         Action::CloseModal,
         Group::General,
         "Close a modal",
-        &[k(Modifiers::NONE, Key::Escape)],
+        "escape",
     ),
     #[cfg(debug_assertions)]
-    hidden(Action::DebugPanic, &[k(CMD_SHIFT_ALT, Key::P)]),
+    hidden(Action::DebugPanic, "cmd+shift+alt+p"),
     #[cfg(debug_assertions)]
-    hidden(Action::DebugKillWriter, &[k(CMD_SHIFT_ALT, Key::W)]),
+    hidden(Action::DebugKillWriter, "cmd+shift+alt+w"),
 ];
+
+/// The default keys of every configurable action, as the `shortcuts` block of a new settings.json.
+pub fn default_shortcuts() -> serde_json::Value {
+    DEFS.iter()
+        .filter_map(|d| Some((d.name?.to_string(), serde_json::Value::from(d.keys))))
+        .collect::<serde_json::Map<_, _>>()
+        .into()
+}
+
+fn parse_stroke(text: &str) -> Result<Stroke, String> {
+    let parts: Vec<&str> = text.split('+').map(str::trim).collect();
+    let (key, mod_parts) = parts.split_last().ok_or("empty shortcut")?;
+    let mut mods = Modifiers::NONE;
+    for m in mod_parts {
+        mods = mods.plus(match m.to_ascii_lowercase().as_str() {
+            "cmd" => Modifiers::COMMAND,
+            "ctrl" => Modifiers::CTRL,
+            "alt" => Modifiers::ALT,
+            "shift" => Modifiers::SHIFT,
+            _ => return Err(format!("unknown modifier \"{m}\" in \"{text}\"")),
+        });
+    }
+    let mut capitalized = key.to_ascii_lowercase();
+    if let Some(first) = capitalized.get_mut(..1) {
+        first.make_ascii_uppercase();
+    }
+    let key = Key::from_name(key)
+        .or_else(|| Key::from_name(&capitalized))
+        .ok_or_else(|| format!("unknown key \"{key}\" in \"{text}\""))?;
+    Ok(Stroke { mods, key })
+}
+
+/// "cmd+t", or two space-separated strokes for a chord ("cmd+k cmd+m").
+fn parse_keys(text: &str) -> Result<Vec<Stroke>, String> {
+    let keys = text
+        .split_whitespace()
+        .map(parse_stroke)
+        .collect::<Result<Vec<_>, _>>()?;
+    match keys.len() {
+        1 | 2 => Ok(keys),
+        0 => Err("empty shortcut".into()),
+        _ => Err(format!("\"{text}\" has more than two keys")),
+    }
+}
+
+/// Every binding with its effective keys.
+#[derive(Clone, PartialEq, Debug)]
+pub struct Keymap {
+    bindings: Vec<Binding>,
+}
+
+impl Default for Keymap {
+    fn default() -> Self {
+        Keymap::parse(&serde_json::Map::new()).unwrap_or(Keymap {
+            bindings: Vec::new(),
+        })
+    }
+}
+
+impl Keymap {
+    /// The defaults with `overrides` (action name -> keys text) applied. An unknown action, an
+    /// invalid shortcut, two actions on the same keys, or a single key that also starts a
+    /// chord is an error.
+    pub fn parse(overrides: &serde_json::Map<String, serde_json::Value>) -> Result<Keymap, String> {
+        if let Some(name) = overrides
+            .keys()
+            .find(|n| !DEFS.iter().any(|d| d.name == Some(n.as_str())))
+        {
+            return Err(format!("shortcuts: unknown action \"{name}\""));
+        }
+        let mut bindings = Vec::with_capacity(DEFS.len());
+        for d in DEFS {
+            let who = d.name.unwrap_or(d.title);
+            let text = match d.name.and_then(|n| overrides.get(n)) {
+                None => d.keys,
+                Some(serde_json::Value::String(s)) => s,
+                Some(_) => return Err(format!("shortcuts.{who}: expected a string")),
+            };
+            let keys = parse_keys(text).map_err(|e| format!("shortcuts.{who}: {e}"))?;
+            if d.action.is_local() && keys.len() != 1 {
+                return Err(format!("shortcuts.{who}: must be a single key"));
+            }
+            bindings.push(Binding {
+                action: d.action,
+                group: d.group,
+                title: d.title,
+                name: d.name,
+                keys,
+                show: d.show,
+            });
+        }
+        for (i, a) in bindings.iter().enumerate() {
+            for b in &bindings[i + 1..] {
+                let clash = a.keys == b.keys
+                    || matches!((a.keys.as_slice(), b.keys.as_slice()),
+                        ([s], [f, _]) | ([f, _], [s]) if s == f);
+                if clash {
+                    return Err(format!(
+                        "shortcuts: {} and {} clash (same keys, or one is the start of the other's chord)",
+                        a.name.unwrap_or(a.title),
+                        b.name.unwrap_or(b.title)
+                    ));
+                }
+            }
+        }
+        Ok(Keymap { bindings })
+    }
+
+    pub fn bindings(&self) -> &[Binding] {
+        &self.bindings
+    }
+
+    pub fn find(&self, action: Action) -> Option<&Binding> {
+        self.bindings.iter().find(|b| b.action == action)
+    }
+
+    /// "⌘N", "⌘K ⌘S" (or "Ctrl+N", "Ctrl+K Ctrl+S" off macOS).
+    pub fn label(&self, b: &Binding, mac: bool) -> String {
+        let mut text = keys_label(&b.keys, mac);
+        if let Show::Through(last) = b.show {
+            if let Some(last) = self.find(last) {
+                text.push_str(" \u{2026} ");
+                text.push_str(&keys_label(&last.keys, mac));
+            }
+        }
+        text
+    }
+}
+
+/// The keymap in effect, replaced when `settings.json` is (re)applied.
+static CURRENT: LazyLock<RwLock<Arc<Keymap>>> =
+    LazyLock::new(|| RwLock::new(Arc::new(Keymap::default())));
+
+pub fn current() -> Arc<Keymap> {
+    Arc::clone(&CURRENT.read().unwrap_or_else(PoisonError::into_inner))
+}
+
+pub fn set_current(keymap: Arc<Keymap>) {
+    *CURRENT.write().unwrap_or_else(PoisonError::into_inner) = keymap;
+}
 
 fn hits(s: &Stroke, mods: Modifiers, key: Key) -> bool {
     s.key == key && mods.matches_exact(s.mods)
+}
+
+/// Consumes this frame's press of the local Send or SendOther key (the composer reads these
+/// itself); the stroke with more modifiers goes first because `consume_key` ignores extra
+/// Shift and Alt.
+pub fn take_send(input: &mut egui::InputState) -> Option<Action> {
+    let km = current();
+    let mut strokes: Vec<(Action, Stroke)> = [Action::Send, Action::SendOther]
+        .into_iter()
+        .filter_map(|a| Some((a, *km.find(a)?.keys.first()?)))
+        .collect();
+    let weight = |m: Modifiers| [m.shift, m.alt, m.ctrl, m.command, m.mac_cmd].map(u8::from);
+    strokes.sort_by_key(|(_, s)| std::cmp::Reverse(weight(s.mods).iter().sum::<u8>()));
+    strokes
+        .into_iter()
+        .find(|(_, s)| input.consume_key(s.mods, s.key))
+        .map(|(a, _)| a)
 }
 
 /// What one key press did to the chord state.
@@ -317,14 +515,14 @@ impl Chord {
     }
 
     /// Feeds one key press (not a repeat).
-    pub fn feed(&mut self, now: Instant, mods: Modifiers, key: Key) -> Feed {
+    pub fn feed(&mut self, km: &Keymap, now: Instant, mods: Modifiers, key: Key) -> Feed {
         if let Some((at, first)) = self.armed.take() {
             if now.saturating_duration_since(at) < CHORD_TIMEOUT {
-                return second(&first, mods, key);
+                return second(km, &first, mods, key);
             }
         }
-        for b in BINDINGS.iter().filter(|b| !b.action.is_local()) {
-            match b.keys {
+        for b in km.bindings.iter().filter(|b| !b.action.is_local()) {
+            match b.keys.as_slice() {
                 [s] if hits(s, mods, key) => return Feed::Fired(b.action),
                 [s, _] if hits(s, mods, key) => {
                     self.armed = Some((now, *s));
@@ -338,10 +536,10 @@ impl Chord {
 }
 
 /// The chord starting with `first` that `key` completes; Cmd may already be released.
-fn second(first: &Stroke, mods: Modifiers, key: Key) -> Feed {
-    BINDINGS
+fn second(km: &Keymap, first: &Stroke, mods: Modifiers, key: Key) -> Feed {
+    km.bindings
         .iter()
-        .find_map(|b| match b.keys {
+        .find_map(|b| match b.keys.as_slice() {
             [f, s]
                 if f == first && s.key == key && (mods.matches_exact(s.mods) || mods.is_none()) =>
             {
@@ -369,10 +567,11 @@ pub fn poll(input: &mut egui::InputState, chord: &mut Chord, now: Instant) -> Ve
             _ => None,
         })
         .collect();
+    let km = current();
     let mut out = Vec::new();
     for (key, mods) in presses {
         let was_armed = chord.armed(now);
-        match chord.feed(now, mods, key) {
+        match chord.feed(&km, now, mods, key) {
             Feed::Fired(action) => {
                 input.consume_key(mods, key);
                 if was_armed {
@@ -422,60 +621,51 @@ pub fn stroke_label(s: &Stroke, mac: bool) -> String {
 
 pub const MAC_CMD: &str = "\u{2318}";
 
-/// "⌘N", "⌘K ⌘S" (or "Ctrl+N", "Ctrl+K Ctrl+S" off macOS).
-pub fn binding_label(b: &Binding, mac: bool) -> String {
-    let mut text = b
-        .keys
-        .iter()
+fn keys_label(keys: &[Stroke], mac: bool) -> String {
+    keys.iter()
         .map(|s| stroke_label(s, mac))
         .collect::<Vec<_>>()
-        .join(" ");
-    if let Show::Through(last) = b.show {
-        text.push_str(" \u{2026} ");
-        text.push_str(&stroke_label(&last, mac));
-    }
-    text
+        .join(" ")
 }
 
 /// The label of the first binding of `action`, for tooltips.
 pub fn shortcut_text(action: Action) -> String {
-    BINDINGS
-        .iter()
-        .find(|b| b.action == action)
-        .map(|b| binding_label(b, cfg!(target_os = "macos")))
+    let km = current();
+    km.find(action)
+        .map(|b| km.label(b, cfg!(target_os = "macos")))
         .unwrap_or_default()
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
+    const CMD: Modifiers = Modifiers::COMMAND;
+    const CMD_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
 
     fn press(c: &mut Chord, now: Instant, mods: Modifiers, key: Key) -> Feed {
-        c.feed(now, mods, key)
+        c.feed(&Keymap::default(), now, mods, key)
+    }
+
+    fn with(overrides: serde_json::Value) -> Result<Keymap, String> {
+        Keymap::parse(overrides.as_object().unwrap())
     }
 
     #[test]
-    fn no_duplicate_bindings() {
-        for (i, a) in BINDINGS.iter().enumerate() {
-            for b in &BINDINGS[i + 1..] {
-                assert!(
-                    a.keys != b.keys,
-                    "{:?} and {:?} share keys",
-                    a.action,
-                    b.action
-                );
-            }
-            // A lone stroke may not also start a chord.
-            if let [s] = a.keys {
-                assert!(
-                    !BINDINGS
-                        .iter()
-                        .any(|b| b.keys.len() == 2 && b.keys[0] == *s),
-                    "{:?} shadows a chord prefix",
-                    a.action
-                );
-            }
-        }
+    fn defaults_parse_and_do_not_clash() {
+        let km = Keymap::default();
+        assert_eq!(km.bindings().len(), DEFS.len());
+        assert_eq!(with(default_shortcuts()).unwrap(), km);
+        assert_eq!(
+            km.find(Action::NewSession).unwrap().keys,
+            [Stroke {
+                mods: CMD,
+                key: Key::T
+            }]
+        );
+        assert_eq!(km.find(Action::Maximize).unwrap().keys.len(), 2);
     }
 
     #[test]
@@ -500,11 +690,12 @@ mod tests {
     #[test]
     fn every_binding_fires_its_action() {
         let now = Instant::now();
-        for b in BINDINGS.iter().filter(|b| !b.action.is_local()) {
+        let km = Keymap::default();
+        for b in km.bindings().iter().filter(|b| !b.action.is_local()) {
             let mut c = Chord::default();
             let mut last = Feed::Ignored;
-            for s in b.keys {
-                last = press(&mut c, now, s.mods, s.key);
+            for s in &b.keys {
+                last = c.feed(&km, now, s.mods, s.key);
             }
             assert_eq!(last, Feed::Fired(b.action));
         }
@@ -573,25 +764,85 @@ mod tests {
 
     #[test]
     fn labels_read_naturally() {
-        let find = |a| BINDINGS.iter().find(|b| b.action == a).expect("binding");
-        assert_eq!(binding_label(find(Action::NewFile), true), "\u{2318}N");
-        assert_eq!(binding_label(find(Action::NewSession), true), "\u{2318}T");
+        let km = Keymap::default();
+        let label = |a, mac| km.label(km.find(a).expect("binding"), mac);
+        assert_eq!(label(Action::NewFile, true), "\u{2318}N");
+        assert_eq!(label(Action::NewSession, true), "\u{2318}T");
+        assert_eq!(label(Action::Shortcuts, true), "\u{2318}K \u{2318}S");
+        assert_eq!(label(Action::NextWindow, true), "Ctrl+Tab");
+        assert_eq!(label(Action::ToggleView, true), "Shift+\u{2318}H");
+        assert_eq!(label(Action::Shortcuts, false), "Ctrl+K Ctrl+S");
         assert_eq!(
-            binding_label(find(Action::Shortcuts), true),
-            "\u{2318}K \u{2318}S"
-        );
-        assert_eq!(binding_label(find(Action::NextWindow), true), "Ctrl+Tab");
-        assert_eq!(
-            binding_label(find(Action::ToggleView), true),
-            "Shift+\u{2318}H"
-        );
-        assert_eq!(
-            binding_label(find(Action::Shortcuts), false),
-            "Ctrl+K Ctrl+S"
-        );
-        assert_eq!(
-            binding_label(find(Action::FocusWindow(1)), true),
+            label(Action::FocusWindow(1), true),
             "\u{2318}1 \u{2026} \u{2318}9"
+        );
+    }
+
+    #[test]
+    fn strokes_parse_with_modifiers_and_key_names() {
+        let stroke = |t| parse_stroke(t).unwrap();
+        assert_eq!(
+            stroke("cmd+t"),
+            Stroke {
+                mods: CMD,
+                key: Key::T
+            }
+        );
+        assert_eq!(stroke("Cmd+Shift+A").mods, CMD_SHIFT);
+        assert_eq!(stroke("ctrl+tab").key, Key::Tab);
+        assert_eq!(stroke("alt+f5").mods, Modifiers::ALT);
+        assert_eq!(stroke("cmd+f12").key, Key::F12);
+        assert_eq!(stroke("cmd+period").key, Key::Period);
+        assert_eq!(stroke("escape").mods, Modifiers::NONE);
+        assert_eq!(stroke("cmd+0").key, Key::Num0);
+        assert_eq!(parse_keys("cmd+k  cmd+m").unwrap().len(), 2);
+        for bad in ["", "cmd+", "cmd+nokey", "hyper+t", "cmd+k cmd+m cmd+t"] {
+            assert!(parse_keys(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn overrides_replace_only_the_named_actions() {
+        let km = with(json!({"new_session": "cmd+j", "maximize": "cmd+k cmd+x"})).unwrap();
+        let now = Instant::now();
+        let mut c = Chord::default();
+        let mut feed = |mods, key| c.feed(&km, now, mods, key);
+        assert_eq!(feed(CMD, Key::J), Feed::Fired(Action::NewSession));
+        assert_eq!(feed(CMD, Key::T), Feed::Ignored);
+        assert_eq!(feed(CMD, Key::N), Feed::Fired(Action::NewFile));
+        assert_eq!(feed(CMD, Key::K), Feed::Armed);
+        assert_eq!(feed(CMD, Key::X), Feed::Fired(Action::Maximize));
+        assert_eq!(feed(CMD, Key::K), Feed::Armed);
+        assert_eq!(feed(CMD, Key::M), Feed::Cancelled);
+        assert_eq!(
+            km.label(km.find(Action::NewSession).unwrap(), true),
+            "\u{2318}J"
+        );
+    }
+
+    #[test]
+    fn invalid_shortcuts_are_errors() {
+        for bad in [
+            json!({"nope": "cmd+j"}),
+            json!({"escape": "cmd+j"}),
+            json!({"new_session": 3}),
+            json!({"new_session": null}),
+            json!({"new_session": "cmd+"}),
+            json!({"new_session": "cmd+n"}),
+            json!({"new_session": "escape"}),
+            // A lone key that starts a chord.
+            json!({"new_session": "cmd+k"}),
+            json!({"toggle_sidebar": "cmd+k"}),
+            json!({"send": "cmd+k cmd+enter"}),
+        ] {
+            assert!(with(bad.clone()).is_err(), "{bad}");
+        }
+        // Moving a key away frees it for another action.
+        assert!(with(json!({"new_file": "cmd+j", "new_session": "cmd+n"})).is_ok());
+        let err = with(json!({"new_session": "cmd+n"})).unwrap_err();
+        assert!(
+            err.contains("new_session") && err.contains("new_file"),
+            "{err}"
         );
     }
 

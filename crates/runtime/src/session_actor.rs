@@ -194,10 +194,22 @@ impl Actor {
             }
             ActorCmd::SetAutoMode(on) => self.set_auto(on),
             ActorCmd::SetModel(m) => {
+                // Stored at once: the respawn may wait for the turn to end, and closing the
+                // window before then must not lose the choice.
+                let mut op = self.update();
+                if let WriteOp::UpdateSession { model_id, .. } = &mut op {
+                    *model_id = Some(m.clone());
+                }
+                self.write(op);
                 self.pending_model = Some(m);
                 return self.apply_pending().await;
             }
             ActorCmd::SetEffort(e) => {
+                let mut op = self.update();
+                if let WriteOp::UpdateSession { effort, .. } = &mut op {
+                    *effort = Some(e);
+                }
+                self.write(op);
                 self.pending_effort = Some(e);
                 return self.apply_pending().await;
             }
@@ -303,7 +315,9 @@ impl Actor {
                 self.set_status(SessionStatus::Error(msg));
                 return false;
             }
-            ProviderEvent::TextDelta(_) | ProviderEvent::ThinkingProgress { .. } => {}
+            ProviderEvent::TextDelta(_)
+            | ProviderEvent::ThinkingProgress { .. }
+            | ProviderEvent::Subagent { .. } => {}
         }
         self.emit(AppEventKind::Provider(ev));
         true

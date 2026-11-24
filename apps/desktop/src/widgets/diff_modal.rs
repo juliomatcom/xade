@@ -77,17 +77,17 @@ pub fn show(
         ui.set_max_size(size);
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Review File Changes: {rel_path}")).strong());
-            let link = ui.add_enabled(
-                vscode.is_some(),
-                egui::Button::new(
-                    RichText::new(icons::with(icons::VSCODE, "Open in VS Code"))
-                        .color(theme::ACCENT),
-                )
-                .frame(false),
-            );
-            let link = link.on_disabled_hover_text("VS Code `code` command not found");
-            if let (true, Some(code)) = (link.clicked(), vscode) {
-                open_in_vscode(code, &data.path, data.first_changed_line);
+            if let Some(code) = vscode {
+                let link = ui.add(
+                    egui::Button::new(
+                        RichText::new(icons::with(icons::VSCODE, "Open in VS Code"))
+                            .color(theme::ACCENT),
+                    )
+                    .frame(false),
+                );
+                if link.clicked() {
+                    open_in_vscode(code, &data.path, data.first_changed_line);
+                }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if can_decide {

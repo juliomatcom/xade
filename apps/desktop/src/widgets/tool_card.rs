@@ -158,7 +158,7 @@ fn status_icon(ui: &mut egui::Ui, status: CardStatus) {
     }
 }
 
-/// Draws a tool card. Returns true when "Review changes" was clicked.
+/// Draws a tool card. Returns true when "Review changes" was clicked, shown only while a code change awaits approval.
 pub fn show(
     ui: &mut egui::Ui,
     cache: &mut CommonMarkCache,
@@ -186,18 +186,18 @@ pub fn show(
             };
             if is_code_change(name) {
                 ui.horizontal(head);
-                let label = if awaiting {
-                    "Review changes (awaiting approval)"
-                } else {
-                    "Review changes"
-                };
-                review = ui
-                    .add(
-                        egui::Button::new(icons::with(icons::REVIEW, label))
+                if awaiting {
+                    review = ui
+                        .add(
+                            egui::Button::new(icons::with(
+                                icons::REVIEW,
+                                "Review changes (awaiting approval)",
+                            ))
                             .small()
                             .wrap(),
-                    )
-                    .clicked();
+                        )
+                        .clicked();
+                }
                 return;
             }
             let state = CollapsingState::load_with_default_open(ui.ctx(), id, false);

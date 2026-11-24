@@ -30,6 +30,7 @@ use crate::running::{self, PendingOpen};
 use crate::widgets::delete_modal::{self, PendingDelete};
 use crate::widgets::keymaps_modal;
 use crate::widgets::path_links::PathLinks;
+use crate::widgets::quit_modal;
 use crate::widgets::session_picker::{self, PickerState};
 use crate::workspace::{Tiling, WindowKind};
 use crate::{composer, home, logging, status_bar, theme, workspace};
@@ -55,6 +56,8 @@ pub enum UiMsg {
         page: Page<SessionCard>,
     },
     Workspaces(Vec<Workspace>),
+    /// Sent after `Workspaces` for a folder given on the command line.
+    OpenWorkspace(WorkspaceId),
     Preflight(Option<String>),
     /// Quota rows saved by earlier runs.
     SavedQuota(Vec<QuotaWindow>),
@@ -69,6 +72,17 @@ pub enum UiMsg {
     Running {
         list: Vec<RunningSession>,
         transcripts: Vec<running::TranscriptStat>,
+    },
+    /// The working tree when a turn started (`None` outside a git repo).
+    TurnBase {
+        session: SessionId,
+        base: Option<crate::turn_files::Snapshot>,
+    },
+    /// What a finished turn changed, for the card after message `anchor`.
+    TurnFiles {
+        session: SessionId,
+        anchor: uuid::Uuid,
+        changes: crate::turn_files::TurnChanges,
     },
     /// A session folder's file list for `@` autocomplete.
     Files {
@@ -135,8 +149,22 @@ pub struct SessionVm {
     pub path_links: PathLinks,
     /// The diff modal, when open.
     pub diff: Option<DiffState>,
+    /// Per-turn "files changed" summaries, computed once per finished turn.
+    pub changes: crate::widgets::changes_summary::ChangesCache,
     /// A model or effort change waits for the next turn.
     pub settings_pending: bool,
+    /// Working tree at the start of the running turn, to find what the turn changed.
+    pub turn_base: Option<crate::turn_files::Snapshot>,
+    /// A snapshot was requested for the running turn.
+    pub turn_snapshotting: bool,
+    /// Files each finished turn changed, keyed by the turn's last message; memory only.
+    pub turn_files: std::collections::HashMap<uuid::Uuid, crate::turn_files::TurnChanges>,
+    /// Another session was running at some point of the running turn.
+    pub turn_shared: bool,
+    /// Model and thinking effort the last message went out with; a different choice now costs
+    /// the next message its prompt cache.
+    pub sent_model: String,
+    pub sent_effort: xade_core::Effort,
     pub collapsed: bool,
     /// Last rect of the expanded window.
     pub window_rect: Option<egui::Rect>,
@@ -148,9 +176,14 @@ pub struct SessionVm {
     pub mention: crate::mention::MentionState,
     /// Why an attachment was refused, shown above the input until it expires or a send.
     pub attach_note: Option<(String, std::time::Instant)>,
+    /// What running subagents did this turn, in memory only (never stored); cleared when the turn ends.
+    pub subagent_msgs: Vec<Message>,
+    /// The chat area shows `subagent_msgs` instead of the main transcript.
+    pub view_subagents: bool,
 }
 
 pub struct DiffState {
+    /// Empty for a merged review of several calls, which is never decided.
     pub tool_use_id: String,
     pub data: DiffData,
 }
@@ -167,24 +200,51 @@ pub struct PendingPermission {
 impl SessionVm {
     /// Opens the diff modal for a tool call, from its stored result when it has finished.
     pub fn open_diff(&mut self, tool_use_id: &str) {
+        self.diff = self.diff_of(tool_use_id).map(|data| DiffState {
+            tool_use_id: tool_use_id.to_string(),
+            data,
+        });
+    }
+
+    /// Opens one read-only modal over several finished calls to the same file.
+    pub fn open_changes(&mut self, tool_use_ids: &[String]) {
+        let parts = tool_use_ids.iter().filter_map(|id| self.diff_of(id));
+        self.diff = DiffData::merge(parts.collect()).map(|data| DiffState {
+            tool_use_id: String::new(),
+            data,
+        });
+    }
+
+    /// Opens one read-only modal for file `index` of the turn that ended with message `anchor`.
+    pub fn open_turn_file(&mut self, anchor: uuid::Uuid, index: usize) {
+        let Some(f) = self
+            .turn_files
+            .get(&anchor)
+            .and_then(|c| c.files.get(index))
+        else {
+            return;
+        };
+        self.diff = Some(DiffState {
+            tool_use_id: String::new(),
+            data: DiffData::from_texts(&f.path, &f.old, &f.new),
+        });
+    }
+
+    fn diff_of(&self, tool_use_id: &str) -> Option<DiffData> {
         let find = |role: Role| {
             self.messages
                 .iter()
                 .find(|m| m.role == role && m.tool_use_id.as_deref() == Some(tool_use_id))
         };
         let (Some(call), result) = (find(Role::ToolCall), find(Role::ToolResult)) else {
-            return;
+            return None;
         };
-        let data = DiffData::build(
+        DiffData::build(
             call.tool_name.as_deref().unwrap_or_default(),
             call.tool_payload_json.as_deref().unwrap_or_default(),
             result.and_then(|r| r.tool_payload_json.as_deref()),
             &self.cwd,
-        );
-        self.diff = data.map(|data| DiffState {
-            tool_use_id: tool_use_id.to_string(),
-            data,
-        });
+        )
     }
 }
 
@@ -219,6 +279,7 @@ pub struct App {
     /// Live-reload watcher of `settings.json`; absent in headless tests.
     config_watch: Option<config::Watch>,
     pub chord: Chord,
+    pub fps: crate::status_bar::FpsMeter,
     pub sidebar_visible: bool,
     pub keymaps_open: bool,
     /// The session picker, when open.
@@ -230,6 +291,9 @@ pub struct App {
     pub pending_open: Option<PendingOpen>,
     /// Awaiting confirmation to delete a session forever.
     pub pending_delete: Option<PendingDelete>,
+    /// Awaiting confirmation to quit while sessions are mid-turn.
+    pub pending_quit: bool,
+    quit_confirmed: bool,
     running_checked: Option<Instant>,
     tree_checked: Option<Instant>,
     running_inflight: bool,
@@ -261,6 +325,7 @@ impl App {
         preflight_error: Option<String>,
         config_path: PathBuf,
         log_dir: PathBuf,
+        initial_workspace: Option<PathBuf>,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
         let (config, config_error) = config::load(&config_path);
@@ -307,6 +372,7 @@ impl App {
             },
             config_watch: Some(config::Watch::new(config_path)),
             chord: Chord::default(),
+            fps: crate::status_bar::FpsMeter::new(),
             sidebar_visible: true,
             keymaps_open: false,
             picker: None,
@@ -314,6 +380,8 @@ impl App {
             running: HashMap::new(),
             pending_open: None,
             pending_delete: None,
+            pending_quit: false,
+            quit_confirmed: false,
             running_checked: None,
             tree_checked: None,
             running_inflight: false,
@@ -336,6 +404,9 @@ impl App {
         app.refresh_workspaces();
         app.refresh_cards();
         app.load_saved_quota();
+        if let Some(root) = initial_workspace {
+            app.open_folder(root);
+        }
         if app.home.preflight_error.is_none() {
             app.start_import();
         }
@@ -373,6 +444,7 @@ impl App {
             config: Config::default(),
             config_watch: None,
             chord: Chord::default(),
+            fps: crate::status_bar::FpsMeter::new(),
             sidebar_visible: true,
             keymaps_open: false,
             picker: None,
@@ -380,6 +452,8 @@ impl App {
             running: HashMap::new(),
             pending_open: None,
             pending_delete: None,
+            pending_quit: false,
+            quit_confirmed: false,
             running_checked: None,
             tree_checked: None,
             running_inflight: false,
@@ -490,6 +564,7 @@ impl App {
     /// Applies `next`; fonts are rebuilt only when the family changed (or at startup with one).
     fn apply_config(&mut self, ctx: &egui::Context, next: Config) {
         theme::set_font_size(ctx, next.font_size);
+        keymap::set_current(next.shortcuts.clone());
         if next.font_family != self.config.font_family {
             let defs = match next.font_family.as_deref().map(config::font_definitions) {
                 Some(Ok(defs)) => Some(defs),
@@ -521,6 +596,19 @@ impl App {
             self.warn(e);
         }
         self.apply_config(ctx, next);
+    }
+
+    /// Rewrites `settings.json` with the defaults; the watcher applies them within `POLL`.
+    pub fn restore_default_settings(&mut self) {
+        let Some(path) = self.config_watch.as_ref().map(|w| w.path().to_path_buf()) else {
+            return;
+        };
+        match config::restore_defaults(&path) {
+            Ok(()) => {
+                self.warn("Settings restored to defaults (old file kept as settings.json.bak)")
+            }
+            Err(e) => self.warn(e),
+        }
     }
 
     /// Opens `settings.json` in Xade's own editor, focusing the window when it is already open.
@@ -816,26 +904,20 @@ impl App {
             let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
                 return;
             };
-            let root_path = folder.path().to_path_buf();
-            let display_name = root_path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| root_path.display().to_string());
-            let added = writer.send(WriteOp::UpsertWorkspace(Workspace {
-                id: WorkspaceId::new(),
-                root_path,
-                display_name,
-                last_opened_at: OffsetDateTime::now_utc(),
-                is_open: true,
-            }));
-            if let Err(e) = added {
-                let report = ErrorReport::new("Could not add the folder", e.to_string());
-                return bridge.send(UiMsg::Report(report));
-            }
-            xade_runtime::flush(&writer).await;
-            match reader.list_workspaces().await {
-                Ok(ws) => bridge.send(UiMsg::Workspaces(ws)),
-                Err(e) => read_failed(&bridge, "workspaces", &e),
+            add_workspace(&writer, &reader, &bridge, folder.path().to_path_buf()).await;
+        });
+    }
+
+    /// `xade <path>`: adds the folder like Add Directory, then selects it and starts a session.
+    fn open_folder(&self, root_path: PathBuf) {
+        let (writer, reader, bridge) = (
+            self.writer.clone(),
+            self.reader.clone(),
+            self.bridge.clone(),
+        );
+        self.rt.spawn(async move {
+            if let Some(id) = add_workspace(&writer, &reader, &bridge, root_path).await {
+                bridge.send(UiMsg::OpenWorkspace(id));
             }
         });
     }
@@ -890,7 +972,8 @@ impl App {
         let Some(ws) = self.home.workspaces.iter().find(|w| w.id == ws_id) else {
             return;
         };
-        // New sessions start with the model and effort of the last one, across restarts.
+        // New sessions start with the model, effort and Auto mode of the last one, across
+        // restarts.
         let (cmd_tx, reader) = (self.cmd_tx.clone(), self.reader.clone());
         let (cwd, provider_id, default_model) = (
             ws.root_path.clone(),
@@ -902,14 +985,15 @@ impl App {
                 tracing::warn!(error = %e, "could not read the last model choice");
                 None
             });
-            let (model_id, effort) = last.unwrap_or((default_model, xade_core::Effort::Default));
+            let (model_id, effort, auto_mode) =
+                last.unwrap_or((default_model, xade_core::Effort::Default, false));
             let _ = cmd_tx.send(ManagerCmd::Create {
                 workspace_id: ws_id,
                 cwd,
                 provider: provider_id,
                 model_id,
                 effort,
-                auto_mode: false,
+                auto_mode,
             });
         });
     }
@@ -1460,6 +1544,25 @@ impl App {
                 }
             }
             UiMsg::Running { list, transcripts } => self.on_running(list, transcripts),
+            UiMsg::TurnBase { session, base } => {
+                if let Some(vm) = self.sessions.get_mut(&session) {
+                    // A turn too short to outlive its snapshot has no use for it.
+                    if vm.turn_snapshotting {
+                        vm.turn_base = base;
+                    }
+                }
+            }
+            UiMsg::TurnFiles {
+                session,
+                anchor,
+                changes,
+            } => {
+                if let Some(vm) = self.sessions.get_mut(&session) {
+                    if !changes.files.is_empty() {
+                        vm.turn_files.insert(anchor, changes);
+                    }
+                }
+            }
             UiMsg::Files { session, files } => {
                 if let Some(vm) = self.sessions.get_mut(&session) {
                     vm.mention.set_files(files);
@@ -1492,6 +1595,14 @@ impl App {
                 }
                 self.home.workspaces = ws;
             }
+            UiMsg::OpenWorkspace(id) => {
+                self.home.scope = Some(id);
+                self.home.page = 0;
+                self.refresh_cards();
+                if self.home.preflight_error.is_none() {
+                    self.new_session();
+                }
+            }
             UiMsg::Preflight(err) => {
                 let recovered = err.is_none() && self.home.preflight_error.is_some();
                 self.home.preflight_error = err;
@@ -1521,6 +1632,7 @@ impl App {
             .find(|w| w.id == session.workspace_id)
             .map(|w| w.root_path.clone())
             .unwrap_or_default();
+        let (sent_model, sent_effort) = (session.model_id.clone(), session.effort);
         self.sessions.insert(
             id,
             SessionVm {
@@ -1537,13 +1649,22 @@ impl App {
                 md_cache: CommonMarkCache::default(),
                 path_links: PathLinks::default(),
                 diff: None,
+                changes: Default::default(),
                 settings_pending: false,
+                turn_base: None,
+                turn_snapshotting: false,
+                turn_files: Default::default(),
+                turn_shared: false,
+                sent_model,
+                sent_effort,
                 collapsed: false,
                 window_rect: None,
                 apply_rect: None,
                 sync: Default::default(),
                 mention: Default::default(),
                 attach_note: None,
+                subagent_msgs: Vec::new(),
+                view_subagents: false,
             },
         );
         if self.background.remove(&id) {
@@ -1604,11 +1725,25 @@ impl App {
                 if status == SessionStatus::Closed {
                     return self.drop_session(id);
                 }
+                let busy_elsewhere = self.busy_elsewhere(id);
                 if let Some(vm) = self.sessions.get_mut(&id) {
                     if status != SessionStatus::NeedsApproval {
                         vm.pending_permission = None;
                     }
                     vm.status = status;
+                    if matches!(vm.status, SessionStatus::Error(_)) {
+                        vm.turn_snapshotting = false;
+                        vm.turn_base = None;
+                    }
+                    if vm.status == SessionStatus::Streaming && !vm.turn_snapshotting {
+                        vm.turn_snapshotting = true;
+                        vm.turn_shared = busy_elsewhere;
+                        let (dir, bridge) = (vm.cwd.clone(), self.bridge.clone());
+                        self.rt.spawn(async move {
+                            let base = crate::turn_files::snapshot(&dir).await;
+                            bridge.send(UiMsg::TurnBase { session: id, base });
+                        });
+                    }
                     if vm.status == SessionStatus::Idle {
                         if let Some(text) = vm.queued.pop_front() {
                             let delivery = Some(Delivery::Queued);
@@ -1628,7 +1763,61 @@ impl App {
         }
     }
 
+    /// Whether something else may be writing to this session's folder right now: another Xade
+    /// session of the same folder mid-turn, or any Claude session running outside Xade (its
+    /// folder is unknown).
+    /// Sessions mid-turn or waiting on an approval.
+    pub fn busy_sessions(&self) -> usize {
+        self.sessions
+            .values()
+            .filter(|vm| {
+                matches!(
+                    vm.status,
+                    SessionStatus::Streaming | SessionStatus::NeedsApproval
+                )
+            })
+            .count()
+    }
+
+    /// Cancels a window close while sessions are busy and asks first.
+    fn guard_close(&mut self, ctx: &egui::Context) {
+        if !ctx.input(|i| i.viewport().close_requested()) || self.quit_confirmed {
+            return;
+        }
+        if self.busy_sessions() > 0 {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.pending_quit = true;
+        }
+    }
+
+    /// Lets the next close request through and issues it.
+    pub fn confirm_quit(&mut self, ctx: &egui::Context) {
+        self.pending_quit = false;
+        self.quit_confirmed = true;
+        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+    }
+
+    fn busy_elsewhere(&self, id: SessionId) -> bool {
+        let Some(cwd) = self.sessions.get(&id).map(|vm| &vm.cwd) else {
+            return false;
+        };
+        let other_xade = self.sessions.iter().any(|(sid, vm)| {
+            *sid != id
+                && vm.cwd == *cwd
+                && matches!(
+                    vm.status,
+                    SessionStatus::Streaming | SessionStatus::NeedsApproval
+                )
+        });
+        other_xade
+            || self
+                .running
+                .values()
+                .any(|r| r.state == xade_core::RunState::Busy)
+    }
+
     fn on_provider_event(&mut self, id: SessionId, ev: ProviderEvent) {
+        let busy_elsewhere = self.busy_elsewhere(id);
         let Some(vm) = self.sessions.get_mut(&id) else {
             return;
         };
@@ -1674,6 +1863,34 @@ impl App {
                 // An agent edit may have changed an open file.
                 self.editors.checked = None;
             }
+            ProviderEvent::Subagent { event, .. } => match *event {
+                ProviderEvent::AssistantText { text } => {
+                    let m = new_message(vm, Role::Assistant, text, None);
+                    vm.subagent_msgs.push(m);
+                }
+                ProviderEvent::ToolUse {
+                    tool_use_id,
+                    name,
+                    input_json,
+                } => {
+                    let mut m = new_message(vm, Role::ToolCall, String::new(), Some(tool_use_id));
+                    m.tool_name = Some(name);
+                    m.tool_payload_json = Some(input_json);
+                    vm.subagent_msgs.push(m);
+                }
+                ProviderEvent::ToolResult {
+                    tool_use_id,
+                    output,
+                    is_error,
+                    structured_json,
+                } => {
+                    let mut m = new_message(vm, Role::ToolResult, output, Some(tool_use_id));
+                    m.tool_payload_json = structured_json;
+                    m.is_error = is_error;
+                    vm.subagent_msgs.push(m);
+                }
+                _ => {}
+            },
             ProviderEvent::PermissionRequest {
                 request_id,
                 tool_use_id,
@@ -1695,6 +1912,23 @@ impl App {
                 }
             }
             ProviderEvent::TurnComplete { usage, .. } => {
+                vm.turn_snapshotting = false;
+                let shared = std::mem::take(&mut vm.turn_shared) || busy_elsewhere;
+                if let (Some(base), Some(anchor)) =
+                    (vm.turn_base.take(), vm.messages.last().map(|m| m.id))
+                {
+                    let (dir, bridge) = (vm.cwd.clone(), self.bridge.clone());
+                    self.rt.spawn(async move {
+                        let files = crate::turn_files::since(&base, &dir).await;
+                        bridge.send(UiMsg::TurnFiles {
+                            session: id,
+                            anchor,
+                            changes: crate::turn_files::TurnChanges { files, shared },
+                        });
+                    });
+                }
+                vm.subagent_msgs.clear();
+                vm.view_subagents = false;
                 vm.sync.transcript.own_write = std::time::SystemTime::now();
                 vm.live_text.clear();
                 vm.thinking_tokens = None;
@@ -1723,13 +1957,55 @@ fn read_failed(bridge: &Bridge, what: &str, e: &xade_store::StoreError) {
     bridge.send(UiMsg::Report(report));
 }
 
+/// Lists `root_path` in the sidebar and refreshes the list; returns its workspace id.
+async fn add_workspace(
+    writer: &WriterHandle,
+    reader: &StoreReader,
+    bridge: &Bridge,
+    root_path: PathBuf,
+) -> Option<WorkspaceId> {
+    let display_name = root_path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| root_path.display().to_string());
+    let added = writer.send(WriteOp::UpsertWorkspace(Workspace {
+        id: WorkspaceId::new(),
+        root_path: root_path.clone(),
+        display_name,
+        last_opened_at: OffsetDateTime::now_utc(),
+        is_open: true,
+    }));
+    if let Err(e) = added {
+        let report = ErrorReport::new("Could not add the folder", e.to_string());
+        bridge.send(UiMsg::Report(report));
+        return None;
+    }
+    xade_runtime::flush(writer).await;
+    match reader.list_workspaces().await {
+        Ok(ws) => {
+            let id = ws.iter().find(|w| w.root_path == root_path).map(|w| w.id);
+            bridge.send(UiMsg::Workspaces(ws));
+            id
+        }
+        Err(e) => {
+            read_failed(bridge, "workspaces", &e);
+            None
+        }
+    }
+}
+
 /// A session whose child is alive (or starting); an errored one has none.
 fn live_status(status: &SessionStatus) -> bool {
     !matches!(status, SessionStatus::Error(_))
 }
 
 /// Builds a message for local display (not persisted here; the session actor owns writes).
-fn new_message(vm: &SessionVm, role: Role, text: String, tool_use_id: Option<String>) -> Message {
+pub(crate) fn new_message(
+    vm: &SessionVm,
+    role: Role,
+    text: String,
+    tool_use_id: Option<String>,
+) -> Message {
     Message {
         id: uuid::Uuid::new_v4(),
         session_id: vm.session.id,
@@ -1747,6 +2023,12 @@ fn new_message(vm: &SessionVm, role: Role, text: String, tool_use_id: Option<Str
 
 /// Appends the user's prompt to the local transcript.
 pub fn push_user_message(vm: &mut SessionVm, text: String, delivery: Option<Delivery>) {
+    // The runtime titles the stored row the same way; this keeps the window in step.
+    if vm.session.title.is_empty() {
+        vm.session.title = xade_core::Session::derive_title(&text);
+    }
+    vm.sent_model.clone_from(&vm.session.model_id);
+    vm.sent_effort = vm.session.effort;
     let mut m = new_message(vm, Role::User, text, None);
     m.tool_name = delivery.map(|d| d.tag().to_string());
     vm.messages.push(m);
@@ -1755,11 +2037,13 @@ pub fn push_user_message(vm: &mut SessionVm, text: String, delivery: Option<Deli
 impl eframe::App for App {
     /// Drains the bridge and runs timers; no painting here.
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.fps.frame_start(Instant::now());
         self.guarded("frame update", |app| app.update(ctx));
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.guarded_ui(ui, Self::draw);
+        self.fps.frame_end(Instant::now());
     }
 
     /// eframe calls this on the window close button and on Cmd+Q (via `exiting`),
@@ -1810,6 +2094,7 @@ impl App {
         while let Ok(msg) = self.events_rx.try_recv() {
             self.on_msg(msg);
         }
+        self.guard_close(ctx);
         self.handle_shortcuts(ctx);
         self.handle_drops(ctx);
         self.reload_config(ctx);
@@ -1877,9 +2162,7 @@ impl App {
     /// Draws the whole window except the error modal.
     fn draw(&mut self, ui: &mut egui::Ui) {
         home::top_bar(self, ui);
-        if status_bar::show(self, ui) {
-            self.open_settings();
-        }
+        status_bar::show(self, ui);
         if self.sidebar_visible {
             home::sidebar(self, ui);
         }
@@ -1896,6 +2179,7 @@ impl App {
         session_picker::show(self, &ctx);
         running::confirm_modal(self, &ctx);
         delete_modal::show(self, &ctx);
+        quit_modal::show(self, &ctx);
         self.editor_modal(&ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {
             self.keymaps_open = false;

@@ -66,17 +66,18 @@ impl StoreReader {
             .await
     }
 
-    /// Model and effort of the most recently updated session created in Xade.
-    pub async fn last_model_choice(&self) -> Result<Option<(String, Effort)>, StoreError> {
+    /// Model, effort and Auto mode of the most recently updated session created in Xade.
+    pub async fn last_model_choice(&self) -> Result<Option<(String, Effort, bool)>, StoreError> {
         self.with_conn(|c| {
             Ok(c.query_row(
-                "SELECT model_id, effort FROM sessions WHERE origin = 'xade'
+                "SELECT model_id, effort, auto_mode FROM sessions WHERE origin = 'xade'
                  ORDER BY updated_at DESC LIMIT 1",
                 [],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         schema::parse_effort(1, &r.get::<_, String>(1)?)?,
+                        r.get::<_, bool>(2)?,
                     ))
                 },
             )

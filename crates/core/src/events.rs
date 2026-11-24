@@ -55,6 +55,12 @@ pub enum ProviderEvent {
         interrupted: bool,
     },
     Quota(QuotaWindow),
+    /// An event from inside a subagent (`AssistantText`, `ToolUse`, `ToolResult` or a delta).
+    /// Never persisted: the transcript and the main chat hold only the main agent's turn.
+    Subagent {
+        parent_tool_use_id: String,
+        event: Box<ProviderEvent>,
+    },
     Error(String),
     Exited {
         code: Option<i32>,

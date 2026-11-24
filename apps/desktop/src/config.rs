@@ -2,9 +2,12 @@
 //! font the file names. Colors and sizes stay in `theme.rs`.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use serde_json::{json, Value};
+
+use crate::keymap::{self, Keymap};
 
 pub const DEFAULT_FONT_SIZE: f32 = 13.5;
 /// The family shipped inside the app (JetBrains Mono, SIL OFL); it needs no install.
@@ -40,6 +43,9 @@ pub struct Config {
     pub font_family: Option<String>,
     pub font_size: f32,
     pub send_while_running: SendMode,
+    /// Whether the status bar shows the frame rate.
+    pub show_fps: bool,
+    pub shortcuts: Arc<Keymap>,
 }
 
 impl Default for Config {
@@ -48,13 +54,16 @@ impl Default for Config {
             font_family: Some(BUNDLED_FONT.to_string()),
             font_size: DEFAULT_FONT_SIZE,
             send_while_running: SendMode::default(),
+            show_fps: false,
+            shortcuts: Arc::default(),
         }
     }
 }
 
 impl Config {
     /// Parses schema v1. Missing keys keep their defaults, unknown keys are ignored and
-    /// `font_size` is clamped; anything else invalid is an error.
+    /// `font_size` is clamped; anything else invalid (including a bad `shortcuts` block) is an
+    /// error.
     pub fn parse(text: &str) -> Result<Config, String> {
         let value: Value = serde_json::from_str(text).map_err(|e| format!("invalid JSON ({e})"))?;
         let obj = value.as_object().ok_or("expected a JSON object")?;
@@ -80,6 +89,16 @@ impl Config {
             Some("steer") => cfg.send_while_running = SendMode::Steer,
             _ => return Err("send_while_running must be \"queue\" or \"steer\"".into()),
         }
+        match obj.get("show_fps") {
+            None => {}
+            Some(Value::Bool(b)) => cfg.show_fps = *b,
+            Some(_) => return Err("show_fps must be true or false".into()),
+        }
+        match obj.get("shortcuts") {
+            None => {}
+            Some(Value::Object(map)) => cfg.shortcuts = Arc::new(Keymap::parse(map)?),
+            Some(_) => return Err("shortcuts must be an object".into()),
+        }
         Ok(cfg)
     }
 }
@@ -97,16 +116,35 @@ pub fn path(data_dir: &Path) -> PathBuf {
     new
 }
 
+/// The settings file as first written: every key, with its default value.
+fn defaults_json() -> String {
+    serde_json::to_string_pretty(&json!({
+        "font_family": BUNDLED_FONT,
+        "font_size": DEFAULT_FONT_SIZE,
+        "send_while_running": "queue",
+        "show_fps": false,
+        "shortcuts": keymap::default_shortcuts(),
+    }))
+    .unwrap_or_default()
+}
+
+/// Replaces `path` with the defaults, keeping the old file as `<name>.bak`. The live reload
+/// applies them.
+pub fn restore_defaults(path: &Path) -> Result<(), String> {
+    if path.exists() {
+        let mut bak = path.as_os_str().to_owned();
+        bak.push(".bak");
+        std::fs::copy(path, &bak).map_err(|e| format!("could not back up settings ({e})"))?;
+    }
+    std::fs::write(path, defaults_json() + "\n")
+        .map_err(|e| format!("could not write settings ({e})"))
+}
+
 /// Reads `path`, writing the defaults first when it does not exist. A bad file yields the
 /// defaults and the reason.
 pub fn load(path: &Path) -> (Config, Option<String>) {
     if !path.exists() {
-        let defaults = serde_json::to_string_pretty(&json!({
-            "font_family": BUNDLED_FONT,
-            "font_size": DEFAULT_FONT_SIZE,
-            "send_while_running": "queue",
-        }))
-        .unwrap_or_default();
+        let defaults = defaults_json();
         if let Err(e) = std::fs::write(path, defaults + "\n") {
             tracing::warn!(error = %e, "could not write settings.json");
         }
@@ -237,6 +275,28 @@ mod tests {
     }
 
     #[test]
+    fn show_fps_defaults_to_false_and_must_be_a_bool() {
+        assert!(!Config::default().show_fps);
+        assert!(Config::parse(r#"{"show_fps":true}"#).unwrap().show_fps);
+        assert!(Config::parse(r#"{"show_fps":"no"}"#).is_err());
+        assert!(Config::parse(r#"{"show_fps":null}"#).is_err());
+    }
+
+    #[test]
+    fn shortcuts_default_and_override() {
+        let km = |text| Config::parse(text).unwrap().shortcuts;
+        assert_eq!(km("{}"), Arc::new(Keymap::default()));
+        let custom = km(r#"{"shortcuts":{"new_session":"cmd+shift+j"}}"#);
+        let binding = custom.find(keymap::Action::NewSession).unwrap();
+        assert_eq!(binding.keys.len(), 1);
+        assert_eq!(
+            binding.keys[0].mods,
+            egui::Modifiers::COMMAND.plus(egui::Modifiers::SHIFT)
+        );
+        assert_eq!(binding.keys[0].key, egui::Key::J);
+    }
+
+    #[test]
     fn font_size_is_clamped() {
         assert_eq!(Config::parse(r#"{"font_size":2}"#).unwrap().font_size, 9.0);
         assert_eq!(
@@ -254,6 +314,10 @@ mod tests {
             r#"{"font_size":"big"}"#,
             r#"{"font_family":3}"#,
             r#"{"font_family":" "}"#,
+            r#"{"shortcuts":[]}"#,
+            r#"{"shortcuts":{"new_session":"cmd+"}}"#,
+            r#"{"shortcuts":{"no_such_action":"cmd+j"}}"#,
+            r#"{"shortcuts":{"new_session":"cmd+n"}}"#,
         ] {
             assert!(Config::parse(bad).is_err(), "{bad:?}");
         }
@@ -274,6 +338,7 @@ mod tests {
         let written = std::fs::read_to_string(&file).unwrap();
         assert_eq!(Config::parse(&written).unwrap(), Config::default());
         assert!(written.contains('\n') && written.contains("\"font_family\": \"JetBrains Mono\""));
+        assert!(written.contains("\"new_session\": \"cmd+t\""));
 
         std::fs::write(&file, "{ nope").unwrap();
         let (cfg, err) = load(&file);
@@ -333,5 +398,19 @@ mod tests {
     fn unknown_font_is_reported() {
         let err = font_definitions("No Such Family \u{1F680}").unwrap_err();
         assert!(err.contains("not installed"));
+    }
+
+    #[test]
+    fn restore_defaults_backs_up_the_old_file_and_parses_back_to_defaults() {
+        let dir = std::env::temp_dir().join(format!("xade-cfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("settings.json");
+        std::fs::write(&file, r#"{"font_size": 20}"#).unwrap();
+        restore_defaults(&file).unwrap();
+        let bak = std::fs::read_to_string(dir.join("settings.json.bak")).unwrap();
+        assert!(bak.contains("20"));
+        let cfg = Config::parse(&std::fs::read_to_string(&file).unwrap()).unwrap();
+        assert_eq!(cfg, Config::default());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

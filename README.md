@@ -20,6 +20,7 @@ Xade is short for X-provider Agentic Development Environment (pronounced "zade")
 - Turn auto-approve on or off per session. With it on, changes still show up for review afterwards.
 - Pick the model and effort level, and see context and cost meters.
 - The git branch and changed-file count stay visible in the bottom bar.
+- Auto mode and the model choice carry over to new sessions.
 
 ## How it works
 
@@ -27,7 +28,29 @@ Xade runs the official `claude` CLI that you already have installed and logged i
 
 ## Status
 
-Early MVP. macOS first. Claude Code is the only provider today.
+Early MVP. macOS and Linux (x86_64). Claude Code is the only provider today.
+
+## Install
+
+### Command line
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/juliomatcom/xade/main/scripts/install.sh | sh
+```
+
+This installs the latest build: `Xade.app` into `/Applications` on macOS (Apple Silicon), or into `~/.local/share/xade` with a desktop entry on Linux (x86_64). It also installs the `xade` command into `~/.local/bin`; add that folder to your PATH if the script says so. Run the same command again to update.
+
+```sh
+xade --help
+xade --version
+xade <path>    # opens that folder as a workspace in a new window; `xade .` for the current one
+```
+
+### Downloads
+
+Builds are published on every push to main at https://github.com/juliomatcom/xade/releases/latest: `Xade-macos-arm64.zip` (unsigned: right-click Xade.app > Open the first time) and `Xade-linux-x86_64.tar.gz` (unpack, run `./xade`).
+
+Linux needs a Vulkan-capable GPU driver and, for file dialogs, xdg-desktop-portal.
 
 ## Requirements
 
@@ -51,6 +74,10 @@ To install it as a regular macOS app (so you can open it from Launchpad and keep
 Run the script again after pulling changes to update the app.
 
 Xade stores its data in the `xade/` folder inside your OS data directory. To use another location, set `XADE_DATA_DIR`.
+
+## Settings
+
+Settings live in `settings.json` in the data folder; open it with Cmd+, (Ctrl+, on Linux) and changes apply live. Keys include `font_family`, `font_size`, `send_while_running`, `show_fps` (frame rate at the right of the status bar, default false) and `shortcuts`, which maps every keyboard shortcut, e.g. `"new_session": "cmd+t"`; chords look like `"cmd+k cmd+m"`, and `cmd` is Ctrl off macOS.
 
 ## Development
 

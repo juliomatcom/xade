@@ -44,6 +44,9 @@ pub struct DiffData {
     /// Line (in the new text) of the first change; 1 when there is none.
     pub first_changed_line: usize,
     pub too_large: bool,
+    /// Add and Del cells, counted before a too-large diff drops its rows.
+    pub added: usize,
+    pub removed: usize,
 }
 
 impl DiffData {
@@ -54,6 +57,74 @@ impl DiffData {
         result_json: Option<&str>,
         cwd: &Path,
     ) -> Option<DiffData> {
+        Self::build_with(tool, input_json, result_json, cwd, true)
+    }
+
+    /// Like `build` but never reads the file, so line numbers may restart at 1; for counting.
+    pub fn build_offline(
+        tool: &str,
+        input_json: &str,
+        result_json: Option<&str>,
+        cwd: &Path,
+    ) -> Option<DiffData> {
+        Self::build_with(tool, input_json, result_json, cwd, false)
+    }
+
+    /// The diff of a whole file from `old` to `new` text.
+    pub fn from_texts(path: &Path, old: &str, new: &str) -> DiffData {
+        let rows = rows_from_text(old, new, 1);
+        let too_large = rows.len() > 2 * MAX_LINES;
+        let first_changed_line = first_changed(&rows);
+        let (added, removed) = count_changes(&rows);
+        DiffData {
+            language: crate::widgets::tool_card::language_from_path(&path.to_string_lossy()),
+            path: path.to_path_buf(),
+            rows: if too_large { Vec::new() } else { rows },
+            first_changed_line,
+            too_large,
+            added,
+            removed,
+        }
+    }
+
+    /// One diff of several edits to the same file, in order, a `Row::Sep` section per part.
+    pub fn merge(mut parts: Vec<DiffData>) -> Option<DiffData> {
+        if parts.len() < 2 {
+            return parts.pop();
+        }
+        let total = parts.len();
+        let mut merged = DiffData {
+            path: parts[0].path.clone(),
+            language: parts[0].language,
+            first_changed_line: parts[0].first_changed_line,
+            ..DiffData::default()
+        };
+        for (i, p) in parts.into_iter().enumerate() {
+            merged.too_large |= p.too_large;
+            merged.added += p.added;
+            merged.removed += p.removed;
+            merged
+                .rows
+                .push(Row::Sep(format!("Edit {} of {total}", i + 1)));
+            merged
+                .rows
+                .extend(p.rows.into_iter().filter(|r| !matches!(r, Row::Sep(_))));
+        }
+        merged.too_large |= merged.rows.len() > 2 * MAX_LINES;
+        if merged.too_large {
+            merged.rows.clear();
+        }
+        Some(merged)
+    }
+
+    fn build_with(
+        tool: &str,
+        input_json: &str,
+        result_json: Option<&str>,
+        cwd: &Path,
+        disk: bool,
+    ) -> Option<DiffData> {
+        let read = |p: &Path| if disk { read_capped(p) } else { None };
         let input: Value = serde_json::from_str(input_json).ok()?;
         let result: Option<Value> = result_json.and_then(|s| serde_json::from_str(s).ok());
         let key = if tool == "NotebookEdit" {
@@ -78,16 +149,14 @@ impl DiffData {
             match tool {
                 "Edit" => {
                     let old = str_of(&input, "old_string");
-                    let start = read_capped(&abs)
-                        .and_then(|f| start_line(&f, &old))
-                        .unwrap_or(1);
+                    let start = read(&abs).and_then(|f| start_line(&f, &old)).unwrap_or(1);
                     rows_from_text(&old, &str_of(&input, "new_string"), start)
                 }
-                "MultiEdit" => multi_edit_rows(&input, &abs),
+                "MultiEdit" => multi_edit_rows(&input, read(&abs)),
                 "Write" => {
                     let old = match &result {
                         Some(r) => str_of(r, "originalFile"),
-                        None => read_capped(&abs).unwrap_or_default(),
+                        None => read(&abs).unwrap_or_default(),
                     };
                     rows_from_text(&old, &str_of(&input, "content"), 1)
                 }
@@ -103,12 +172,15 @@ impl DiffData {
         };
         let too_large = rows.len() > 2 * MAX_LINES;
         let first_changed_line = first_changed(&rows);
+        let (added, removed) = count_changes(&rows);
         Some(DiffData {
             language: crate::widgets::tool_card::language_from_path(&path.to_string_lossy()),
             path: abs,
             rows: if too_large { Vec::new() } else { rows },
             first_changed_line,
             too_large,
+            added,
+            removed,
         })
     }
 }
@@ -137,8 +209,7 @@ pub fn start_line(file: &str, needle: &str) -> Option<usize> {
     Some(file[..at].matches('\n').count() + 1)
 }
 
-fn multi_edit_rows(input: &Value, abs: &Path) -> Vec<Row> {
-    let file = read_capped(abs);
+fn multi_edit_rows(input: &Value, file: Option<String>) -> Vec<Row> {
     let edits = input
         .get("edits")
         .and_then(Value::as_array)
@@ -156,6 +227,21 @@ fn multi_edit_rows(input: &Value, abs: &Path) -> Vec<Row> {
         rows.extend(rows_from_text(&old, &str_of(e, "new_string"), start));
     }
     rows
+}
+
+fn count_changes(rows: &[Row]) -> (usize, usize) {
+    let (mut added, mut removed) = (0, 0);
+    for cell in rows.iter().flat_map(|r| match r {
+        Row::Pair(l, r) => [l, r],
+        Row::Sep(_) => [&None, &None],
+    }) {
+        match cell.as_ref().map(|c| c.kind) {
+            Some(Kind::Add) => added += 1,
+            Some(Kind::Del) => removed += 1,
+            _ => {}
+        }
+    }
+    (added, removed)
 }
 
 fn first_changed(rows: &[Row]) -> usize {
@@ -394,5 +480,17 @@ mod tests {
         let d = DiffData::build("MultiEdit", input, None, Path::new("/")).unwrap();
         let seps = d.rows.iter().filter(|r| matches!(r, Row::Sep(_))).count();
         assert_eq!(seps, 2);
+    }
+
+    #[test]
+    fn counts_and_merge_cover_every_edit() {
+        let input = r#"{"file_path":"/nonexistent/m.rs","edits":[{"old_string":"a","new_string":"b\nc"},{"old_string":"x\ny","new_string":"z"}]}"#;
+        let d = DiffData::build_offline("MultiEdit", input, None, Path::new("/")).unwrap();
+        assert_eq!((d.added, d.removed), (3, 3));
+        let m = DiffData::merge(vec![d.clone(), d]).unwrap();
+        assert_eq!((m.added, m.removed), (6, 6));
+        let seps: Vec<_> = m.rows.iter().filter(|r| matches!(r, Row::Sep(_))).collect();
+        assert_eq!(seps.len(), 2);
+        assert_eq!(m.rows[0], Row::Sep("Edit 1 of 2".into()));
     }
 }

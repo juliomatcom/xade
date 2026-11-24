@@ -1,13 +1,14 @@
-//! The keymaps modal: every shortcut of `keymap::BINDINGS`, grouped.
+//! The keymaps modal: every shortcut of the current keymap, grouped.
 
 use egui::RichText;
 
-use crate::keymap::{self, Show, BINDINGS, GROUPS};
+use crate::keymap::{self, Show, GROUPS};
 use crate::theme;
 
 /// Draws the modal; returns true when it should close.
 pub fn show(ctx: &egui::Context) -> bool {
     let mac = cfg!(target_os = "macos");
+    let km = keymap::current();
     let resp = egui::Modal::new(egui::Id::unique("keymaps")).show(ctx, |ui| {
         ui.set_width(460.0);
         ui.label(RichText::new("Keyboard shortcuts").strong().size(16.0));
@@ -18,7 +19,8 @@ pub fn show(ctx: &egui::Context) -> bool {
                 .num_columns(2)
                 .spacing([16.0, 4.0])
                 .show(ui, |ui| {
-                    for b in BINDINGS
+                    for b in km
+                        .bindings()
                         .iter()
                         .filter(|b| b.group == group && b.show != Show::Hidden)
                     {
@@ -28,7 +30,7 @@ pub fn show(ctx: &egui::Context) -> bool {
                             .corner_radius(4)
                             .inner_margin(egui::Margin::symmetric(6, 1))
                             .show(ui, |ui| {
-                                ui.label(RichText::new(keymap::binding_label(b, mac)).monospace());
+                                ui.label(RichText::new(km.label(b, mac)).monospace());
                             });
                         ui.end_row();
                     }
