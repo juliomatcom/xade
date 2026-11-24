@@ -106,6 +106,8 @@ fn session(ws: WorkspaceId, title: &str, at: OffsetDateTime) -> Session {
         preview_snippet: String::new(),
         model_id: "sonnet".into(),
         effort: Effort::Default,
+        sent_model_id: String::new(),
+        sent_effort: Effort::Default,
         auto_mode: false,
         usage: UsageTotals::default(),
         created_at: at,
@@ -968,4 +970,36 @@ fn a_dead_writer_thread_is_reported_once() {
     assert!(f.writer.take_failure().is_none(), "reported once");
     assert!(f.writer.send(WriteOp::TouchWorkspace(f.ws)).is_err());
     assert!(f.writer.flush().is_err());
+}
+
+#[test]
+fn mark_sent_keeps_the_last_sent_model_and_effort_apart_from_the_current_choice() {
+    let f = Fixture::new();
+    let id = f.add_session("Sent", 5);
+    f.writer
+        .send(WriteOp::MarkSent {
+            id,
+            model_id: "sonnet".into(),
+            effort: Effort::Low,
+        })
+        .unwrap();
+    f.writer
+        .send(WriteOp::UpdateSession {
+            id,
+            title: None,
+            provider_session_id: None,
+            model_id: Some("opus".into()),
+            effort: Some(Effort::High),
+            auto_mode: None,
+            preview_snippet: None,
+            usage: None,
+        })
+        .unwrap();
+    f.writer.flush().unwrap();
+    let (s, _) = block_on(f.reader.load_session(id)).unwrap();
+    assert_eq!((s.model_id.as_str(), s.effort), ("opus", Effort::High));
+    assert_eq!(
+        (s.sent_model_id.as_str(), s.sent_effort),
+        ("sonnet", Effort::Low)
+    );
 }

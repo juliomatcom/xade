@@ -40,6 +40,12 @@ pub enum WriteOp {
         usage: Option<UsageTotals>,
     },
     InsertMessage(Message),
+    /// Records the model and effort a message was sent with.
+    MarkSent {
+        id: SessionId,
+        model_id: String,
+        effort: Effort,
+    },
     /// Adds the turn's token and cost deltas; replaces the context figures.
     ApplyTurnUsage {
         session_id: SessionId,
@@ -208,9 +214,9 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
                 "INSERT INTO sessions (id, workspace_id, provider_id, provider_session_id, title,
                     preview_snippet, model_id, effort, auto_mode, context_tokens_used,
                     context_window_max, input_tokens, output_tokens, cache_read_tokens, cost_usd,
-                    created_at, updated_at, origin)
+                    created_at, updated_at, origin, sent_model_id, sent_effort)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                    ?18)",
+                    ?18, ?19, ?20)",
                 params![
                     s.id.0.to_string(),
                     s.workspace_id.0.to_string(),
@@ -230,7 +236,19 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
                     fmt_ts(s.created_at),
                     fmt_ts(s.updated_at),
                     schema::origin_str(s.origin),
+                    s.sent_model_id,
+                    schema::effort_str(s.sent_effort),
                 ],
+            )?;
+        }
+        WriteOp::MarkSent {
+            id,
+            model_id,
+            effort,
+        } => {
+            tx.execute(
+                "UPDATE sessions SET sent_model_id = ?2, sent_effort = ?3 WHERE id = ?1",
+                params![id.0.to_string(), model_id, schema::effort_str(effort)],
             )?;
         }
         WriteOp::UpdateSession {
@@ -489,8 +507,9 @@ fn import_session(
                 "INSERT INTO sessions (id, workspace_id, provider_id, provider_session_id, title,
                     preview_snippet, model_id, effort, auto_mode, context_tokens_used,
                     context_window_max, input_tokens, output_tokens, cache_read_tokens, cost_usd,
-                    created_at, updated_at, origin)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10, ?11, ?12, ?13, 0, ?14, ?15, ?16)",
+                    created_at, updated_at, origin, sent_model_id, sent_effort)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0, ?9, ?10, ?11, ?12, ?13, 0, ?14, ?15, ?16,
+                    ?7, ?8)",
                 params![
                     id,
                     workspace_id,

@@ -170,6 +170,19 @@ impl Actor {
                         self.write(op);
                     }
                 }
+                if self.session.sent_model_id != self.session.model_id
+                    || self.session.sent_effort != self.session.effort
+                {
+                    self.session
+                        .sent_model_id
+                        .clone_from(&self.session.model_id);
+                    self.session.sent_effort = self.session.effort;
+                    self.write(WriteOp::MarkSent {
+                        id: self.session.id,
+                        model_id: self.session.model_id.clone(),
+                        effort: self.session.effort,
+                    });
+                }
                 let mut msg = self.insert_message(Role::User, text.clone());
                 msg.tool_name = delivery.map(|d| d.tag().to_string());
                 self.write(WriteOp::InsertMessage(msg));

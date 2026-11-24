@@ -106,6 +106,8 @@ impl SessionManager {
                         origin: SessionOrigin::Xade,
                         title: String::new(),
                         preview_snippet: String::new(),
+                        sent_model_id: String::new(),
+                        sent_effort: effort,
                         model_id,
                         effort,
                         auto_mode,
@@ -599,6 +601,8 @@ fn imported_rows(
             imp.model_id
         },
         effort: Effort::Default,
+        sent_model_id: String::new(),
+        sent_effort: Effort::Default,
         auto_mode: false,
         usage: imp.usage,
         created_at: imp.created_at,

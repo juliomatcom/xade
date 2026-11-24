@@ -22,7 +22,7 @@ pub const DISK_POLL: Duration = Duration::from_secs(2);
 
 /// bat's syntax set (two-face): far more languages than syntect's defaults. One static, since
 /// egui memoizes highlighting by the settings' address.
-static SYNTAX: LazyLock<SyntectSettings> = LazyLock::new(|| SyntectSettings {
+pub static SYNTAX: LazyLock<SyntectSettings> = LazyLock::new(|| SyntectSettings {
     ps: two_face::syntax::extra_newlines(),
     ..SyntectSettings::default()
 });

@@ -13,7 +13,7 @@ use xade_core::{Effort, ProviderId, QuotaKind, Role, SessionId, SessionOrigin, W
 use crate::StoreError;
 
 /// Migrations in order; `PRAGMA user_version` is the count already applied.
-const MIGRATIONS: &[&str] = &[V1, V2, V3];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
 
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
@@ -23,6 +23,13 @@ const V3: &str = "
 ALTER TABLE workspaces RENAME COLUMN is_pinned TO is_open;
 UPDATE workspaces SET is_open = 1
  WHERE id = (SELECT id FROM workspaces ORDER BY last_opened_at DESC LIMIT 1);
+";
+
+/// Model and effort of the last sent message, so the context-cost warning survives a restart.
+const V4: &str = "
+ALTER TABLE sessions ADD COLUMN sent_model_id TEXT NOT NULL DEFAULT '';
+ALTER TABLE sessions ADD COLUMN sent_effort TEXT NOT NULL DEFAULT 'default';
+UPDATE sessions SET sent_model_id = model_id, sent_effort = effort;
 ";
 
 const V1: &str = "

@@ -105,6 +105,10 @@ pub struct Session {
     pub preview_snippet: String,
     pub model_id: String,
     pub effort: Effort,
+    /// Model and effort of the last message sent; the context-cost warning compares against them.
+    /// Empty model: nothing sent yet.
+    pub sent_model_id: String,
+    pub sent_effort: Effort,
     pub auto_mode: bool,
     pub usage: UsageTotals,
     pub created_at: OffsetDateTime,

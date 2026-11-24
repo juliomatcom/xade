@@ -111,9 +111,11 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                                     .iter()
                                     .map(changes_summary::FileChange::from)
                                     .collect();
-                                let source = changes_summary::Source::Tree { shared: c.shared };
+                                let source = changes_summary::Source::Tree;
                                 row(ui, |ui| {
-                                    if let Some(n) = changes_summary::show(ui, cwd, &list, source) {
+                                    if let Some(n) =
+                                        changes_summary::show(ui, m.id, cwd, &list, source)
+                                    {
                                         turn_review = Some((m.id, n));
                                     }
                                 });
@@ -124,6 +126,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                                     row(ui, |ui| {
                                         if let Some(n) = changes_summary::show(
                                             ui,
+                                            m.id,
                                             cwd,
                                             files,
                                             changes_summary::Source::Edits,
@@ -348,6 +351,8 @@ mod tests {
             preview_snippet: String::new(),
             model_id: "opus".into(),
             effort: Effort::Default,
+            sent_model_id: String::new(),
+            sent_effort: Effort::Default,
             auto_mode: false,
             usage: UsageTotals::default(),
             created_at: now,
@@ -417,7 +422,6 @@ mod tests {
             turn_base: None,
             turn_snapshotting: false,
             turn_files: Default::default(),
-            turn_shared: false,
             sent_model: String::new(),
             sent_effort: xade_core::Effort::Default,
             collapsed: false,
@@ -635,13 +639,8 @@ mod tests {
         let anchor = v.messages[1].id;
         assert_stacked(&render(&mut v, Cards::Collapsed), 2);
         let files = vec![tf("a.rs"), tf("b.rs")];
-        v.turn_files.insert(
-            anchor,
-            crate::turn_files::TurnChanges {
-                files,
-                shared: false,
-            },
-        );
+        v.turn_files
+            .insert(anchor, crate::turn_files::TurnChanges { files });
         let rows = render(&mut v, Cards::Collapsed);
         assert_stacked(&rows, 3);
         assert!(rows[2].allocated.height() > 30.0, "{:?}", rows[2]);
@@ -659,7 +658,6 @@ mod tests {
             anchor,
             crate::turn_files::TurnChanges {
                 files: vec![tf("a.rs")],
-                shared: false,
             },
         );
         assert_stacked(&render(&mut v, Cards::Collapsed), 3);

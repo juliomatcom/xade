@@ -103,12 +103,19 @@ fn counts(ui: &mut egui::Ui, added: usize, removed: usize) {
 pub enum Source {
     /// The turn's edit tool calls.
     Edits,
-    /// The working tree before and after the turn; `shared` when another session ran meanwhile.
-    Tree { shared: bool },
+    /// The working tree before and after the turn.
+    Tree,
 }
 
-/// Draws the card; returns the index of the file row clicked.
-pub fn show(ui: &mut egui::Ui, cwd: &Path, files: &[FileChange], source: Source) -> Option<usize> {
+/// Draws the card, collapsed to its summary line until clicked (`id` keeps that per turn);
+/// returns the index of the file row clicked.
+pub fn show(
+    ui: &mut egui::Ui,
+    id: Uuid,
+    cwd: &Path,
+    files: &[FileChange],
+    source: Source,
+) -> Option<usize> {
     let mut clicked = None;
     egui::Frame::new()
         .fill(theme::BG_RAISED)
@@ -117,45 +124,54 @@ pub fn show(ui: &mut egui::Ui, cwd: &Path, files: &[FileChange], source: Source)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            let mut state = egui::collapsing_header::CollapsingState::load_with_default_open(
+                ui.ctx(),
+                egui::Id::unique(("changes_card", id)),
+                false,
+            );
             ui.horizontal(|ui| {
+                state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
                 let noun = if files.len() == 1 { "file" } else { "files" };
                 let what = match source {
                     Source::Edits => "changed",
-                    Source::Tree { .. } => "changed in the working tree",
+                    Source::Tree => "changed in the working tree",
                 };
-                ui.label(RichText::new(format!("{} {noun} {what}", files.len())).strong());
+                let title = egui::Label::new(
+                    RichText::new(format!("{} {noun} {what}", files.len())).strong(),
+                )
+                .sense(egui::Sense::click());
+                if ui
+                    .add(title)
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    state.toggle(ui);
+                }
                 let (added, removed) = files
                     .iter()
                     .fold((0, 0), |(a, r), f| (a + f.added, r + f.removed));
                 ui.label(RichText::new(format!("+{added}")).color(theme::OK));
                 ui.label(RichText::new(format!("\u{2212}{removed}")).color(theme::DANGER));
             });
-            if source == (Source::Tree { shared: true }) {
-                ui.label(
-                    RichText::new(
-                        "Another session was running at the same time, so some of these may not \
-                         be from this turn.",
-                    )
-                    .small()
-                    .color(theme::WARN),
-                );
-            }
-            for (i, f) in files.iter().enumerate() {
-                let rel = f.path.strip_prefix(cwd).unwrap_or(&f.path);
-                ui.horizontal(|ui| {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                        counts(ui, f.added, f.removed);
-                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                            let name =
-                                RichText::new(rel.display().to_string()).color(theme::ACCENT);
-                            let row = ui.add(egui::Button::new(name).frame(false).truncate());
-                            if row.clicked() {
-                                clicked = Some(i);
-                            }
+            state.show_body_unindented(ui, |ui| {
+                for (i, f) in files.iter().enumerate() {
+                    let rel = f.path.strip_prefix(cwd).unwrap_or(&f.path);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            counts(ui, f.added, f.removed);
+                            ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                                let name =
+                                    RichText::new(rel.display().to_string()).color(theme::ACCENT);
+                                let row = ui.add(egui::Button::new(name).frame(false).truncate());
+                                if row.clicked() {
+                                    clicked = Some(i);
+                                }
+                            });
                         });
                     });
-                });
-            }
+                }
+            });
+            state.store(ui.ctx());
         });
     clicked
 }
@@ -267,7 +283,7 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            show(ui, Path::new("/w"), &files, source);
+            show(ui, Uuid::nil(), Path::new("/w"), &files, source);
         });
         out.textures_delta.clear();
         fn walk(s: &egui::Shape, t: &mut Vec<String>) {
@@ -283,19 +299,17 @@ mod tests {
     }
 
     #[test]
-    fn the_card_says_where_its_list_came_from_and_warns_when_another_session_ran() {
+    fn the_card_says_where_its_list_came_from() {
         let edits = card_texts(Source::Edits);
         assert!(
             edits.contains("2 files changed") && !edits.contains("working tree"),
             "{edits}"
         );
-        let tree = card_texts(Source::Tree { shared: false });
+        let tree = card_texts(Source::Tree);
         assert!(
             tree.contains("2 files changed in the working tree"),
             "{tree}"
         );
         assert!(!tree.contains("Another session"), "{tree}");
-        let shared = card_texts(Source::Tree { shared: true });
-        assert!(shared.contains("Another session was running"), "{shared}");
     }
 }

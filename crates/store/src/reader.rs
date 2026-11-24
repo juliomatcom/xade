@@ -242,7 +242,7 @@ fn load_session(conn: &Connection, id: SessionId) -> Result<(Session, Vec<Messag
             "SELECT id, workspace_id, provider_id, provider_session_id, title, preview_snippet,
                 model_id, effort, auto_mode, context_tokens_used, context_window_max,
                 input_tokens, output_tokens, cache_read_tokens, cost_usd, created_at, updated_at,
-                origin
+                origin, sent_model_id, sent_effort
              FROM sessions WHERE id = ?1",
             [&key],
             |r| {
@@ -256,6 +256,8 @@ fn load_session(conn: &Connection, id: SessionId) -> Result<(Session, Vec<Messag
                     preview_snippet: r.get(5)?,
                     model_id: r.get(6)?,
                     effort: schema::parse_effort(7, &r.get::<_, String>(7)?)?,
+                    sent_model_id: r.get(18)?,
+                    sent_effort: schema::parse_effort(19, &r.get::<_, String>(19)?)?,
                     auto_mode: r.get(8)?,
                     usage: UsageTotals {
                         context_tokens_used: to_u64(r.get(9)?),

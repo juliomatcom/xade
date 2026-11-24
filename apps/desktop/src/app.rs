@@ -159,8 +159,6 @@ pub struct SessionVm {
     pub turn_snapshotting: bool,
     /// Files each finished turn changed, keyed by the turn's last message; memory only.
     pub turn_files: std::collections::HashMap<uuid::Uuid, crate::turn_files::TurnChanges>,
-    /// Another session was running at some point of the running turn.
-    pub turn_shared: bool,
     /// Model and thinking effort the last message went out with; a different choice now costs
     /// the next message its prompt cache.
     pub sent_model: String,
@@ -1632,7 +1630,17 @@ impl App {
             .find(|w| w.id == session.workspace_id)
             .map(|w| w.root_path.clone())
             .unwrap_or_default();
-        let (sent_model, sent_effort) = (session.model_id.clone(), session.effort);
+        // A session never sent from has no baseline: the warning has nothing to compare.
+        let sent_model = if session.sent_model_id.is_empty() {
+            session.model_id.clone()
+        } else {
+            session.sent_model_id.clone()
+        };
+        let sent_effort = if session.sent_model_id.is_empty() {
+            session.effort
+        } else {
+            session.sent_effort
+        };
         self.sessions.insert(
             id,
             SessionVm {
@@ -1654,7 +1662,6 @@ impl App {
                 turn_base: None,
                 turn_snapshotting: false,
                 turn_files: Default::default(),
-                turn_shared: false,
                 sent_model,
                 sent_effort,
                 collapsed: false,
@@ -1725,7 +1732,6 @@ impl App {
                 if status == SessionStatus::Closed {
                     return self.drop_session(id);
                 }
-                let busy_elsewhere = self.busy_elsewhere(id);
                 if let Some(vm) = self.sessions.get_mut(&id) {
                     if status != SessionStatus::NeedsApproval {
                         vm.pending_permission = None;
@@ -1737,7 +1743,6 @@ impl App {
                     }
                     if vm.status == SessionStatus::Streaming && !vm.turn_snapshotting {
                         vm.turn_snapshotting = true;
-                        vm.turn_shared = busy_elsewhere;
                         let (dir, bridge) = (vm.cwd.clone(), self.bridge.clone());
                         self.rt.spawn(async move {
                             let base = crate::turn_files::snapshot(&dir).await;
@@ -1797,27 +1802,7 @@ impl App {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    fn busy_elsewhere(&self, id: SessionId) -> bool {
-        let Some(cwd) = self.sessions.get(&id).map(|vm| &vm.cwd) else {
-            return false;
-        };
-        let other_xade = self.sessions.iter().any(|(sid, vm)| {
-            *sid != id
-                && vm.cwd == *cwd
-                && matches!(
-                    vm.status,
-                    SessionStatus::Streaming | SessionStatus::NeedsApproval
-                )
-        });
-        other_xade
-            || self
-                .running
-                .values()
-                .any(|r| r.state == xade_core::RunState::Busy)
-    }
-
     fn on_provider_event(&mut self, id: SessionId, ev: ProviderEvent) {
-        let busy_elsewhere = self.busy_elsewhere(id);
         let Some(vm) = self.sessions.get_mut(&id) else {
             return;
         };
@@ -1913,7 +1898,6 @@ impl App {
             }
             ProviderEvent::TurnComplete { usage, .. } => {
                 vm.turn_snapshotting = false;
-                let shared = std::mem::take(&mut vm.turn_shared) || busy_elsewhere;
                 if let (Some(base), Some(anchor)) =
                     (vm.turn_base.take(), vm.messages.last().map(|m| m.id))
                 {
@@ -1923,7 +1907,7 @@ impl App {
                         bridge.send(UiMsg::TurnFiles {
                             session: id,
                             anchor,
-                            changes: crate::turn_files::TurnChanges { files, shared },
+                            changes: crate::turn_files::TurnChanges { files },
                         });
                     });
                 }
@@ -2319,6 +2303,8 @@ mod tests {
             preview_snippet: String::new(),
             model_id: "opus".into(),
             effort: xade_core::Effort::Default,
+            sent_model_id: String::new(),
+            sent_effort: xade_core::Effort::Default,
             auto_mode: false,
             usage: xade_core::UsageTotals::default(),
             created_at: now,

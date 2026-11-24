@@ -72,7 +72,7 @@ impl DiffData {
 
     /// The diff of a whole file from `old` to `new` text.
     pub fn from_texts(path: &Path, old: &str, new: &str) -> DiffData {
-        let rows = rows_from_text(old, new, 1);
+        let rows = collapse_unchanged(rows_from_text(old, new, 1));
         let too_large = rows.len() > 2 * MAX_LINES;
         let first_changed_line = first_changed(&rows);
         let (added, removed) = count_changes(&rows);
@@ -227,6 +227,38 @@ fn multi_edit_rows(input: &Value, file: Option<String>) -> Vec<Row> {
         rows.extend(rows_from_text(&old, &str_of(e, "new_string"), start));
     }
     rows
+}
+
+/// Unchanged lines kept around each change in a whole-file diff.
+const CONTEXT: usize = 3;
+
+/// Replaces long runs of unchanged rows with a `Sep`, so a change deep in a file is on screen.
+fn collapse_unchanged(rows: Vec<Row>) -> Vec<Row> {
+    let same = |r: &Row| matches!(r, Row::Pair(Some(l), Some(r)) if l.kind == Kind::Same && r.kind == Kind::Same);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < rows.len() {
+        if !same(&rows[i]) {
+            out.push(rows[i].clone());
+            i += 1;
+            continue;
+        }
+        let end = (i..rows.len())
+            .find(|&j| !same(&rows[j]))
+            .unwrap_or(rows.len());
+        let keep_head = if i == 0 { 0 } else { CONTEXT };
+        let keep_tail = if end == rows.len() { 0 } else { CONTEXT };
+        let hidden = (end - i).saturating_sub(keep_head + keep_tail);
+        if hidden < 2 {
+            out.extend(rows[i..end].iter().cloned());
+        } else {
+            out.extend(rows[i..i + keep_head].iter().cloned());
+            out.push(Row::Sep(format!("{hidden} unchanged lines")));
+            out.extend(rows[end - keep_tail..end].iter().cloned());
+        }
+        i = end;
+    }
+    out
 }
 
 fn count_changes(rows: &[Row]) -> (usize, usize) {
@@ -404,6 +436,16 @@ mod tests {
         );
         assert_eq!(pair(&rows[3]), (None, Some((13, "d", Kind::Add))));
         assert_eq!(first_changed(&rows), 11);
+    }
+
+    #[test]
+    fn a_whole_file_diff_hides_far_unchanged_lines() {
+        let old: String = (1..=100).map(|i| format!("l{i}\n")).collect();
+        let new = old.replace("l50\n", "changed\n");
+        let d = DiffData::from_texts(Path::new("/w/a.txt"), &old, &new);
+        assert_eq!((d.added, d.removed, d.first_changed_line), (1, 1, 50));
+        assert!(d.rows.len() < 15, "{}", d.rows.len());
+        assert!(matches!(&d.rows[0], Row::Sep(t) if t == "46 unchanged lines"));
     }
 
     #[test]

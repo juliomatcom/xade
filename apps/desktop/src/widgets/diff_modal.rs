@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use egui::{Align, Color32, Layout, RichText, TextStyle};
-use egui_extras::syntax_highlighting::{highlight, CodeTheme};
+use egui_extras::syntax_highlighting::{highlight_with, CodeTheme};
 
 use crate::diff::{Cell, DiffData, Kind, Row};
+use crate::editor::SYNTAX;
 use crate::{icons, theme};
 
 const GUTTER: f32 = 44.0;
@@ -78,14 +79,10 @@ pub fn show(
         ui.horizontal(|ui| {
             ui.label(RichText::new(format!("Review File Changes: {rel_path}")).strong());
             if let Some(code) = vscode {
-                let link = ui.add(
-                    egui::Button::new(
-                        RichText::new(icons::with(icons::VSCODE, "Open in VS Code"))
-                            .color(theme::ACCENT),
-                    )
-                    .frame(false),
-                );
-                if link.clicked() {
+                if ui
+                    .button(icons::with(icons::VSCODE, "Open in VS Code"))
+                    .clicked()
+                {
                     open_in_vscode(code, &data.path, data.first_changed_line);
                 }
             }
@@ -118,21 +115,53 @@ pub fn show(
         if data.too_large {
             ui.label(RichText::new("File too large to diff").color(theme::TEXT_MUTED));
         } else {
-            body(ui, data);
+            body(ui, id, data);
         }
     });
     if action == ModalAction::None && resp.should_close() {
         action = ModalAction::Close;
     }
+    if action != ModalAction::None {
+        // The next open of this file starts at its first change again.
+        ctx.data_mut(|d| d.remove::<bool>(scrolled_key(id, data)));
+    }
     action
 }
 
-fn body(ui: &mut egui::Ui, data: &DiffData) {
+/// Index of the first row holding a change, backed up to leave a little context above it.
+fn first_change_row(data: &DiffData) -> usize {
+    let changed = |c: &Option<Cell>| c.as_ref().is_some_and(|c| c.kind != Kind::Same);
+    data.rows
+        .iter()
+        .position(|r| matches!(r, Row::Pair(l, r) if changed(l) || changed(r)))
+        .map_or(0, |i| i.saturating_sub(3))
+}
+
+fn scrolled_key(id: egui::Id, data: &DiffData) -> egui::Id {
+    egui::Id::unique(("diff_scrolled", id, &data.path))
+}
+
+fn body(ui: &mut egui::Ui, id: egui::Id, data: &DiffData) {
     let row_h = ui.text_style_height(&TextStyle::Monospace) + 4.0;
     let code_theme = CodeTheme::from_style(ui.style());
+    // Syntect matches a syntax by extension (or file name), not by language name.
+    let token = data
+        .path
+        .extension()
+        .or_else(|| data.path.file_name())
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
     let area_h = ui.available_height();
-    egui::ScrollArea::vertical()
-        .auto_shrink([false, false])
+    // Jump to the first change on the first frame only; later frames keep the user's scroll.
+    let started = scrolled_key(id, data);
+    let first_frame = !ui.data(|d| d.get_temp::<bool>(started)).unwrap_or(false);
+    ui.data_mut(|d| d.insert_temp(started, true));
+    let mut area = egui::ScrollArea::vertical().id_salt(("diff_rows", &data.path));
+    if first_frame {
+        area = area.vertical_scroll_offset(
+            first_change_row(data) as f32 * (row_h + ui.spacing().item_spacing.y),
+        );
+    }
+    area.auto_shrink([false, false])
         .max_height(area_h)
         .show_rows(ui, row_h, data.rows.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;
@@ -157,8 +186,8 @@ fn body(ui: &mut egui::Ui, data: &DiffData) {
                             egui::pos2(rect.min.x + half + 8.0, rect.min.y),
                             egui::vec2(half, row_h),
                         );
-                        paint_cell(ui, left, l.as_ref(), data.language, &code_theme);
-                        paint_cell(ui, right, r.as_ref(), data.language, &code_theme);
+                        paint_cell(ui, left, l.as_ref(), &token, &code_theme);
+                        paint_cell(ui, right, r.as_ref(), &token, &code_theme);
                     }
                 }
             }
@@ -191,7 +220,14 @@ fn paint_cell(
         font,
         theme::TEXT_MUTED,
     );
-    let job = highlight(ui.ctx(), ui.style(), code_theme, &cell.text, language);
+    let job = highlight_with(
+        ui.ctx(),
+        ui.style(),
+        code_theme,
+        &cell.text,
+        language,
+        &SYNTAX,
+    );
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let pos = egui::pos2(
         rect.left() + GUTTER,

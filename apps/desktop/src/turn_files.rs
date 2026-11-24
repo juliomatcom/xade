@@ -24,8 +24,6 @@ pub struct Snapshot {
 #[derive(Clone, Debug, Default)]
 pub struct TurnChanges {
     pub files: Vec<TurnFile>,
-    /// Another session was running meanwhile, so some files may not be this turn's.
-    pub shared: bool,
 }
 
 /// One file a turn changed, with both versions for the diff.
