@@ -34,6 +34,8 @@ pub enum ManagerCmd {
         text: String,
         /// `Some` when sent while a turn was running.
         delivery: Option<Delivery>,
+        /// Prepended to the prompt the provider sees; never stored or shown as the user's text.
+        context: Option<String>,
     },
     Interrupt {
         session_id: SessionId,

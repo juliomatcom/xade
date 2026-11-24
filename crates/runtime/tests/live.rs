@@ -30,6 +30,7 @@ async fn create_send_close_resume() {
         session_id: id,
         text: "Reply with exactly: pong".into(),
         delivery: None,
+        context: None,
     })
     .unwrap();
     h.until_status(120, SessionStatus::Idle).await;
@@ -60,6 +61,7 @@ async fn create_send_close_resume() {
         session_id: id,
         text: "Reply with exactly: pong again".into(),
         delivery: None,
+        context: None,
     })
     .unwrap();
     h.until_status(120, SessionStatus::Idle).await;

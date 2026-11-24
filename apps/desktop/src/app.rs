@@ -1758,6 +1758,7 @@ impl App {
                                 session_id: id,
                                 text,
                                 delivery,
+                                context: self.editors.ide_context(),
                             });
                         }
                     }

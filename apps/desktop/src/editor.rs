@@ -50,6 +50,8 @@ pub struct EditorVm {
     pub collapsed: bool,
     pub window_rect: Option<egui::Rect>,
     pub apply_rect: Option<egui::Rect>,
+    /// 1-based inclusive lines of the last non-empty selection; kept while focus is elsewhere.
+    pub selection: Option<(usize, usize)>,
 }
 
 impl EditorVm {
@@ -119,6 +121,8 @@ pub struct Editors {
     /// The editor the "Save changes?" modal is about.
     pub pending_close: Option<EditorId>,
     pub checked: Option<Instant>,
+    /// The editor window focused most recently; sessions are told about its file.
+    pub last_focused: Option<EditorId>,
 }
 
 impl Editors {
@@ -150,9 +154,17 @@ impl Editors {
                 collapsed: false,
                 window_rect: None,
                 apply_rect: None,
+                selection: None,
             },
         );
         id
+    }
+
+    /// The context tag for the most recently focused editor that has a file; `None` when that
+    /// editor was closed or never saved.
+    pub fn ide_context(&self) -> Option<String> {
+        let vm = self.map.get(&self.last_focused?)?;
+        Some(ide_context(vm.path.as_deref()?, vm.selection))
     }
 
     pub fn find_path(&self, path: &Path) -> Option<EditorId> {
@@ -222,6 +234,33 @@ pub fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
 pub struct EditorOut {
     pub view: ViewOut,
     pub error: Option<String>,
+}
+
+/// 1-based inclusive lines covered by the char range, `None` when it selects nothing. A range that
+/// ends at the very start of a line does not count that line.
+pub fn selected_lines(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+    if start >= end {
+        return None;
+    }
+    let line_of = |index: usize| 1 + text.chars().take(index).filter(|c| *c == '\n').count();
+    let first = line_of(start);
+    let last = line_of(end - 1).max(first);
+    Some((first, last))
+}
+
+/// The tag the VS Code extension puts before a prompt so the model knows what the user is looking
+/// at; it saves the discovery turns (Glob, Grep) a bare prompt would start with.
+pub fn ide_context(path: &Path, selection: Option<(usize, usize)>) -> String {
+    let path = path.display();
+    let selected = match selection {
+        Some((a, b)) if a == b => format!(" Line {a} is selected."),
+        Some((a, b)) => format!(" Lines {a} to {b} are selected."),
+        None => String::new(),
+    };
+    format!(
+        "<ide_opened_file>The user opened the file {path} in the IDE.{selected} \
+This may or may not be related to the current task.</ide_opened_file>"
+    )
 }
 
 /// One editor window's content: header, optional "changed on disk" bar, and the text.
@@ -338,17 +377,24 @@ fn edit(ui: &mut egui::Ui, vm: &mut EditorVm) {
                 let width =
                     (avail.x - gutter.rect.width() - ui.spacing().item_spacing.x - 12.0).max(100.0);
                 let rows = (avail.y / row_h).ceil() as usize;
-                let resp = ui.add(
-                    egui::TextEdit::multiline(&mut vm.text)
-                        .code_editor()
-                        .frame(egui::Frame::NONE)
-                        .desired_width(width)
-                        .desired_rows(rows)
-                        .layouter(&mut layouter),
-                );
-                if resp.changed() {
+                let output = egui::TextEdit::multiline(&mut vm.text)
+                    .code_editor()
+                    .frame(egui::Frame::NONE)
+                    .desired_width(width)
+                    .desired_rows(rows)
+                    .layouter(&mut layouter)
+                    .show(ui);
+                if output.response.changed() {
                     vm.dirty = true;
                     vm.revision += 1;
+                }
+                // Follows the cursor only while the text has focus: clicking into a session's
+                // composer must not forget what was selected here.
+                if output.response.has_focus() {
+                    vm.selection = output.cursor_range.and_then(|r| {
+                        let range = r.as_sorted_char_range();
+                        selected_lines(&vm.text, range.start.0, range.end.0)
+                    });
                 }
             });
         });
@@ -399,6 +445,53 @@ pub fn close_modal(ctx: &egui::Context, name: &str) -> Option<CloseChoice> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_lines_are_one_based_and_skip_a_trailing_line_start() {
+        let text = "one\ntwo\nthree\n";
+        assert_eq!(selected_lines(text, 2, 2), None);
+        assert_eq!(selected_lines(text, 0, 3), Some((1, 1)));
+        assert_eq!(selected_lines(text, 2, 6), Some((1, 2)));
+        assert_eq!(
+            selected_lines(text, 0, 8),
+            Some((1, 2)),
+            "ends at the start of line 3"
+        );
+        assert_eq!(selected_lines(text, 4, 14), Some((2, 3)));
+    }
+
+    #[test]
+    fn ide_context_names_the_file_and_the_selection() {
+        let p = Path::new("/w/src/a.rs");
+        let plain = ide_context(p, None);
+        assert!(plain.starts_with("<ide_opened_file>"), "{plain}");
+        assert!(
+            plain.contains("/w/src/a.rs") && !plain.contains("selected"),
+            "{plain}"
+        );
+        assert!(ide_context(p, Some((3, 3))).contains("Line 3 is selected"));
+        assert!(ide_context(p, Some((3, 9))).contains("Lines 3 to 9 are selected"));
+    }
+
+    #[test]
+    fn the_last_focused_editor_with_a_file_supplies_the_context() {
+        let mut eds = Editors::default();
+        assert_eq!(eds.ide_context(), None);
+        let a = eds.create(Some(PathBuf::from("/w/a.rs")), String::new());
+        let untitled = eds.create(None, String::new());
+        eds.last_focused = Some(a);
+        eds.map.get_mut(&a).unwrap().selection = Some((2, 4));
+        let tag = eds.ide_context().unwrap();
+        assert!(
+            tag.contains("/w/a.rs") && tag.contains("Lines 2 to 4"),
+            "{tag}"
+        );
+        eds.last_focused = Some(untitled);
+        assert_eq!(eds.ide_context(), None, "no path to name");
+        eds.map.remove(&a);
+        eds.last_focused = Some(a);
+        assert_eq!(eds.ide_context(), None, "closed");
+    }
 
     fn frames(vm: &mut EditorVm, n: usize) {
         let ctx = egui::Context::default();

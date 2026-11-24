@@ -361,6 +361,7 @@ pub fn send_now(vm: &mut SessionVm, env_cmd: &Env, text: String, delivery: Optio
         session_id: vm.session.id,
         text,
         delivery,
+        context: env_cmd.ide_context.map(str::to_owned),
     });
 }
 
@@ -936,6 +937,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: crate::config::SendMode::Queue,
+            ide_context: None,
         };
         let mut v = vm(String::new());
         v.attach_note = note;
@@ -980,6 +982,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: crate::config::SendMode::Queue,
+            ide_context: None,
         };
         let mut v = vm(String::new());
         v.sent_model.clone_from(&v.session.model_id);
@@ -1009,6 +1012,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: crate::config::SendMode::Queue,
+            ide_context: None,
         };
         let mut v = vm("hi".into());
         set_attach_note(&mut v, "x".into());
@@ -1038,6 +1042,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: crate::config::SendMode::Queue,
+            ide_context: None,
         };
         let mut v = vm(input);
         let mut out = egui::Rect::NOTHING;
@@ -1071,6 +1076,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: crate::config::SendMode::Queue,
+            ide_context: None,
         };
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(

@@ -122,8 +122,9 @@ impl SessionManager {
                     session_id,
                     text,
                     delivery,
+                    context,
                 } => {
-                    self.forward(session_id, ActorCmd::Send(text, delivery));
+                    self.forward(session_id, ActorCmd::Send(text, delivery, context));
                 }
                 ManagerCmd::Interrupt { session_id } => {
                     self.forward(session_id, ActorCmd::Interrupt);

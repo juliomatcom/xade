@@ -17,7 +17,8 @@ use xade_store::{WriteOp, WriterHandle};
 use crate::{AppEvent, AppEventKind};
 
 pub(crate) enum ActorCmd {
-    Send(String, Option<Delivery>),
+    /// Text, delivery, and context the provider gets in front of the text.
+    Send(String, Option<Delivery>, Option<String>),
     Interrupt,
     Respond {
         request_id: String,
@@ -152,7 +153,7 @@ impl Actor {
     /// Returns false when the actor should end.
     async fn on_cmd(&mut self, cmd: ActorCmd) -> bool {
         match cmd {
-            ActorCmd::Send(text, delivery) => {
+            ActorCmd::Send(text, delivery, context) => {
                 // A prompt sent mid-turn steers the running turn: the CLI folds it in at the
                 // next tool boundary and ends both with one result.
                 if !matches!(self.status, SessionStatus::Idle | SessionStatus::Streaming) {
@@ -189,7 +190,11 @@ impl Actor {
                 if self.status != SessionStatus::Streaming {
                     self.set_status(SessionStatus::Streaming);
                 }
-                self.command(SessionCommand::SendPrompt(text));
+                let prompt = match context {
+                    Some(c) => format!("{c}\n{text}"),
+                    None => text,
+                };
+                self.command(SessionCommand::SendPrompt(prompt));
             }
             ActorCmd::Interrupt => self.command(SessionCommand::Interrupt),
             ActorCmd::Respond {

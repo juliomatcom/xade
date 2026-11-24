@@ -15,6 +15,7 @@ use xade_runtime::{AppEventKind, ManagerCmd};
 #[derive(Default)]
 struct FakeProvider {
     spawns: Mutex<Vec<SpawnConfig>>,
+    prompts: Arc<Mutex<Vec<String>>>,
 }
 
 impl AgentProvider for FakeProvider {
@@ -38,13 +39,15 @@ impl AgentProvider for FakeProvider {
     }
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
         let model_id = cfg.model_id.clone();
+        let prompts = self.prompts.clone();
         self.spawns.lock().unwrap().push(cfg);
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         let (ev_tx, events) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
-                    SessionCommand::SendPrompt(_) => {
+                    SessionCommand::SendPrompt(text) => {
+                        prompts.lock().unwrap().push(text);
                         let script = [
                             ProviderEvent::Started {
                                 provider_session_id: "fake-session".into(),
@@ -121,6 +124,7 @@ async fn create_send_close_open_resume() {
         session_id: id,
         text: "Say pong\nsecond line".into(),
         delivery: None,
+        context: None,
     })
     .unwrap();
     let ev = h.until_status(5, SessionStatus::Idle).await;
@@ -189,6 +193,7 @@ async fn create_send_close_open_resume() {
         session_id: id,
         text: "again".into(),
         delivery: None,
+        context: None,
     })
     .unwrap();
     h.until_status(5, SessionStatus::Idle).await;
@@ -230,4 +235,40 @@ async fn create_send_close_open_resume() {
         .await
         .unwrap()
         .unwrap();
+}
+
+#[tokio::test]
+async fn context_goes_to_the_provider_but_not_into_the_transcript() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(FakeProvider::default());
+    let mut h = common::start(dir.path(), provider.clone()).await;
+
+    h.create("haiku");
+    let ev = h.until_status(5, SessionStatus::Idle).await;
+    let id = ev
+        .iter()
+        .find_map(|e| match &e.kind {
+            AppEventKind::SessionCreated(s) => Some(s.id),
+            _ => None,
+        })
+        .expect("SessionCreated");
+
+    h.tx.send(ManagerCmd::Send {
+        session_id: id,
+        text: "fix it".into(),
+        delivery: None,
+        context: Some("<ide_opened_file>a.rs</ide_opened_file>".into()),
+    })
+    .unwrap();
+    h.until_status(5, SessionStatus::Idle).await;
+    xade_runtime::flush(&h.writer).await;
+
+    assert_eq!(
+        *provider.prompts.lock().unwrap(),
+        vec!["<ide_opened_file>a.rs</ide_opened_file>\nfix it".to_string()]
+    );
+    let (row, msgs) = h.reader.load_session(id).await.unwrap();
+    assert_eq!(row.title, "fix it");
+    let user = msgs.iter().find(|m| m.role == Role::User).unwrap();
+    assert_eq!(user.content_text, "fix it");
 }

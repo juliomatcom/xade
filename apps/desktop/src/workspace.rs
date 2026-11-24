@@ -83,6 +83,8 @@ pub struct Env<'a> {
     pub vscode: Option<&'a Path>,
     pub maximized: Option<SessionId>,
     pub send_mode: SendMode,
+    /// `<ide_opened_file>` tag for the file the user last had open, sent ahead of prompts.
+    pub ide_context: Option<&'a str>,
 }
 
 /// Auto-tiling state: windows are re-tiled while `auto` and the set of windows or the area changes.
@@ -249,6 +251,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
+    if let Some(WindowKind::Editor(id)) = app.focused {
+        app.editors.last_focused = Some(id);
+    }
+    let ide_context = app.editors.ide_context();
     let mut closes = Vec::new();
     let mut reloads = Vec::new();
     let mut attaches = Vec::new();
@@ -286,6 +292,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             vscode: app.vscode.as_deref(),
             maximized: app.maximized.and_then(WindowKind::session),
             send_mode: app.config.send_while_running,
+            ide_context: ide_context.as_deref(),
         };
         let editor_maximized = app.maximized == Some(*kind);
         let collapsed = *taken.geom().0;
@@ -753,6 +760,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
+            ide_context: None,
         };
         let area = Rect::from_min_size(egui::pos2(20.0, 50.0), egui::vec2(1200.0, 700.0));
         let tiles = tile_rects(area, 3);
@@ -795,6 +803,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
+            ide_context: None,
         };
         let mut v = vm();
         let area = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 700.0));

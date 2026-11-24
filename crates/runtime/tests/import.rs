@@ -217,6 +217,7 @@ async fn xade_sessions_and_live_sessions_are_never_overwritten() {
         session_id: xade_id,
         text: "hello".into(),
         delivery: None,
+        context: None,
     })
     .unwrap();
     h.until_status(5, SessionStatus::Idle).await;
@@ -320,6 +321,7 @@ async fn delete_closes_live_session_aborts_on_provider_error_and_stays_deleted()
         session_id: id,
         text: "hello".into(),
         delivery: None,
+        context: None,
     })
     .unwrap();
     h.until_status(5, SessionStatus::Idle).await;
