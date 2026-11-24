@@ -60,16 +60,66 @@ pub fn build_args(cfg: &SpawnConfig) -> Vec<String> {
     args
 }
 
+const ENTRYPOINT_VAR: &str = "CLAUDE_CODE_ENTRYPOINT";
 /// Entrypoint label the child reports. Left unset, `-p` traffic is labelled `sdk-cli`, which drains
 /// the plan's 5-hour meter about twice as fast as an interactive client's label (`claude-vscode`,
 /// measured A/B); Xade is a hands-on client and names itself rather than posing as another one.
-const ENTRYPOINT: (&str, &str) = ("CLAUDE_CODE_ENTRYPOINT", "xade-code");
+const ENTRYPOINT: &str = "xade-code";
+/// Identity a Claude Code or Claude Desktop session sets for itself. A child that inherits it looks
+/// nested in that session and shares its messaging socket and token.
+const HOST_SESSION_VARS: [&str; 9] = [
+    "CLAUDECODE",
+    "CLAUDE_PID",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_HOST_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_CHILD_NOTES_DIR",
+    "CLAUDE_CODE_MESSAGING_SOCKET",
+    "CLAUDE_CODE_MESSAGING_TOKEN",
+    "CLAUDE_CODE_DESKTOP_APP_VERSION",
+];
+
+#[derive(Debug, PartialEq, Eq)]
+enum Entrypoint {
+    Set,
+    /// The user chose one in their own shell.
+    Keep,
+    /// API-key billing: an unknown label may be refused, so the CLI default applies.
+    Unset,
+}
+
+/// A label inherited from a host session (`CLAUDECODE` set) is a leak, not the user's choice.
+fn entrypoint_choice(inherited: bool, host_session: bool, api_key: bool) -> Entrypoint {
+    if inherited && !host_session {
+        Entrypoint::Keep
+    } else if api_key {
+        Entrypoint::Unset
+    } else {
+        Entrypoint::Set
+    }
+}
 
 fn command(binary: &Path, cfg: &SpawnConfig) -> Command {
+    command_in(binary, cfg, |k| std::env::var_os(k))
+}
+
+fn command_in(
+    binary: &Path,
+    cfg: &SpawnConfig,
+    var: impl Fn(&str) -> Option<std::ffi::OsString>,
+) -> Command {
     let mut cmd = Command::new(binary);
-    cmd.args(build_args(cfg))
-        .current_dir(&cfg.cwd)
-        .env(ENTRYPOINT.0, ENTRYPOINT.1);
+    cmd.args(build_args(cfg)).current_dir(&cfg.cwd);
+    let host_session = var("CLAUDECODE").is_some();
+    for name in HOST_SESSION_VARS {
+        cmd.env_remove(name);
+    }
+    let api_key = var("ANTHROPIC_API_KEY").is_some_and(|v| !v.is_empty());
+    match entrypoint_choice(var(ENTRYPOINT_VAR).is_some(), host_session, api_key) {
+        Entrypoint::Set => cmd.env(ENTRYPOINT_VAR, ENTRYPOINT),
+        Entrypoint::Keep => &mut cmd,
+        Entrypoint::Unset => cmd.env_remove(ENTRYPOINT_VAR),
+    };
     cmd
 }
 
@@ -334,15 +384,64 @@ mod tests {
         assert!(!a.contains(&"--setting-sources".to_string()));
     }
 
+    /// `Some(None)` is a removed variable, `None` one the command does not touch.
+    fn env_of(cmd: &Command, name: &str) -> Option<Option<String>> {
+        cmd.as_std()
+            .get_envs()
+            .find(|(k, _)| *k == name)
+            .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    fn spawn_env(vars: &[(&str, &str)]) -> Command {
+        let vars: Vec<(String, std::ffi::OsString)> = vars
+            .iter()
+            .map(|(k, v)| (k.to_string(), (*v).into()))
+            .collect();
+        command_in(Path::new("claude"), &cfg(Effort::Default, None), |k| {
+            vars.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone())
+        })
+    }
+
     #[test]
     fn child_reports_its_own_entrypoint() {
-        let cmd = command(Path::new("claude"), &cfg(Effort::Default, None));
-        let value = cmd
-            .as_std()
-            .get_envs()
-            .find(|(k, _)| *k == "CLAUDE_CODE_ENTRYPOINT")
-            .and_then(|(_, v)| v);
-        assert_eq!(value, Some(std::ffi::OsStr::new("xade-code")));
+        let cmd = spawn_env(&[]);
+        assert_eq!(
+            env_of(&cmd, "CLAUDE_CODE_ENTRYPOINT"),
+            Some(Some("xade-code".into()))
+        );
+    }
+
+    #[test]
+    fn a_host_sessions_entrypoint_is_replaced_not_inherited() {
+        let cmd = spawn_env(&[
+            ("CLAUDECODE", "1"),
+            ("CLAUDE_CODE_ENTRYPOINT", "claude-desktop"),
+        ]);
+        assert_eq!(
+            env_of(&cmd, "CLAUDE_CODE_ENTRYPOINT"),
+            Some(Some("xade-code".into()))
+        );
+        for name in HOST_SESSION_VARS {
+            assert_eq!(env_of(&cmd, name), Some(None), "{name} must be removed");
+        }
+    }
+
+    #[test]
+    fn an_entrypoint_the_user_set_is_kept() {
+        let cmd = spawn_env(&[("CLAUDE_CODE_ENTRYPOINT", "mine")]);
+        assert_eq!(env_of(&cmd, "CLAUDE_CODE_ENTRYPOINT"), None);
+    }
+
+    #[test]
+    fn api_key_billing_leaves_the_entrypoint_to_the_cli() {
+        let cmd = spawn_env(&[("ANTHROPIC_API_KEY", "k")]);
+        assert_eq!(env_of(&cmd, "CLAUDE_CODE_ENTRYPOINT"), Some(None));
+        let empty = spawn_env(&[("ANTHROPIC_API_KEY", "")]);
+        assert_eq!(
+            env_of(&empty, "CLAUDE_CODE_ENTRYPOINT"),
+            Some(Some("xade-code".into())),
+            "an empty key is no key"
+        );
     }
 
     #[test]

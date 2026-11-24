@@ -199,7 +199,7 @@ fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
 }
 
 /// User messages longer than this many lines show a head and a "Show all" toggle.
-const USER_PREVIEW_LINES: usize = 30;
+const USER_PREVIEW_LINES: usize = 2;
 
 fn user_bubble(
     ui: &mut egui::Ui,
@@ -558,12 +558,17 @@ mod tests {
     fn a_long_user_message_shows_a_head_until_expanded() {
         let mut v = vm(vec![msg(Role::User, &log(200), None, None)]);
         let short = render(&mut v, Cards::Collapsed)[0].allocated.height();
-        let mut v = vm(vec![msg(Role::User, &log(20), None, None)]);
-        let plain = render(&mut v, Cards::Collapsed)[0].allocated.height();
-        assert!(short < 40.0 * 30.0, "head is capped: {short}");
+        let mut v = vm(vec![msg(Role::User, &log(3), None, None)]);
+        let three = render(&mut v, Cards::Collapsed)[0].allocated.height();
+        let mut v = vm(vec![msg(Role::User, &log(2), None, None)]);
+        let two = render(&mut v, Cards::Collapsed)[0].allocated.height();
         assert!(
-            plain < short,
-            "20 lines {plain} vs capped 200 lines {short}"
+            (short - three).abs() < 1.0,
+            "200 lines {short} collapse to the same head as 3 lines {three}"
+        );
+        assert!(
+            two < three,
+            "2 lines {two} fit whole, no toggle; 3 lines {three}"
         );
         let m = msg(Role::User, &log(200), None, None);
         let id = egui::Id::unique(("user_expanded", m.id));

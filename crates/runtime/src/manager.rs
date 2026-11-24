@@ -350,7 +350,8 @@ impl SessionManager {
                 }
             };
             let default_model = provider.default_model();
-            for imp in sessions {
+            for mut imp in sessions {
+                imp.updated_at = store_precision(imp.updated_at);
                 if throwaway::is_throwaway_dir(&imp.cwd) {
                     skipped += 1;
                     continue;
@@ -561,6 +562,13 @@ async fn supervise(
         session_id: None,
         kind,
     });
+}
+
+/// The store keeps microseconds. A finer clock would make a stored row look older than the import
+/// it came from, so every import would update it again, on some platforms only.
+fn store_precision(t: OffsetDateTime) -> OffsetDateTime {
+    t.replace_nanosecond(t.nanosecond() / 1000 * 1000)
+        .unwrap_or(t)
 }
 
 /// Rows for `WriteOp::ImportSession`; the writer resolves the real workspace id from the path.
