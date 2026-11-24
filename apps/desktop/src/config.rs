@@ -46,6 +46,8 @@ pub struct Config {
     pub send_while_running: SendMode,
     /// Whether the status bar shows the frame rate.
     pub show_fps: bool,
+    /// Whether file windows mark every space and tab (`theme.whitespace` colors them).
+    pub show_whitespace: bool,
     /// Whether a plain launch reopens the windows left open (they are saved only while true).
     pub restore_windows: bool,
     pub shortcuts: Arc<Keymap>,
@@ -60,6 +62,7 @@ impl Default for Config {
             font_size: DEFAULT_FONT_SIZE,
             send_while_running: SendMode::default(),
             show_fps: false,
+            show_whitespace: true,
             restore_windows: true,
             shortcuts: Arc::default(),
             theme: Palette::default(),
@@ -101,6 +104,11 @@ impl Config {
             Some(Value::Bool(b)) => cfg.show_fps = *b,
             Some(_) => return Err("show_fps must be true or false".into()),
         }
+        match obj.get("show_whitespace") {
+            None => {}
+            Some(Value::Bool(b)) => cfg.show_whitespace = *b,
+            Some(_) => return Err("show_whitespace must be true or false".into()),
+        }
         match obj.get("restore_windows") {
             None => {}
             Some(Value::Bool(b)) => cfg.restore_windows = *b,
@@ -141,6 +149,7 @@ fn defaults_json() -> String {
         "font_size": DEFAULT_FONT_SIZE,
         "send_while_running": "queue",
         "show_fps": false,
+        "show_whitespace": true,
         "restore_windows": true,
         "shortcuts": keymap::default_shortcuts(),
         "theme": Palette::defaults_json(),
@@ -318,6 +327,18 @@ mod tests {
         assert!(Config::parse(r#"{"show_fps":true}"#).unwrap().show_fps);
         assert!(Config::parse(r#"{"show_fps":"no"}"#).is_err());
         assert!(Config::parse(r#"{"show_fps":null}"#).is_err());
+    }
+
+    #[test]
+    fn show_whitespace_defaults_to_true_and_must_be_a_bool() {
+        assert!(Config::default().show_whitespace);
+        assert!(
+            !Config::parse(r#"{"show_whitespace":false}"#)
+                .unwrap()
+                .show_whitespace
+        );
+        assert!(Config::parse(r#"{"show_whitespace":1}"#).is_err());
+        assert!(Config::parse(r#"{"show_whitespace":null}"#).is_err());
     }
 
     #[test]

@@ -16,6 +16,10 @@ use crate::widgets::tool_card::{self, CardStatus};
 
 /// Draws the transcript; returns a file path the user clicked.
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
+    let find_mark = crate::find::mark(
+        ui.ctx(),
+        crate::workspace::WindowKind::Session(vm.session.id),
+    );
     let mut review = None;
     let mut open = None;
     let mut changes_review = None;
@@ -44,6 +48,10 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
         SessionStatus::Streaming | SessionStatus::NeedsApproval
     );
     let runs = tool_runs(messages);
+    // Scrolls to the current match once per step.
+    let jump = find_mark
+        .as_ref()
+        .is_some_and(|m| crate::find::take_jump(ui, m));
     // A call's result and how its card reads.
     let outcome = |m: &Message| {
         let result = m
@@ -77,7 +85,10 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                         // A group is drawn once, with its first call.
                         let draw = run.is_none_or(|(a, _)| *a == i);
                         if draw {
-                            row(ui, |ui| match m.role {
+                            let shapes_before = ui
+                                .ctx()
+                                .graphics(|g| g.get(ui.layer_id()).map_or(0, |l| l.next_idx().0));
+                            let rect = row(ui, |ui| match m.role {
                                 _ if run.is_some() => {
                                     let (a, b) = *run.unwrap_or(&(i, i));
                                     let calls: Vec<tool_card::GroupCall> = messages[a..=b]
@@ -130,6 +141,27 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                                 }
                                 Role::ToolResult => {}
                             });
+                            if let Some(mark) = &find_mark {
+                                // Only the current message is tinted, not every one that matches.
+                                if mark.matches.get(mark.current) == Some(&i) {
+                                    ui.painter().rect_filled(
+                                        rect.expand(3.0),
+                                        4.0,
+                                        theme::find_block(),
+                                    );
+                                    let nth =
+                                        mark.current - mark.matches.partition_point(|&x| x < i);
+                                    crate::find::paint_message_words(
+                                        ui,
+                                        shapes_before,
+                                        &mark.query,
+                                        nth,
+                                    );
+                                    if jump {
+                                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
+                                    }
+                                }
+                            }
                         }
                         // Results draw nothing; cards of one run sit close together.
                         let next_call = messages[i + 1..]
@@ -265,14 +297,13 @@ fn tool_runs(messages: &[Message]) -> Vec<(usize, usize)> {
 }
 
 /// One transcript row in its own scope, so its allocated rect is observable in tests.
-fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
+fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) -> egui::Rect {
     #[cfg(test)]
     let painted = probe::start(ui);
     let rect = ui.scope(add).response.rect;
     #[cfg(test)]
     probe::finish(ui, painted, rect);
-    #[cfg(not(test))]
-    let _ = rect;
+    rect
 }
 
 /// User messages longer than this many lines show a head and a "Show all" toggle.

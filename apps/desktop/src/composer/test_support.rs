@@ -70,6 +70,7 @@ pub(super) fn height_with_note(note: Option<(String, std::time::Instant)>) -> f3
         maximized: None,
         send_mode: crate::config::SendMode::Queue,
         ide_context: None,
+        focused: false,
     };
     let mut v = vm(String::new());
     v.attach_note = note;
@@ -106,6 +107,7 @@ pub(super) fn render(input: String) -> egui::Rect {
         maximized: None,
         send_mode: crate::config::SendMode::Queue,
         ide_context: None,
+        focused: false,
     };
     let mut v = vm(input);
     let mut out = egui::Rect::NOTHING;
@@ -140,6 +142,7 @@ pub(super) fn frame(
         maximized: None,
         send_mode: crate::config::SendMode::Queue,
         ide_context: None,
+        focused: false,
     };
     let raw = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(

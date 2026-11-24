@@ -77,7 +77,7 @@ Xade stores its data in the `xade/` folder inside your OS data directory. To use
 
 ## Settings
 
-Settings live in `settings.json` in the data folder; open it with Cmd+, (Ctrl+, on Linux) and changes apply live. Keys include `font_family`, `font_size`, `send_while_running`, `show_fps` (frame rate at the right of the status bar, default false), `restore_windows` (reopen the windows left open when Xade starts without a path, default true) and `shortcuts`, which maps every keyboard shortcut, e.g. `"new_session": "cmd+t"`; chords look like `"cmd+k cmd+m"`, and `cmd` is Ctrl off macOS.
+Settings live in `settings.json` in the data folder; open it with Cmd+, (Ctrl+, off macOS) and changes apply live. Every key, shortcut and theme color is listed in [docs/settings.md](docs/settings.md).
 
 ## Development
 

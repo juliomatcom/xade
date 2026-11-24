@@ -267,6 +267,7 @@ mod tests {
             maximized: None,
             send_mode: crate::config::SendMode::Queue,
             ide_context: None,
+            focused: false,
         };
         let mut v = vm("hi".into());
         set_attach_note(&mut v, "x".into());

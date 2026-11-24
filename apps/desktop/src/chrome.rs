@@ -9,18 +9,44 @@ use crate::theme;
 /// Space kept free around a centered badge: half its widest form plus a gap.
 const CENTER_CLEAR: f32 = 50.0;
 
+/// What the header shows of its window.
+pub struct HeaderState {
+    pub maximized: bool,
+    pub collapsed: bool,
+    pub focused: bool,
+}
+
 /// The header: maximize / collapse / close on the right, `left` fills the rest; `center`, when
 /// given, is drawn in the middle of the strip and `left` stops short of it.
 pub fn header(
     ui: &mut egui::Ui,
-    maximized: bool,
-    collapsed: bool,
+    state: HeaderState,
     close_tip: &str,
     out: &mut ViewOut,
     center: Option<&dyn Fn(&mut egui::Ui)>,
     left: impl FnOnce(&mut egui::Ui),
 ) {
+    let HeaderState {
+        maximized,
+        collapsed,
+        focused,
+    } = state;
+    let (fill, radius) = match (focused, collapsed) {
+        (false, _) => (egui::Color32::TRANSPARENT, egui::CornerRadius::ZERO),
+        (true, true) => (theme::bg_header_focus(), egui::CornerRadius::same(7)),
+        (true, false) => (
+            theme::bg_header_focus(),
+            egui::CornerRadius {
+                nw: 7,
+                ne: 7,
+                sw: 0,
+                se: 0,
+            },
+        ),
+    };
     egui::Frame::new()
+        .fill(fill)
+        .corner_radius(radius)
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             ui.set_height(HEADER_HEIGHT - 12.0);

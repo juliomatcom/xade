@@ -29,6 +29,7 @@
 
 ## Docs
 - Wiki edits follow AGENTS.md "Wiki Upkeep". Protocol facts in claude-protocol.md must be backed by a fixture.
+- User-facing docs live in `docs/*.md`; settings, shortcuts and theme keys go in `docs/settings.md` (update it when one changes), never as a list in `README.md`.
 
 ## Definition of done
 - Phase acceptance passes; `cargo test --workspace`, clippy and fmt clean.

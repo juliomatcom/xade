@@ -264,7 +264,13 @@ This may or may not be related to the current task.</ide_opened_file>"
 }
 
 /// One editor window's content: header, optional "changed on disk" bar, and the text.
-pub fn show(ui: &mut egui::Ui, vm: &mut EditorVm, maximized: bool) -> EditorOut {
+pub fn show(
+    ui: &mut egui::Ui,
+    vm: &mut EditorVm,
+    maximized: bool,
+    focused: bool,
+    show_whitespace: bool,
+) -> EditorOut {
     let mut out = EditorOut {
         view: ViewOut::default(),
         error: None,
@@ -282,8 +288,11 @@ pub fn show(ui: &mut egui::Ui, vm: &mut EditorVm, maximized: bool) -> EditorOut 
     let markdown_file = vm.is_markdown();
     chrome::header(
         ui,
-        maximized,
-        vm.collapsed,
+        chrome::HeaderState {
+            maximized,
+            collapsed: vm.collapsed,
+            focused,
+        },
         "Close file",
         &mut out.view,
         None,
@@ -312,7 +321,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut EditorVm, maximized: bool) -> EditorOut 
                         markdown(ui, &mut vm.md_cache, ("preview", vm.id), &vm.text);
                     });
             } else {
-                edit(ui, vm);
+                edit(ui, vm, show_whitespace);
             }
         });
     out
@@ -338,7 +347,7 @@ fn disk_bar(ui: &mut egui::Ui, vm: &mut EditorVm) -> Option<String> {
 }
 
 /// The line-number gutter and the text edit, scrolling together.
-fn edit(ui: &mut egui::Ui, vm: &mut EditorVm) {
+fn edit(ui: &mut egui::Ui, vm: &mut EditorVm, show_whitespace: bool) {
     let font = TextStyle::Monospace.resolve(ui.style());
     let row_h = ui.fonts_mut(|f| f.row_height(&font));
     let avail = ui.available_size();
@@ -388,6 +397,14 @@ fn edit(ui: &mut egui::Ui, vm: &mut EditorVm) {
                     vm.dirty = true;
                     vm.revision += 1;
                 }
+                if let Some(mark) =
+                    crate::find::mark(ui.ctx(), crate::workspace::WindowKind::Editor(vm.id))
+                {
+                    crate::find::paint_text_matches(ui, &output.galley, output.galley_pos, &mark);
+                }
+                if show_whitespace {
+                    paint_whitespace(ui, &output.galley, output.galley_pos);
+                }
                 // Follows the cursor only while the text has focus: clicking into a session's
                 // composer must not forget what was selected here.
                 if output.response.has_focus() {
@@ -398,6 +415,46 @@ fn edit(ui: &mut egui::Ui, vm: &mut EditorVm) {
                 }
             });
         });
+}
+
+/// Indexes of the spaces and tabs of a row: all of them, like VS Code's `renderWhitespace: all`.
+fn whitespace_in(row: &egui::epaint::text::Row) -> impl Iterator<Item = usize> + '_ {
+    row.glyphs
+        .iter()
+        .enumerate()
+        .filter(|(_, g)| g.chr == ' ' || g.chr == '\t')
+        .map(|(i, _)| i)
+}
+
+/// Draws a faint dot over each space and a faint dash over each tab, only for the rows on
+/// screen.
+fn paint_whitespace(ui: &egui::Ui, galley: &egui::Galley, pos: egui::Pos2) {
+    let clip = ui.clip_rect();
+    let color = theme::whitespace();
+    let painter = ui.painter();
+    for placed in &galley.rows {
+        let rect = placed.rect();
+        if pos.y + rect.bottom() < clip.top() {
+            continue;
+        }
+        if pos.y + rect.top() > clip.bottom() {
+            break;
+        }
+        let y = pos.y + rect.center().y;
+        for i in whitespace_in(&placed.row) {
+            let glyph = &placed.glyphs[i];
+            let x = pos.x + placed.pos.x + glyph.pos.x;
+            if glyph.chr == ' ' {
+                painter.circle_filled(egui::pos2(x + glyph.advance_width / 2.0, y), 1.0, color);
+            } else {
+                let (from, to) = (x + 2.0, x + glyph.advance_width - 2.0);
+                painter.line_segment(
+                    [egui::pos2(from, y), egui::pos2(to, y)],
+                    egui::Stroke::new(1.0, color),
+                );
+            }
+        }
+    }
 }
 
 pub enum CloseChoice {
@@ -504,10 +561,44 @@ mod tests {
                 ..Default::default()
             };
             ctx.run_ui(input, |ui| {
-                show(ui, vm, false);
+                show(ui, vm, false, false, true);
             })
             .drop_without_applying_deltas();
         }
+    }
+
+    #[test]
+    fn every_space_and_tab_is_marked() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let text = "  a b  \n\tx\t\n\n  ";
+        let marks = std::cell::RefCell::new(Vec::new());
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            let font = TextStyle::Monospace.resolve(ui.style());
+            let galley =
+                ui.fonts_mut(|f| f.layout_no_wrap(text.to_string(), font, egui::Color32::WHITE));
+            let mut found = Vec::new();
+            for (r, placed) in galley.rows.iter().enumerate() {
+                found.extend(whitespace_in(&placed.row).map(|g| (r, g)));
+            }
+            *marks.borrow_mut() = found;
+        })
+        .drop_without_applying_deltas();
+        // Leading, inner and trailing ones, on text and whitespace-only lines alike.
+        assert_eq!(
+            marks.into_inner(),
+            [
+                (0, 0),
+                (0, 1),
+                (0, 3),
+                (0, 5),
+                (0, 6),
+                (1, 0),
+                (1, 2),
+                (3, 0),
+                (3, 1)
+            ]
+        );
     }
 
     fn long_text() -> String {

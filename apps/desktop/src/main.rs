@@ -8,6 +8,7 @@ mod diff;
 mod editor;
 mod errors;
 mod file_tree;
+mod find;
 mod home;
 mod icons;
 mod keymap;

@@ -82,8 +82,11 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
     let badge = |ui: &mut egui::Ui| home::origin_badge(ui, vm.session.origin);
     chrome::header(
         ui,
-        maximized,
-        vm.collapsed,
+        chrome::HeaderState {
+            maximized,
+            collapsed: vm.collapsed,
+            focused: env.focused,
+        },
         "Close session",
         out,
         Some(&badge),

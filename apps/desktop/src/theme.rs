@@ -8,10 +8,12 @@ use serde_json::{Map, Value};
 
 /// Hex of `c` as written in settings.json: `#rrggbb`, or `#rrggbbaa` when not opaque.
 fn to_hex(c: Color32) -> String {
-    if c.a() == 255 {
-        format!("#{:02x}{:02x}{:02x}", c.r(), c.g(), c.b())
+    // `Color32` stores premultiplied alpha; settings.json holds the straight color.
+    let [r, g, b, a] = c.to_srgba_unmultiplied();
+    if a == 255 {
+        format!("#{r:02x}{g:02x}{b:02x}")
     } else {
-        format!("#{:02x}{:02x}{:02x}{:02x}", c.r(), c.g(), c.b(), c.a())
+        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
     }
 }
 
@@ -95,6 +97,13 @@ palette! {
     bg_window = "#141313";
     /// File (editor) window frame and body: a bit darker than `bg_window`.
     bg_file = "#0f0e0e";
+    /// Find (Cmd+F) in files: every match (faint white-mint), then the current word (jade, black text).
+    find_match = "#cdf3e035";
+    find_current = "#34d399";
+    /// Find (Cmd+F) in chats: the tint behind the current message only.
+    find_block = "#cdf3e02a";
+    /// Markers for spaces and tabs in file windows (when `show_whitespace` is on): barely there.
+    whitespace = "#3a3838";
     bg_raised = "#1f1e1e";
     /// Tool and command cards and code blocks in the chat: darker than the window around them.
     bg_terminal = "#0d0c0c";
@@ -111,6 +120,8 @@ palette! {
     accent = "#059669";
     /// Hover and active fills of accent widgets.
     accent_hover = "#10b981";
+    /// Header strip of the focused window: a darker take on `accent`.
+    bg_header_focus = "#0b4a39";
     /// Left sidebar fill.
     bg_sidebar = "#161a20";
     /// Bottom status bar fill.
@@ -172,7 +183,7 @@ fn visuals() -> Visuals {
     v.window_stroke = Stroke::new(1.0, border());
     v.window_corner_radius = CornerRadius::same(8);
     v.menu_corner_radius = r;
-    v.selection.bg_fill = accent();
+    v.selection.bg_fill = bg_header_focus();
     v.selection.stroke = Stroke::new(1.0, text());
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = bg_panel();

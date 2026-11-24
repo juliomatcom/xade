@@ -191,6 +191,7 @@ mod tests {
             maximized: None,
             send_mode: crate::config::SendMode::Queue,
             ide_context: None,
+            focused: false,
         };
         let mut v = vm(String::new());
         v.sent_model.clone_from(&v.session.model_id);

@@ -62,7 +62,7 @@ impl Taken {
     }
 }
 
-fn geom_of(app: &mut App, kind: WindowKind) -> Option<Geom<'_>> {
+pub(crate) fn geom_of(app: &mut App, kind: WindowKind) -> Option<Geom<'_>> {
     match kind {
         WindowKind::Session(id) => app
             .sessions
@@ -85,6 +85,8 @@ pub struct Env<'a> {
     pub send_mode: SendMode,
     /// `<ide_opened_file>` tag for the file the user last had open, sent ahead of prompts.
     pub ide_context: Option<&'a str>,
+    /// This window is the focused one: its header is highlighted.
+    pub focused: bool,
 }
 
 /// Auto-tiling state: windows are re-tiled while `auto` and the set of windows or the area changes.
@@ -286,6 +288,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let Some(mut taken) = taken else {
             continue;
         };
+        let show_whitespace = app.config.show_whitespace;
+        let focused = app.focused == Some(*kind);
         let env = Env {
             cmd_tx: &app.cmd_tx,
             providers: &app.providers,
@@ -293,6 +297,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             maximized: app.maximized.and_then(WindowKind::session),
             send_mode: app.config.send_while_running,
             ide_context: ide_context.as_deref(),
+            focused,
         };
         let editor_maximized = app.maximized == Some(*kind);
         let collapsed = *taken.geom().0;
@@ -312,7 +317,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             win.show(&ctx, |ui| match &mut taken {
                 Taken::Session(vm) => out = session_view::show(ui, vm, &env),
                 Taken::Editor(vm) => {
-                    let o = editor::show(ui, vm, editor_maximized);
+                    let o = editor::show(ui, vm, editor_maximized, focused, show_whitespace);
                     out = o.view;
                     errors.extend(o.error);
                 }
@@ -766,6 +771,7 @@ mod tests {
             maximized: None,
             send_mode: SendMode::Queue,
             ide_context: None,
+            focused: false,
         };
         let area = Rect::from_min_size(egui::pos2(20.0, 50.0), egui::vec2(1200.0, 700.0));
         let tiles = tile_rects(area, 3);
@@ -810,6 +816,7 @@ mod tests {
             maximized: None,
             send_mode: SendMode::Queue,
             ide_context: None,
+            focused: false,
         };
         let mut v = vm();
         let area = Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(800.0, 700.0));

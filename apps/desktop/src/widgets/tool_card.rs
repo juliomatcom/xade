@@ -235,8 +235,6 @@ struct GroupInfo {
     /// Tool names in first-use order with their counts, "Bash x3 · Read".
     names: String,
     failed: usize,
-    /// Name and summary of the first failed call.
-    first_failed: Option<String>,
     /// Name and summary of the call still running (the latest), if any.
     current: Option<String>,
     status: CardStatus,
@@ -270,26 +268,22 @@ fn group_info(calls: &[GroupCall]) -> GroupInfo {
         .join(" \u{b7} ");
     let is = |s: CardStatus| calls.iter().filter(move |c| c.status == s);
     let failed = is(CardStatus::Error).count();
+    // Running while any call runs; otherwise the outcome of the last call executed.
     let status = if is(CardStatus::Running).next().is_some() {
         CardStatus::Running
-    } else if failed > 0 {
-        CardStatus::Error
-    } else if is(CardStatus::Unknown).next().is_some() {
-        CardStatus::Unknown
     } else {
-        CardStatus::Ok
+        calls.last().map_or(CardStatus::Unknown, |c| c.status)
     };
     GroupInfo {
         total: calls.len(),
         names,
         failed,
-        first_failed: is(CardStatus::Error).next().map(describe),
         current: is(CardStatus::Running).next_back().map(describe),
         status,
     }
 }
 
-/// The single line a collapsed group shows: count, tools, failures, and the running call.
+/// The single line a collapsed group shows: count, tools, failure count, and the running call.
 fn group_line(ui: &egui::Ui, info: &GroupInfo) -> egui::text::LayoutJob {
     let font = egui::TextStyle::Body.resolve(ui.style());
     let mut job = egui::text::LayoutJob::default();
@@ -309,14 +303,9 @@ fn group_line(ui: &egui::Ui, info: &GroupInfo) -> egui::text::LayoutJob {
     };
     add(&format!("{} tool calls", info.total), theme::text());
     add(&format!("  \u{b7}  {}", info.names), theme::text_muted());
-    if let Some(first) = &info.first_failed {
-        let more = if info.failed > 1 {
-            format!(" (+{} more)", info.failed - 1)
-        } else {
-            String::new()
-        };
+    if info.failed > 0 {
         add(
-            &format!("  \u{b7}  {} failed: {first}{more}", info.failed),
+            &format!("  \u{b7}  {} failed", info.failed),
             theme::danger(),
         );
     }
@@ -326,8 +315,8 @@ fn group_line(ui: &egui::Ui, info: &GroupInfo) -> egui::text::LayoutJob {
     job
 }
 
-/// Several consecutive tool calls as one line that expands into their cards. Failed calls are
-/// named on that line even while it is collapsed.
+/// Several consecutive tool calls as one line that expands into their cards. The failure count shows
+/// on that line even while it is collapsed.
 pub fn group(ui: &mut egui::Ui, cache: &mut CommonMarkCache, calls: &[GroupCall]) {
     let Some(first) = calls.first() else { return };
     let id = Id::unique(("tool_group", first.call.id));
@@ -413,7 +402,8 @@ mod tests {
         assert_eq!((ok.status, ok.failed), (CardStatus::Ok, 0));
         let bad = group_info(&calls([CardStatus::Ok, CardStatus::Ok, CardStatus::Error]));
         assert_eq!((bad.status, bad.failed), (CardStatus::Error, 1));
-        assert_eq!(bad.first_failed.as_deref(), Some("Bash cargo test"));
+        let recovered = group_info(&calls([CardStatus::Error, CardStatus::Ok, CardStatus::Ok]));
+        assert_eq!((recovered.status, recovered.failed), (CardStatus::Ok, 1));
         let live = group_info(&calls([
             CardStatus::Error,
             CardStatus::Ok,
@@ -424,8 +414,8 @@ mod tests {
         assert_eq!(live.failed, 1);
         let idle = group_info(&calls([
             CardStatus::Ok,
-            CardStatus::Unknown,
             CardStatus::Ok,
+            CardStatus::Unknown,
         ]));
         assert_eq!(idle.status, CardStatus::Unknown);
     }

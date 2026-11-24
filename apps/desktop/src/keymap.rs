@@ -19,6 +19,7 @@ pub enum Action {
     SaveAs,
     OpenPicker,
     QuickOpen,
+    Find,
     Send,
     /// While a turn runs: queue instead of steer, or the reverse.
     SendOther,
@@ -285,6 +286,13 @@ static DEFS: &[Def] = &[
         Group::Layout,
         "Toggle the sidebar",
         "cmd+b",
+    ),
+    row(
+        "find",
+        Action::Find,
+        Group::General,
+        "Find in the focused window",
+        "cmd+f",
     ),
     row(
         "toggle_view",

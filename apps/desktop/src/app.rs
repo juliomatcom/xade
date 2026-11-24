@@ -294,6 +294,8 @@ pub struct App {
     pub sidebar_visible: bool,
     pub keymaps_open: bool,
     pub about_open: bool,
+    /// The Cmd+F bar, when open.
+    pub find: Option<crate::find::FindState>,
     /// The session picker, when open.
     pub picker: Option<PickerState>,
     picker_generation: u64,
@@ -393,6 +395,7 @@ impl App {
             sidebar_visible: true,
             keymaps_open: false,
             about_open: false,
+            find: None,
             picker: None,
             picker_generation: 0,
             file_picker: None,
@@ -472,6 +475,7 @@ impl App {
             sidebar_visible: true,
             keymaps_open: false,
             about_open: false,
+            find: None,
             picker: None,
             picker_generation: 0,
             file_picker: None,
@@ -1208,14 +1212,14 @@ impl App {
         });
     }
 
-    /// Opens the file quick-open over the selected workspace, or every listed one when none is
+    /// Opens the file quick-open over the selected workspace, or every open one when none is
     /// selected, listing their files in the background.
     fn open_file_picker(&mut self) {
         let roots: Vec<(String, PathBuf)> = self
             .home
             .workspaces
             .iter()
-            .filter(|w| self.home.scope.is_none_or(|id| id == w.id))
+            .filter(|w| w.is_open && self.home.scope.is_none_or(|id| id == w.id))
             .map(|w| (w.display_name.clone(), w.root_path.clone()))
             .collect();
         let paths: Vec<PathBuf> = roots.iter().map(|(_, p)| p.clone()).collect();
@@ -1550,6 +1554,11 @@ impl App {
                     self.refresh_picker();
                 }
             }
+            Action::Find => match (&mut self.find, self.focused) {
+                (_, None) => self.warn("Focus a window to search in it."),
+                (Some(f), _) => f.refocus(),
+                (None, _) => self.find = Some(crate::find::FindState::new()),
+            },
             Action::QuickOpen => {
                 if self.file_picker.take().is_none() {
                     self.open_file_picker();
@@ -2289,6 +2298,7 @@ impl App {
 
     /// Draws the whole window except the error modal.
     fn draw(&mut self, ui: &mut egui::Ui) {
+        crate::find::update(self, ui.ctx());
         home::top_bar(self, ui);
         status_bar::show(self, ui);
         if self.sidebar_visible {
@@ -2310,6 +2320,7 @@ impl App {
         delete_modal::show(self, &ctx);
         quit_modal::show(self, &ctx);
         about_modal::show(self, &ctx);
+        crate::find::show(self, &ctx);
         self.editor_modal(&ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {
             self.keymaps_open = false;
