@@ -31,6 +31,7 @@ fn pid_alive(pid: u32) -> bool {
 fn location(entrypoint: Option<&str>) -> String {
     match entrypoint {
         Some("claude-vscode") => "VS Code".into(),
+        Some("xade-code") => "Xade".into(),
         Some("cli") => "terminal".into(),
         Some("sdk-cli" | "sdk-ts" | "sdk-py") => "SDK".into(),
         Some(other) => other.into(),

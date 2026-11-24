@@ -60,11 +60,22 @@ pub fn build_args(cfg: &SpawnConfig) -> Vec<String> {
     args
 }
 
+/// Entrypoint label the child reports. Left unset, `-p` traffic is labelled `sdk-cli`, which drains
+/// the plan's 5-hour meter about twice as fast as an interactive client's label (`claude-vscode`,
+/// measured A/B); Xade is a hands-on client and names itself rather than posing as another one.
+const ENTRYPOINT: (&str, &str) = ("CLAUDE_CODE_ENTRYPOINT", "xade-code");
+
+fn command(binary: &Path, cfg: &SpawnConfig) -> Command {
+    let mut cmd = Command::new(binary);
+    cmd.args(build_args(cfg))
+        .current_dir(&cfg.cwd)
+        .env(ENTRYPOINT.0, ENTRYPOINT.1);
+    cmd
+}
+
 /// Spawns the child and its tasks. Must be called inside a tokio runtime.
 pub fn spawn_session(binary: &Path, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
-    let mut child = Command::new(binary)
-        .args(build_args(&cfg))
-        .current_dir(&cfg.cwd)
+    let mut child = command(binary, &cfg)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -321,6 +332,17 @@ mod tests {
         assert!(a.ends_with(&["--model".into(), "haiku".into()]));
         assert!(!a.contains(&"--effort".to_string()));
         assert!(!a.contains(&"--setting-sources".to_string()));
+    }
+
+    #[test]
+    fn child_reports_its_own_entrypoint() {
+        let cmd = command(Path::new("claude"), &cfg(Effort::Default, None));
+        let value = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == "CLAUDE_CODE_ENTRYPOINT")
+            .and_then(|(_, v)| v);
+        assert_eq!(value, Some(std::ffi::OsStr::new("xade-code")));
     }
 
     #[test]

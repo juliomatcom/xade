@@ -3,6 +3,7 @@ Verified against Claude Code 2.1.330 with fixtures in `crates/claude/fixtures/` 
 
 ## Spawn
 - Args: `-p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --permission-prompt-tool stdio`, plus `--model <alias>`, `--effort <low|medium|high|xhigh|max>` (omit for CLI default), `--resume <id>` or `--session-id <uuid>`.
+- Child env `CLAUDE_CODE_ENTRYPOINT=xade-code` (the app's own id, not `sdk-cli`/`sdk-ts` and not another client's): unset, `-p` reports `sdk-cli` and the 5-hour meter moved ~2× further per dollar than under `claude-vscode` (A/B). Unverified that an unknown id meters like `claude-vscode`; re-measure before trusting or changing it.
 - `--setting-sources project` is used by the recorder only, for isolation; the app keeps the user's settings.
 - Models: preflight sends `control_request initialize` to a short `claude -p` process (no prompt, free) and reads `response.models` (`value`, `resolvedModel`, `displayName`, `description`, `supportedEffortLevels`); sessions store `resolvedModel`, deduped with the "default" entry. Static aliases `fable`, `opus`, `sonnet`, `haiku` are the fallback. No thinking on/off flag exists.
 - Auth preflight: `claude auth status --json`; exit 0 + `loggedIn: true` when logged in, exit 1 when not. Read only `loggedIn`, plus `email` as the status-bar account label, display only.
