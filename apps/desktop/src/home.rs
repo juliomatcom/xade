@@ -122,11 +122,10 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
         let area = ui.max_rect();
         view_toggle(app, ui, area);
         ui.horizontal(|ui| {
-            ui.label(RichText::new("Xade").strong().size(15.0));
             scope_dropdown(app, ui);
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut app.home.search)
-                    .hint_text("Fuzzy search sessions (try typos)")
+                    .hint_text("Fuzzy search sessions")
                     .desired_width(search_width(ui.available_width())),
             );
             if resp.changed() {
@@ -541,7 +540,12 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
         .frame(egui::Frame::new())
         .show_separator_line(false)
         .show(ui, |ui| {
+            // Centered by the width the row took last frame, since a row cannot be centered blind.
+            let width_id = egui::Id::unique("pager_width");
+            let width = ui.data(|d| d.get_temp::<f32>(width_id)).unwrap_or(0.0);
             ui.horizontal(|ui| {
+                ui.add_space(((ui.available_width() - width) / 2.0).max(0.0));
+                let start = ui.cursor().left();
                 let page = app.home.page;
                 let mut next_page = None;
                 if ui
@@ -570,6 +574,9 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
                     app.home.page = p;
                     app.refresh_cards();
                 }
+                // The cursor sits one item gap past the last widget.
+                let used = ui.cursor().left() - start - ui.spacing().item_spacing.x;
+                ui.data_mut(|d| d.insert_temp(width_id, used));
             });
         });
     ui.add_space(CARD_GAP);

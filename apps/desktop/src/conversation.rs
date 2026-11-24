@@ -154,6 +154,22 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                             );
                         });
                     }
+                    // When the model last answered; from the stored timestamp, so it survives a
+                    // restart. Hidden while a turn runs.
+                    let last_reply = messages.iter().rev().find(|m| m.role == Role::Assistant);
+                    if let (Some(m), false) = (last_reply, busy) {
+                        ui.label(
+                            RichText::new(format!(
+                                "Last reply {}",
+                                crate::home::relative_time(m.created_at)
+                            ))
+                            .small()
+                            .color(theme::TEXT_MUTED),
+                        )
+                        .on_hover_text(m.created_at.to_string());
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_secs(30));
+                    }
                     if let Some(e) = error {
                         ui.label(RichText::new(&*e).color(theme::DANGER));
                     }
