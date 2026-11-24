@@ -1,0 +1,4 @@
+{"dir":"in","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":2,"error":{"code":-32000,"message":"Authentication required"}}}

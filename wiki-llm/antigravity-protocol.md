@@ -1,5 +1,5 @@
 # Antigravity CLI protocol (ACP)
-Verified against `agy` 1.5.16 with fixtures in `crates/antigravity/fixtures/` (re-record with `crates/antigravity/scripts/record.py <scenario> <mktemp -d>` after a CLI upgrade). Fixture lines are `{"dir": "in"|"out"|"meta", "frame": …}`; `meta` marks `restart` between two processes. Integration is ACP (`agy acp`, JSON-RPC 2.0, one JSON object per line); `agy -p --input-format stream-json` has no approval channel and is not used. Only `rpc.rs` and `translate.rs` exist so far; process, provider and models are next.
+Verified against `agy` 1.5.16 with fixtures in `crates/antigravity/fixtures/` (re-record with `crates/antigravity/scripts/record.py <scenario> <mktemp -d>` after a CLI upgrade). Fixture lines are `{"dir": "in"|"out"|"meta", "frame": …}`; `meta` marks `restart` between two processes. Integration is ACP (`agy acp`, JSON-RPC 2.0, one JSON object per line); `agy -p --input-format stream-json` has no approval channel and is not used.
 
 ## Spawn
 - `agy acp` with `cwd` = the session directory, no other flags, environment untouched; logs go to `~/.gemini/antigravity-cli/log/`, never read.
@@ -36,3 +36,15 @@ Verified against `agy` 1.5.16 with fixtures in `crates/antigravity/fixtures/` (r
 - `usage_update` → stored as the context figures; no event.
 - `session/prompt` response: not the last outstanding → usage summed, no event; last → `TurnComplete` (usage summed, `cost_usd` 0). `cancelled` or the interrupt flag → `interrupted`; any `stopReason` but `end_turn` → `is_error` plus `Error("Antigravity stopped: …")`. A JSON-RPC error on a prompt → `Error`, plus an error `TurnComplete` if it was the last.
 - Updates for another `sessionId` (`rpc::update_for`), unknown `sessionUpdate` values and unparsable lines are skipped.
+
+## Process and provider (`process.rs`, `provider.rs`, `models.rs`)
+- One task owns the child and its stdin; a reader task per pipe. Lines have no length cap; non-UTF-8 and unparsable lines are skipped. The child leads its own process group.
+- Start: `initialize` at once, `session/new` (or `session/resume` when `resume` is set) only on the first prompt, so an unused session creates no conversation. Prompts sent earlier are queued.
+- After new/resume: `Started`, then `set_config_option` `model` if it differs from the option's current value (always needed after resume), then `thought_level` if the effort maps to a value the model offers (`Default` and `Max` set nothing; the valid levels depend on the model), each awaited before the queue drains. A rejected option is an `Error`, not fatal.
+- Not signed in (`-32000` or "auth" in the message) or a failed resume: `Error`, the queued prompts fail as one error `TurnComplete`, then shutdown and `Exited`.
+- `Interrupt` before the session is ready drops the queued prompts and emits an interrupted `TurnComplete`; otherwise it answers pending permissions `cancelled`, then sends `session/cancel`.
+- `SetAutoMode(true)` also allows the permissions already pending (Claude leaves them to the user).
+- Shutdown and parent death: close stdin, wait 3 s, SIGTERM the group, wait 2 s, SIGKILL; no `session/close`. A child that dies on its own gives `Error` with the stderr tail, then `Exited`.
+- `preflight` runs `agy models` (15 s limit): exit 0 with models fills the catalog; non-zero exit or auth words give `NotLoggedIn`; timeout is `Protocol`. Only stdout is parsed (the spinner is on stderr). Slugs `<base>-(low|medium|high|xhigh|max)` sharing a base become one model with its levels, equal to the ACP `model` values.
+- `delete_session` removes `conversations/<id>.db` (+`-wal`/`-shm`), `annotations/<id>.pbtxt` and `brain/<id>` under `~/.gemini/antigravity-cli`, never following symlinks and never touching `conversation_summaries.db`.
+- Tests: `tests/fake.rs` drives the process against `tests/fake_agy.py` replaying fixtures; `tests/e2e.rs` uses the real `agy` (`XADE_E2E_AGY=1 cargo test -p xade-antigravity --test e2e -- --ignored --test-threads=1`).

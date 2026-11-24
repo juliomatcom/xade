@@ -4945,7 +4945,10 @@ dependencies = [
 name = "xade-antigravity"
 version = "0.3.10"
 dependencies = [
+ "libc",
  "serde_json",
+ "tempfile",
+ "tokio",
  "tracing",
  "xade-core",
 ]

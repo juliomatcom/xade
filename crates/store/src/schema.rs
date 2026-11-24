@@ -211,12 +211,14 @@ pub(crate) fn workspace_id(idx: usize, s: &str) -> rusqlite::Result<WorkspaceId>
 pub(crate) fn provider_str(p: ProviderId) -> &'static str {
     match p {
         ProviderId::Claude => "claude",
+        ProviderId::Antigravity => "antigravity",
     }
 }
 
 pub(crate) fn parse_provider(idx: usize, s: &str) -> rusqlite::Result<ProviderId> {
     match s {
         "claude" => Ok(ProviderId::Claude),
+        "antigravity" => Ok(ProviderId::Antigravity),
         other => Err(conversion_error(idx, UnknownValue(other.to_string()))),
     }
 }
