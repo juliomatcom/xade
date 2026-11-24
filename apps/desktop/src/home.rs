@@ -24,8 +24,6 @@ const CARD_PAD: f32 = 12.0;
 const ROW_GAP: f32 = 4.0;
 const SIDEBAR_DEFAULT: f32 = 220.0;
 const SIDEBAR_MIN: f32 = 160.0;
-/// Below this inner width the import button shows a short label.
-const IMPORT_FULL_LABEL_WIDTH: f32 = 190.0;
 
 #[derive(Default)]
 pub struct HomeState {
@@ -59,7 +57,7 @@ fn search_width(available: f32) -> f32 {
     (available - TOP_BAR_RESERVED).clamp(160.0, 320.0)
 }
 
-/// The Workspace / Home toggle, boxed and centered in the top bar so the two read as one control.
+/// The Home / Workspace toggle, boxed and centered in the top bar so the two read as one control.
 fn view_toggle(app: &mut App, ui: &mut egui::Ui, area: egui::Rect) {
     let id = egui::Id::unique("view_toggle_width");
     let width = ui.data(|d| d.get_temp::<f32>(id)).unwrap_or(190.0);
@@ -88,18 +86,18 @@ fn view_toggle(app: &mut App, ui: &mut egui::Ui, area: egui::Rect) {
         .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(4, 2))
         .show(&mut child, |ui| {
-            let to_ws = ui
-                .selectable_label(
-                    app.view == View::Workspace,
-                    icons::with(icons::WORKSPACE, "Workspace"),
-                )
-                .clicked();
             let to_home = ui
                 .selectable_label(app.view == View::Home, icons::with(icons::HOME, "Home"))
                 .on_hover_text(format!(
                     "Home / Workspace ({})",
                     keymap::shortcut_text(Action::ToggleView)
                 ))
+                .clicked();
+            let to_ws = ui
+                .selectable_label(
+                    app.view == View::Workspace,
+                    icons::with(icons::WORKSPACE, "Workspace"),
+                )
                 .clicked();
             if to_home {
                 app.view = View::Home;
@@ -122,6 +120,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
         let area = ui.max_rect();
         view_toggle(app, ui, area);
         ui.horizontal(|ui| {
+            app_menu(app, ui);
             scope_dropdown(app, ui);
             let resp = ui.add(
                 egui::TextEdit::singleline(&mut app.home.search)
@@ -345,128 +344,106 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
         .size_range(SIDEBAR_MIN..=(ui.available_width() * 0.4).max(SIDEBAR_MIN))
         .resizable(true)
         .show(ui, |ui| {
-            ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                heading(ui, "Workspaces");
                 if ui
-                    .add_sized(
-                        [ui.available_width(), 28.0],
-                        egui::Button::new(icons::with(icons::ADD_DIR, "Add Directory")).truncate(),
-                    )
+                    .selectable_label(app.home.scope.is_none(), "All Workspaces")
                     .clicked()
                 {
-                    app.add_directory();
+                    set_scope(app, None);
                 }
-                import_button(app, ui);
-                // bottom_up: later items sit higher, so the workspace list below takes all
-                // remaining height.
-                ui.add_space(8.0);
-                ui.separator();
-                ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                    heading(ui, "Workspaces");
-                    if ui
-                        .selectable_label(app.home.scope.is_none(), "All Workspaces")
-                        .clicked()
-                    {
-                        set_scope(app, None);
-                    }
-                    let rows: Vec<(WorkspaceId, PathBuf, String, usize)> = app
-                        .home
-                        .workspaces
-                        .iter()
-                        .filter(|w| w.is_open)
-                        .map(|w| {
-                            let name = w.display_name.clone();
-                            (w.id, w.root_path.clone(), name, app.live_count(w.id))
-                        })
-                        .collect();
-                    // Only expanded folders are walked and off-screen rows are not painted, so
-                    // uneven row heights rule out `show_rows`.
-                    let mut actions = Vec::new();
-                    let mut close = None;
-                    egui::ScrollArea::vertical()
-                        .id_salt("workspaces")
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for (id, root, name, live) in &rows {
-                                let chevron = if app.tree.is_expanded(root) {
-                                    icons::EXPANDED
-                                } else {
-                                    icons::COLLAPSED
-                                };
-                                let name = if *live > 0 {
-                                    format!("{name}  ({live})")
-                                } else {
-                                    name.clone()
-                                };
-                                let selected = app.home.scope == Some(*id);
-                                let text = icons::with(chevron, &name);
-                                let resp =
-                                    ui.add(egui::Button::selectable(selected, text).truncate());
-                                if resp.clicked() {
-                                    set_scope(app, Some(*id));
-                                    actions.push(TreeAction::Toggle(root.clone()));
-                                }
-                                resp.context_menu(|ui| {
-                                    if ui.button("Close workspace").clicked() {
-                                        close = Some(*id);
-                                        ui.close();
-                                    }
-                                });
-                                let changed = match app.git.get(root) {
-                                    Some(GitState::Repo { changed, .. }) => Some(changed),
-                                    _ => None,
-                                };
-                                file_tree::show(ui, &app.tree, root, 1, changed, &mut actions);
+                let rows: Vec<(WorkspaceId, PathBuf, String, usize)> = app
+                    .home
+                    .workspaces
+                    .iter()
+                    .filter(|w| w.is_open)
+                    .map(|w| {
+                        let name = w.display_name.clone();
+                        (w.id, w.root_path.clone(), name, app.live_count(w.id))
+                    })
+                    .collect();
+                // Only expanded folders are walked and off-screen rows are not painted, so
+                // uneven row heights rule out `show_rows`.
+                let mut actions = Vec::new();
+                let mut close = None;
+                egui::ScrollArea::vertical()
+                    .id_salt("workspaces")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for (id, root, name, live) in &rows {
+                            let chevron = if app.tree.is_expanded(root) {
+                                icons::EXPANDED
+                            } else {
+                                icons::COLLAPSED
+                            };
+                            let name = if *live > 0 {
+                                format!("{name}  ({live})")
+                            } else {
+                                name.clone()
+                            };
+                            let selected = app.home.scope == Some(*id);
+                            let text = icons::with(chevron, &name);
+                            let resp = ui.add(egui::Button::selectable(selected, text).truncate());
+                            if resp.clicked() {
+                                set_scope(app, Some(*id));
+                                actions.push(TreeAction::Toggle(root.clone()));
                             }
-                        });
-                    for action in actions {
-                        app.tree_action(action);
-                    }
-                    if let Some(id) = close {
-                        app.close_workspace(id);
-                    }
-                });
+                            resp.context_menu(|ui| {
+                                if ui.button("Close workspace").clicked() {
+                                    close = Some(*id);
+                                    ui.close();
+                                }
+                            });
+                            let changed = match app.git.get(root) {
+                                Some(GitState::Repo { changed, .. }) => Some(changed),
+                                _ => None,
+                            };
+                            file_tree::show(ui, &app.tree, root, 1, changed, &mut actions);
+                        }
+                    });
+                for action in actions {
+                    app.tree_action(action);
+                }
+                if let Some(id) = close {
+                    app.close_workspace(id);
+                }
             });
         });
 }
 
-fn import_button(app: &mut App, ui: &mut egui::Ui) {
-    let enabled = !app.home.importing && app.home.preflight_error.is_none();
-    let narrow = ui.available_width() < IMPORT_FULL_LABEL_WIDTH;
-    let label = if narrow {
-        "Import"
-    } else {
-        "Import from Claude Code"
-    };
-    let btn = egui::Button::new(icons::with(icons::IMPORT, label)).truncate();
-    let resp = ui
-        .add_enabled_ui(enabled, |ui| {
-            ui.add_sized([ui.available_width(), 28.0], btn)
-        })
-        .inner;
-    let resp = if narrow {
-        resp.on_hover_text("Import from Claude Code")
-    } else {
-        resp
-    };
-    if resp.clicked() {
-        app.start_import();
-    }
-    if app.home.importing {
-        ui.horizontal(|ui| {
-            ui.spinner();
+/// The top-left menu: adding a folder and importing Claude Code history.
+fn app_menu(app: &mut App, ui: &mut egui::Ui) {
+    ui.menu_button(icons::MENU, |ui| {
+        if ui
+            .button(icons::with(icons::ADD_DIR, "Add Directory"))
+            .clicked()
+        {
+            app.add_directory();
+        }
+        let enabled = !app.home.importing && app.home.preflight_error.is_none();
+        let import = egui::Button::new(icons::with(icons::IMPORT, "Import from Claude Code"));
+        if ui.add_enabled(enabled, import).clicked() {
+            app.start_import();
+        }
+        if app.home.importing {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(
+                    RichText::new("Importing\u{2026}")
+                        .small()
+                        .color(theme::text_muted()),
+                );
+            });
+        } else if let Some((imported, updated)) = app.home.import_result {
             ui.label(
-                RichText::new("Importing\u{2026}")
+                RichText::new(format!("Imported {imported}, updated {updated}"))
                     .small()
                     .color(theme::text_muted()),
             );
-        });
-    } else if let Some((imported, updated)) = app.home.import_result {
-        ui.label(
-            RichText::new(format!("Imported {imported}, updated {updated}"))
-                .small()
-                .color(theme::text_muted()),
-        );
-    }
+        }
+    })
+    .response
+    .on_hover_text("Menu");
 }
 
 fn origin_label(o: SessionOrigin) -> &'static str {
