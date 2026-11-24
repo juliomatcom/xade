@@ -9,7 +9,7 @@
 ## Hard invariants
 - Never read, copy, log or transmit CLI credentials or `claude auth status` output beyond `loggedIn` and `email`; `email` is for on-screen display only: never log (not at debug), persist, or put it in error reports, Copy text or issue bodies.
 - Spawn the vendor binary unmodified; never patch, wrap or proxy it, never expose it over the network.
-- No prompt engineering or token billing in this app; only pass user text and flags through.
+- No token billing in this app.
 - Dependency rule: xade-core ← xade-claude, xade-store ← xade-runtime ← xade. Only xade names concrete providers.
 - Only the store writer thread writes SQLite; only the session actor creates message WriteOps.
 - Persist every user prompt, finalized assistant block and tool result when it completes; never persist deltas.
