@@ -60,11 +60,14 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
 }
 
 fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
-    let provider = env
+    let found = env
         .providers
         .iter()
-        .find(|p| p.id() == vm.session.provider_id)
-        .map_or("agent", |p| p.display_name());
+        .find(|p| p.id() == vm.session.provider_id);
+    let provider = found.map_or("agent", |p| p.display_name());
+    let model = found
+        .and_then(|p| p.models().into_iter().find(|m| m.id == vm.session.model_id))
+        .map_or_else(|| vm.session.model_id.clone(), |m| m.label);
     let title = if vm.session.title.is_empty() {
         "New session"
     } else {
@@ -76,19 +79,32 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let maximized = env.maximized == Some(vm.session.id);
-    chrome::header(ui, maximized, vm.collapsed, "Close session", out, |ui| {
-        status_dot(ui, &vm.status);
-        home::origin_badge(ui, vm.session.origin);
-        ui.add(egui::Label::new(RichText::new(format!("{title} •")).strong()).truncate());
-        if let Some(tex) = conversation::claude_symbol(ui.ctx()) {
-            ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)));
-        }
-        ui.add(egui::Label::new(RichText::new(provider).strong()).truncate());
-        if !cwd.is_empty() {
-            ui.label(RichText::new(cwd).small().color(theme::TEXT_MUTED))
-                .on_hover_text(vm.cwd.display().to_string());
-        }
-    });
+    let badge = |ui: &mut egui::Ui| home::origin_badge(ui, vm.session.origin);
+    chrome::header(
+        ui,
+        maximized,
+        vm.collapsed,
+        "Close session",
+        out,
+        Some(&badge),
+        |ui| {
+            status_dot(ui, &vm.status);
+            if !cwd.is_empty() {
+                ui.label(RichText::new(cwd).small().color(theme::TEXT_MUTED))
+                    .on_hover_text(vm.cwd.display().to_string());
+            }
+            if let Some(tex) = conversation::claude_symbol(ui.ctx()) {
+                ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)));
+            }
+            ui.add(
+                egui::Label::new(RichText::new(model).strong())
+                    .truncate()
+                    .sense(egui::Sense::hover()),
+            )
+            .on_hover_text(provider);
+            ui.add(egui::Label::new(RichText::new(format!("• {title}")).strong()).truncate());
+        },
+    );
 }
 
 /// The fork warnings under the header: the session is open in another process too, or that

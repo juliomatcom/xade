@@ -123,33 +123,16 @@ pub fn show(
         if data.too_large {
             ui.label(RichText::new("File too large to diff").color(theme::TEXT_MUTED));
         } else {
-            body(ui, id, data);
+            body(ui, data);
         }
     });
     if action == ModalAction::None && resp.should_close() {
         action = ModalAction::Close;
     }
-    if action != ModalAction::None {
-        // The next open of this file starts at its first change again.
-        ctx.data_mut(|d| d.remove::<bool>(scrolled_key(id, data)));
-    }
     action
 }
 
-/// Index of the first row holding a change, backed up to leave a little context above it.
-fn first_change_row(data: &DiffData) -> usize {
-    let changed = |c: &Option<Cell>| c.as_ref().is_some_and(|c| c.kind != Kind::Same);
-    data.rows
-        .iter()
-        .position(|r| matches!(r, Row::Pair(l, r) if changed(l) || changed(r)))
-        .map_or(0, |i| i.saturating_sub(3))
-}
-
-fn scrolled_key(id: egui::Id, data: &DiffData) -> egui::Id {
-    egui::Id::unique(("diff_scrolled", id, &data.path))
-}
-
-fn body(ui: &mut egui::Ui, id: egui::Id, data: &DiffData) {
+fn body(ui: &mut egui::Ui, data: &DiffData) {
     let row_h = ui.text_style_height(&TextStyle::Monospace) + 4.0;
     let code_theme = CodeTheme::from_style(ui.style());
     // Syntect matches a syntax by extension (or file name), not by language name.
@@ -159,17 +142,9 @@ fn body(ui: &mut egui::Ui, id: egui::Id, data: &DiffData) {
         .or_else(|| data.path.file_name())
         .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
     let area_h = ui.available_height();
-    // Jump to the first change on the first frame only; later frames keep the user's scroll.
-    let started = scrolled_key(id, data);
-    let first_frame = !ui.data(|d| d.get_temp::<bool>(started)).unwrap_or(false);
-    ui.data_mut(|d| d.insert_temp(started, true));
-    let mut area = egui::ScrollArea::vertical().id_salt(("diff_rows", &data.path));
-    if first_frame {
-        area = area.vertical_scroll_offset(
-            first_change_row(data) as f32 * (row_h + ui.spacing().item_spacing.y),
-        );
-    }
-    area.auto_shrink([false, false])
+    egui::ScrollArea::vertical()
+        .id_salt(("diff_rows", &data.path))
+        .auto_shrink([false, false])
         .max_height(area_h)
         .show_rows(ui, row_h, data.rows.len(), |ui, range| {
             ui.spacing_mut().item_spacing.y = 0.0;

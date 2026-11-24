@@ -403,11 +403,28 @@ fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool {
     let fallback = provider.map(|p| p.effort_levels()).unwrap_or_default();
     let efforts = effort_choices(&models, &vm.session.model_id, &fallback);
     ui.horizontal(|ui| {
-        let attach = ui
-            .add(
-                egui::Button::new(RichText::new("+").size(20.0).strong())
-                    .min_size(egui::vec2(30.0, 28.0)),
-            )
+        // As tall as the other controls; a big "+" in a normal button would stretch the row, so
+        // the glyph is painted inside a control-height box.
+        let (rect, resp) = ui.allocate_exact_size(
+            egui::vec2(30.0, ui.spacing().interact_size.y),
+            egui::Sense::click(),
+        );
+        let visuals = ui.style().interact(&resp);
+        ui.painter().rect(
+            rect,
+            visuals.corner_radius,
+            visuals.weak_bg_fill,
+            visuals.bg_stroke,
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "+",
+            egui::FontId::proportional(20.0),
+            visuals.fg_stroke.color,
+        );
+        let attach = resp
             .on_hover_text("Attach files (or type @ or drop files here): adds @path mentions")
             .clicked();
         ui.label(RichText::new("Model").small().color(theme::TEXT_MUTED));

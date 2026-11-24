@@ -1768,9 +1768,6 @@ impl App {
         }
     }
 
-    /// Whether something else may be writing to this session's folder right now: another Xade
-    /// session of the same folder mid-turn, or any Claude session running outside Xade (its
-    /// folder is unknown).
     /// Sessions mid-turn or waiting on an approval.
     pub fn busy_sessions(&self) -> usize {
         self.sessions

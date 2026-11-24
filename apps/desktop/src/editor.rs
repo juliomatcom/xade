@@ -247,6 +247,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut EditorVm, maximized: bool) -> EditorOut 
         vm.collapsed,
         "Close file",
         &mut out.view,
+        None,
         |ui| {
             chrome::file_badge(ui);
             ui.add(egui::Label::new(RichText::new(label).strong()).truncate())

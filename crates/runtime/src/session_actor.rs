@@ -247,6 +247,19 @@ impl Actor {
 
     /// Returns false when the actor should end.
     async fn on_event(&mut self, ev: ProviderEvent) -> bool {
+        // The CLI can start a turn on its own (a finished background task or subagent), with no
+        // prompt from us: output while idle means the session is working.
+        if self.status == SessionStatus::Idle
+            && matches!(
+                ev,
+                ProviderEvent::TextDelta(_)
+                    | ProviderEvent::ThinkingProgress { .. }
+                    | ProviderEvent::AssistantText { .. }
+                    | ProviderEvent::ToolUse { .. }
+            )
+        {
+            self.set_status(SessionStatus::Streaming);
+        }
         match &ev {
             ProviderEvent::Quota(q) => {
                 self.write(WriteOp::UpsertQuota(q.clone()));
