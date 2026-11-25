@@ -7,5 +7,9 @@
 //! of test lives beside the code it tests. Each flow is one test in a file named for its area,
 //! and a new one is proven by breaking the feature and watching it fail.
 
+mod chat;
+mod fake_provider;
 mod files;
+mod history;
 mod support;
+mod workspace;

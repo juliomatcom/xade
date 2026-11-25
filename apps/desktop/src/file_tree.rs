@@ -227,6 +227,8 @@ fn row(ui: &mut egui::Ui, root: &Path, depth: usize, e: &Entry, open: bool, dirt
             if dirty { theme::warn() } else { theme::text() },
         );
     }
+    // The row is painted text, so name it for screen readers (and the e2e tests).
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::TreeItem, true, &e.name));
     let resp = resp
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(&e.name);

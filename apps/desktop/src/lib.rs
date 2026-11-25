@@ -222,10 +222,24 @@ impl Launch {
     }
 }
 
-/// Opens the store in `dir`, starts the runtime, the providers and the session manager. `run`
-/// and the e2e tests (over a temporary `dir`) both start Xade through this.
+/// Opens the store in `dir`, starts the runtime, the real providers and the session manager.
 pub fn backend(
     dir: &Path,
+) -> Result<(tokio::runtime::Runtime, Launch), Box<dyn std::error::Error>> {
+    backend_with(
+        dir,
+        vec![
+            Arc::new(ClaudeProvider::new()),
+            Arc::new(AntigravityProvider::new()),
+        ],
+    )
+}
+
+/// Like `backend`, over the given providers: the one place a model can be swapped, which the
+/// e2e tests use to run the whole app against a scripted provider.
+pub fn backend_with(
+    dir: &Path,
+    providers: Vec<Arc<dyn AgentProvider>>,
 ) -> Result<(tokio::runtime::Runtime, Launch), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(dir)?;
     let db = dir.join("workspace.db");
@@ -235,10 +249,6 @@ pub fn backend(
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let providers: Vec<Arc<dyn AgentProvider>> = vec![
-        Arc::new(ClaudeProvider::new()),
-        Arc::new(AntigravityProvider::new()),
-    ];
     let preflight = run_preflights(&providers);
     let (cmd_tx, event_rx) = {
         let _guard = rt.enter();
