@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 const slides = [
-  { src: "/app.webp", label: "Workspace", alt: "Xade Workspace view: Claude Code and Antigravity sessions side by side, each with a diff summary" },
+  { src: "/app.webp", label: "Workspace", alt: "Xade Workspace view: Claude, Codex and Google coding agent sessions side by side, each with a diff summary" },
   { src: "/app-home.webp", label: "Home", alt: "Xade Home view: a grid of searchable sessions from every provider, with status and prompt-cache timers" },
 ];
 

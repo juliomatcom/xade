@@ -117,7 +117,7 @@ export default function App() {
 
           <figure className="mx-auto mt-14 max-w-6xl">
             {VIDEO_SRC ? (
-              <video src={VIDEO_SRC} poster="/app.webp" autoPlay muted loop playsInline className="w-full rounded-2xl shadow-[0_30px_120px_-20px_rgb(16_185_129/0.3)]" aria-label="Xade running Claude Code and Antigravity sessions side by side" />
+              <video src={VIDEO_SRC} poster="/app.webp" autoPlay muted loop playsInline className="w-full rounded-2xl shadow-[0_30px_120px_-20px_rgb(16_185_129/0.3)]" aria-label="Xade running Claude, Codex and Google sessions side by side" />
             ) : (
               <Carousel />
             )}
