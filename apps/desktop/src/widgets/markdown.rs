@@ -5,6 +5,8 @@ use std::hash::Hash;
 
 use egui::text::LayoutJob;
 use egui_commonmark::{CommonMarkCache, CommonMarkViewer};
+
+use crate::find::FindMark;
 use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 const CODE_BLOCK_OVERSHOOT: f32 = 16.0;
@@ -34,23 +36,66 @@ pub fn new_cache() -> CommonMarkCache {
 /// Top-level tables are laid out here, wrapped to the window; the rest goes to the viewer.
 pub fn markdown(ui: &mut egui::Ui, cache: &mut CommonMarkCache, id: impl Hash + Debug, text: &str) {
     ui.push_id(id, |ui| {
-        // Code blocks are text edits that overshoot the width they are given by their frame.
-        ui.set_max_width((ui.available_width() - CODE_BLOCK_OVERSHOOT).max(40.0));
-        // The code theme sets no background, so blocks take egui's `extreme_bg_color`.
-        ui.visuals_mut().extreme_bg_color = crate::theme::bg_terminal();
-        let tables = if text.contains('|') {
-            top_level_tables(text)
-        } else {
-            Vec::new()
-        };
-        let mut at = 0;
-        for (i, (range, table)) in tables.iter().enumerate() {
-            viewer(ui, cache, (i, "text"), &text[at..range.start]);
-            table_view(ui, table);
-            at = range.end;
+        prepare(ui);
+        for (i, segment) in segments(text).iter().enumerate() {
+            match segment {
+                Segment::Text(t) => viewer(ui, cache, i, t),
+                Segment::Table(t) => {
+                    table_view(ui, t, None);
+                }
+            }
         }
-        viewer(ui, cache, tables.len(), &text[at..]);
     });
+}
+
+/// Code blocks are text edits that overshoot the width they are given by their frame, and the
+/// code theme sets no background, so blocks take egui's `extreme_bg_color`.
+fn prepare(ui: &mut egui::Ui) {
+    ui.set_max_width((ui.available_width() - CODE_BLOCK_OVERSHOOT).max(40.0));
+    ui.visuals_mut().extreme_bg_color = crate::theme::bg_terminal();
+}
+
+/// A markdown file's preview, searchable. Text is drawn by the viewer, which keeps its matches
+/// and the current one under `id.with(segment)` in `cache` (the bar's count comes from
+/// `find::preview_matches`); tables are drawn here and mark their own cells. `mark` is the
+/// search to show, if this window is being searched, and `jump` scrolls to its current match.
+pub fn preview(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    id: egui::Id,
+    text: &str,
+    mark: Option<&FindMark>,
+    jump: bool,
+) {
+    ui.push_id(id, |ui| {
+        prepare(ui);
+        // Matches before the segment being drawn: a match's place in the whole document.
+        let mut before = 0;
+        for (k, segment) in segments(text).iter().enumerate() {
+            let sid = id.with(k);
+            before += match segment {
+                Segment::Text(t) => {
+                    let n = crate::find::sync_text(cache, sid, mark, before, jump);
+                    search_viewer(ui, cache, sid, t);
+                    n
+                }
+                Segment::Table(t) => {
+                    table_view(ui, t, mark.map(|mark| TableFind { mark, before, jump }))
+                }
+            };
+        }
+    });
+}
+
+fn search_viewer(ui: &mut egui::Ui, cache: &mut CommonMarkCache, id: egui::Id, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    CommonMarkViewer::new()
+        .syntax_theme_dark(CODE_THEME)
+        .search_match_color(crate::theme::find_match())
+        .search_active_match_color(crate::theme::find_current())
+        .show_with_id(id, ui, cache, text);
 }
 
 fn viewer(ui: &mut egui::Ui, cache: &mut CommonMarkCache, id: impl Hash + Debug, text: &str) {
@@ -66,6 +111,42 @@ fn viewer(ui: &mut egui::Ui, cache: &mut CommonMarkCache, id: impl Hash + Debug,
 
 /// A table's cells as plain text: header row first.
 type Table = Vec<Vec<String>>;
+
+/// The markdown split around its top-level tables, in document order.
+pub enum Segment<'a> {
+    Text(&'a str),
+    Table(Table),
+}
+
+pub fn segments(text: &str) -> Vec<Segment<'_>> {
+    let tables = if text.contains('|') {
+        top_level_tables(text)
+    } else {
+        Vec::new()
+    };
+    let mut out = Vec::new();
+    let mut at = 0;
+    for (range, table) in tables {
+        out.push(Segment::Text(&text[at..range.start]));
+        out.push(Segment::Table(table));
+        at = range.end;
+    }
+    out.push(Segment::Text(&text[at..]));
+    out
+}
+
+/// How many times `query` is in the table's cells.
+pub fn table_matches(table: &Table, query: &str) -> usize {
+    let cells = table.iter().flatten();
+    cells.map(|c| crate::find::find_chars(c, query).len()).sum()
+}
+
+/// The search a table marks: the matches in the segments before it, and whether to scroll.
+struct TableFind<'a> {
+    mark: &'a FindMark,
+    before: usize,
+    jump: bool,
+}
 
 /// Tables that are not nested in a list or quote, with their source range.
 fn top_level_tables(text: &str) -> Vec<(std::ops::Range<usize>, Table)> {
@@ -124,11 +205,12 @@ fn column_widths(natural: &[f32], avail: f32) -> Vec<f32> {
 
 /// A table whose rows are laid out by hand: `egui::Grid` keeps last frame's column widths,
 /// which stops a session window from getting narrower than its table.
-fn table_view(ui: &mut egui::Ui, table: &Table) {
+fn table_view(ui: &mut egui::Ui, table: &Table, find: Option<TableFind>) -> usize {
     let cols = table.iter().map(Vec::len).max().unwrap_or(0);
     if cols == 0 {
-        return;
+        return 0;
     }
+    let mut seen = 0;
     let jobs: Vec<Vec<LayoutJob>> = table
         .iter()
         .enumerate()
@@ -189,11 +271,44 @@ fn table_view(ui: &mut egui::Ui, table: &Table) {
                 );
                 let mut cell = ui.new_child(egui::UiBuilder::new().max_rect(slot));
                 cell.set_clip_rect(slot.intersect(ui.clip_rect()));
-                cell.add(egui::Label::new(egui::WidgetText::Galley(galley)).selectable(true));
+                cell.add(
+                    egui::Label::new(egui::WidgetText::Galley(galley.clone())).selectable(true),
+                );
+                if let Some(f) = &find {
+                    for start in crate::find::find_chars(galley.text(), &f.mark.query) {
+                        let current = f.before + seen == f.mark.current;
+                        seen += 1;
+                        crate::find::paint_word(
+                            &cell.painter().clone(),
+                            &galley,
+                            slot.min,
+                            start,
+                            f.mark.len,
+                            current,
+                            false,
+                        );
+                        if current && f.jump {
+                            ui.scroll_to_rect(slot, Some(egui::Align::Center));
+                        }
+                    }
+                }
                 x += w + TABLE_GAP_X;
             }
         }
     });
+    seen
+}
+
+/// A table whose cells are long sentences, as a model writes them (for the views' tests).
+#[cfg(test)]
+pub(crate) fn wide_table() -> String {
+    let cell = "a sentence that is long enough to need several lines in a narrow window ";
+    format!(
+        "Results:\n\n| Use case | Status | Evidence |\n|---|---|---|\n| {} | PASS | {} |\n| short | NOT COMPLETED | {} |",
+        cell.repeat(6),
+        cell.repeat(6),
+        cell.repeat(3),
+    )
 }
 
 #[cfg(test)]
@@ -353,6 +468,35 @@ mod tests {
             rect.width() < 350.0,
             "the window stopped at {} wide",
             rect.width()
+        );
+    }
+
+    #[test]
+    fn a_preview_table_wraps_to_the_window_too() {
+        let ctx = egui::Context::default();
+        let mut cache = CommonMarkCache::default();
+        let text = format!("| a | b |\n|---|---|\n| {} | short |", "word ".repeat(200));
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(500.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut size = egui::Vec2::ZERO;
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |ui| {
+                let shown = ui
+                    .scope(|ui| preview(ui, &mut cache, egui::Id::unique("p"), &text, None, false));
+                size = shown.response.rect.size();
+            });
+            out.drop_without_applying_deltas();
+        }
+        assert!(size.x <= 501.0, "table is {} wide", size.x);
+        assert!(
+            size.y > 100.0,
+            "the long cell did not wrap: {} high",
+            size.y
         );
     }
 }

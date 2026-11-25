@@ -5,11 +5,14 @@
 use std::sync::Arc;
 
 use egui::epaint::text::cursor::CCursor;
+use egui::epaint::text::ByteRangeExt;
 use egui::{Align, Align2, Key, RichText};
+use egui_commonmark::CommonMarkCache;
 use xade_core::{Message, Role};
 
 use crate::app::App;
 use crate::theme;
+use crate::widgets::markdown::{self, Segment};
 use crate::workspace::WindowKind;
 
 /// What the matches were computed for: the query, the window and a revision of its content.
@@ -37,6 +40,99 @@ pub struct FindMark {
     pub len: usize,
     pub current: usize,
     pub seq: u64,
+}
+
+/// The id a markdown Preview's search state lives under in the editor's `md_cache`.
+pub fn preview_id(editor: crate::editor::EditorId) -> egui::Id {
+    egui::Id::unique(("find_preview", editor))
+}
+
+/// Searches a Preview's rendered text (not its markdown source, so link targets and syntax never
+/// match) and returns how many matches there are: the viewer counts those in its text, and the
+/// table cells are counted here, in document order.
+fn preview_matches(cache: &mut CommonMarkCache, id: egui::Id, text: &str, query: &str) -> usize {
+    let mut found = 0;
+    for (k, segment) in markdown::segments(text).iter().enumerate() {
+        found += match segment {
+            Segment::Text(t) => {
+                let sid = id.with(k);
+                query.clone_into(cache.search_query_mut(&sid));
+                cache.update_search_matches(&sid, t);
+                cache.search_ranges(&sid).len()
+            }
+            Segment::Table(t) => markdown::table_matches(t, query),
+        };
+    }
+    found
+}
+
+/// Points one text segment's viewer at the current match when it holds it (`before` matches come
+/// ahead of the segment), scrolling to it when `jump`, or clears its tints when the window is not
+/// being searched. Returns how many matches the segment has.
+pub fn sync_text(
+    cache: &mut CommonMarkCache,
+    id: egui::Id,
+    mark: Option<&FindMark>,
+    before: usize,
+    jump: bool,
+) -> usize {
+    let search = cache.search_cache_mut(&id);
+    let count = search.search_ranges().len();
+    let local = mark
+        .and_then(|m| m.current.checked_sub(before))
+        .filter(|l| *l < count);
+    match local {
+        Some(l) => {
+            if jump || search.active_match != Some(l) {
+                search.active_match = Some(l);
+                search.sync_active_search_range();
+                search.scroll_to_active_search_match();
+            }
+        }
+        None => {
+            if search.active_match.is_some() {
+                search.active_match = None;
+                search.set_active_search_range(None);
+            }
+        }
+    }
+    if mark.is_none() && count > 0 {
+        search.set_search_ranges(Vec::new());
+    }
+    count
+}
+
+/// The viewer tints the current match with a background alone; this draws its glyphs black, as
+/// in a file or a chat. Looks at what was drawn since `from` (a `next_idx` taken before).
+pub fn blacken_current(ui: &egui::Ui, from: usize) {
+    for (galley, pos, clip) in text_shapes(ui, from) {
+        let painter = ui.painter().with_clip_rect(clip.intersect(ui.clip_rect()));
+        let text = galley.text();
+        for section in &galley.job.sections {
+            let range = section.byte_range.as_usize();
+            if section.format.background != theme::find_current() || range.end > text.len() {
+                continue;
+            }
+            let start = text[..range.start].chars().count();
+            let len = text[range].chars().count();
+            paint_word(&painter, &galley, pos, start, len, true, false);
+        }
+    }
+}
+
+/// Every text shape drawn on the ui's layer since `from`: galley, position, clip rect.
+fn text_shapes(ui: &egui::Ui, from: usize) -> Vec<(Arc<egui::Galley>, egui::Pos2, egui::Rect)> {
+    ui.ctx().graphics(|g| {
+        g.get(ui.layer_id()).map_or_else(Vec::new, |list| {
+            list.all_entries()
+                .skip(from)
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) => Some((t.galley.clone(), t.pos, c.clip_rect)),
+                    _ => None,
+                })
+                .collect()
+        })
+    })
 }
 
 fn mark_id() -> egui::Id {
@@ -136,7 +232,11 @@ pub fn update(app: &mut App, ctx: &egui::Context) {
     };
     let target = app.focused;
     let revision = match target {
-        Some(WindowKind::Editor(id)) => app.editors.map.get(&id).map_or(0, |vm| vm.revision),
+        Some(WindowKind::Editor(id)) => app
+            .editors
+            .map
+            .get(&id)
+            .map_or(0, |vm| vm.revision << 1 | u64::from(vm.preview)),
         Some(WindowKind::Session(id)) => app
             .sessions
             .get(&id)
@@ -147,11 +247,14 @@ pub fn update(app: &mut App, ctx: &egui::Context) {
     if f.key.as_ref() != Some(&key) {
         let moved = f.key.as_ref().is_none_or(|k| k.0 != key.0 || k.1 != key.1);
         let found = match target {
-            Some(WindowKind::Editor(id)) => app
-                .editors
-                .map
-                .get(&id)
-                .map(|vm| find_chars(&vm.text, &f.query)),
+            Some(WindowKind::Editor(id)) => app.editors.map.get_mut(&id).map(|vm| {
+                if vm.preview {
+                    let n = preview_matches(&mut vm.md_cache, preview_id(id), &vm.text, &f.query);
+                    (0..n).collect()
+                } else {
+                    find_chars(&vm.text, &f.query)
+                }
+            }),
             Some(WindowKind::Session(id)) => app
                 .sessions
                 .get(&id)
@@ -309,17 +412,7 @@ pub fn paint_word(
 /// current match, if any.
 pub fn paint_message_words(ui: &egui::Ui, from: usize, query: &str, nth: usize) {
     let len = query.chars().count();
-    let shapes: Vec<_> = ui.ctx().graphics(|g| {
-        g.get(ui.layer_id()).map_or_else(Vec::new, |list| {
-            list.all_entries()
-                .skip(from)
-                .filter_map(|c| match &c.shape {
-                    egui::Shape::Text(t) => Some((t.galley.clone(), t.pos, c.clip_rect)),
-                    _ => None,
-                })
-                .collect()
-        })
-    });
+    let shapes = text_shapes(ui, from);
     let mut seen = 0;
     for (galley, pos, clip) in shapes {
         let painter = ui.painter().with_clip_rect(clip.intersect(ui.clip_rect()));
@@ -453,5 +546,118 @@ mod tests {
         let seq = f.seq;
         f.step(true);
         assert_eq!(f.seq, seq, "nothing to step to");
+    }
+
+    #[test]
+    fn a_preview_searches_what_it_shows_and_clears_when_not_searched() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-find-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        // The link target holds a third "500" that the preview never shows.
+        let text =
+            "# Notes\n\n[Section 500](#section-500) and 500\n\n| a | b |\n|---|---|\n| 500 | x |";
+        let id = app.editors.create(None, text.into());
+        app.editors.map.get_mut(&id).unwrap().preview = true;
+        app.focus(WindowKind::Editor(id));
+        app.run_action(crate::keymap::Action::Find);
+        app.find.as_mut().unwrap().query = "500".into();
+        let pass = |app: &mut App| {
+            ctx.run_pass(egui::RawInput::default(), |ctx| update(app, ctx))
+                .drop_without_applying_deltas();
+        };
+        pass(&mut app);
+        let found = mark(&ctx, WindowKind::Editor(id)).expect("published");
+        assert_eq!(
+            found.matches.len(),
+            3,
+            "link text, plain text and the table cell"
+        );
+
+        // The preview's segments: text with two matches, the table, and an empty tail.
+        let draw = |app: &mut App, mark: Option<&FindMark>, jump: bool| {
+            let vm = app.editors.map.get_mut(&id).unwrap();
+            let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                crate::widgets::markdown::preview(
+                    ui,
+                    &mut vm.md_cache,
+                    preview_id(id),
+                    &vm.text,
+                    mark,
+                    jump,
+                );
+            });
+            out.drop_without_applying_deltas();
+        };
+        let active = |app: &App, segment: usize| {
+            let vm = &app.editors.map[&id];
+            vm.md_cache.active_match(&preview_id(id).with(segment))
+        };
+        draw(&mut app, Some(&found), true);
+        assert_eq!(active(&app, 0), Some(0));
+        app.find.as_mut().unwrap().step(true);
+        pass(&mut app);
+        let found = mark(&ctx, WindowKind::Editor(id)).unwrap();
+        draw(&mut app, Some(&found), true);
+        assert_eq!(active(&app, 0), Some(1));
+        // The third match is the table cell: the text segments have no current one.
+        app.find.as_mut().unwrap().step(true);
+        pass(&mut app);
+        let found = mark(&ctx, WindowKind::Editor(id)).unwrap();
+        draw(&mut app, Some(&found), true);
+        assert_eq!(active(&app, 0), None);
+
+        // Not being searched any more (bar closed, or another window focused) drops the tints.
+        draw(&mut app, None, false);
+        let vm = &app.editors.map[&id];
+        assert!(vm
+            .md_cache
+            .search_ranges(&preview_id(id).with(0))
+            .is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_current_match_in_a_preview_is_drawn_black_on_the_find_color() {
+        let ctx = egui::Context::default();
+        let mut cache = markdown::new_cache();
+        let (id, text) = (preview_id(crate::editor::EditorId(1)), "foo bar foo");
+        assert_eq!(preview_matches(&mut cache, id, text, "foo"), 2);
+        let mark = FindMark {
+            target: WindowKind::Editor(crate::editor::EditorId(1)),
+            matches: Arc::new(vec![0, 1]),
+            query: "foo".into(),
+            len: 3,
+            current: 1,
+            seq: 0,
+        };
+        let mut black = 0;
+        for _ in 0..2 {
+            let out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let from = ui
+                    .ctx()
+                    .graphics(|g| g.get(ui.layer_id()).map_or(0, |l| l.next_idx().0));
+                markdown::preview(ui, &mut cache, id, text, Some(&mark), true);
+                blacken_current(ui, from);
+                black = ui.ctx().graphics(|g| {
+                    g.get(ui.layer_id()).map_or(0, |l| {
+                        l.all_entries()
+                            .filter(|c| {
+                                matches!(&c.shape, egui::Shape::Text(t)
+                                if t.override_text_color == Some(egui::Color32::BLACK))
+                            })
+                            .count()
+                    })
+                });
+            });
+            out.drop_without_applying_deltas();
+        }
+        assert_eq!(
+            black, 1,
+            "one match is current, and only it is redrawn black"
+        );
     }
 }

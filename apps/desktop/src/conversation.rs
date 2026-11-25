@@ -745,6 +745,28 @@ mod tests {
     }
 
     #[test]
+    fn a_wide_table_wraps_inside_the_chat_window() {
+        let messages = vec![
+            msg(Role::User, "run the checks", None, None),
+            msg(
+                Role::Assistant,
+                &crate::widgets::markdown::wide_table(),
+                None,
+                None,
+            ),
+        ];
+        let rows = render(&mut vm(messages), Cards::Collapsed);
+        assert_stacked(&rows, 2);
+        let table = rows[1];
+        // One long line would be a few rows tall; wrapped into columns it takes many.
+        assert!(
+            table.allocated.height() > 250.0,
+            "the table did not wrap: {table:?}"
+        );
+        assert!(table.painted.max.x <= WIDTH, "{table:?}");
+    }
+
+    #[test]
     fn consecutive_tool_calls_group_unless_a_code_change_or_text_splits_them() {
         let call = |name: &str, id: &str| msg(Role::ToolCall, "", Some((name, id)), Some("{}"));
         let result = |name: &str, id: &str| msg(Role::ToolResult, "ok", Some((name, id)), None);

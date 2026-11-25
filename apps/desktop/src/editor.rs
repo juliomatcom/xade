@@ -11,7 +11,7 @@ use egui_commonmark::CommonMarkCache;
 use egui_extras::syntax_highlighting::{highlight_with, CodeTheme, SyntectSettings};
 
 use crate::session_view::ViewOut;
-use crate::widgets::markdown::markdown;
+use crate::widgets::markdown::preview;
 use crate::widgets::tool_card::language_from_path;
 use crate::{chrome, theme};
 
@@ -317,7 +317,19 @@ pub fn show(
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        markdown(ui, &mut vm.md_cache, ("preview", vm.id), &vm.text);
+                        let id = crate::find::preview_id(vm.id);
+                        let mark = crate::find::mark(
+                            ui.ctx(),
+                            crate::workspace::WindowKind::Editor(vm.id),
+                        );
+                        let jump = mark.as_ref().is_some_and(|m| crate::find::take_jump(ui, m));
+                        let from = ui
+                            .ctx()
+                            .graphics(|g| g.get(ui.layer_id()).map_or(0, |l| l.next_idx().0));
+                        preview(ui, &mut vm.md_cache, id, &vm.text, mark.as_ref(), jump);
+                        if mark.is_some() {
+                            crate::find::blacken_current(ui, from);
+                        }
                     });
             } else {
                 edit(ui, vm, show_whitespace);
@@ -565,6 +577,54 @@ mod tests {
             })
             .drop_without_applying_deltas();
         }
+    }
+
+    /// Draws `vm` in a window `width` wide and returns the right edge of every text drawn and
+    /// the most rows any one text takes.
+    fn drawn_text(vm: &mut EditorVm, width: f32) -> (f32, usize) {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 700.0));
+        let mut found = (0.0_f32, 0);
+        for _ in 0..3 {
+            let input = egui::RawInput {
+                screen_rect: Some(screen),
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                show(ui, vm, false, false, true);
+                found = ui.ctx().graphics(|g| {
+                    let mut found = (0.0_f32, 0);
+                    for c in g
+                        .get(ui.layer_id())
+                        .into_iter()
+                        .flat_map(|l| l.all_entries())
+                    {
+                        if let egui::Shape::Text(t) = &c.shape {
+                            found.0 = found.0.max(t.pos.x + t.galley.size().x);
+                            found.1 = found.1.max(t.galley.rows.len());
+                        }
+                    }
+                    found
+                });
+            })
+            .drop_without_applying_deltas();
+        }
+        found
+    }
+
+    #[test]
+    fn a_preview_table_wraps_inside_the_window() {
+        let mut ed = Editors::default();
+        let id = ed.create(
+            Some(PathBuf::from("/tmp/xade-nope/notes.md")),
+            crate::widgets::markdown::wide_table(),
+        );
+        let vm = ed.map.get_mut(&id).unwrap();
+        vm.preview = true;
+        let (right, rows) = drawn_text(vm, 500.0);
+        assert!(right <= 500.0, "text runs {right}px, past the window");
+        assert!(rows > 3, "no sentence wrapped: {rows} rows at most");
     }
 
     #[test]

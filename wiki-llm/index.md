@@ -9,5 +9,5 @@ Start here. Open only the page your task needs; the code is the detail.
 | Antigravity (`agy acp`) frames, handshake, turn, permissions | antigravity-protocol.md | crates/antigravity/src, crates/antigravity/fixtures |
 | Persistence, schema, search | store.md | crates/store/src |
 | Home, session windows, diff modal, status bar | ui.md | apps/desktop/src, design/workspace-mock.png |
-| Tests, fixtures, manual checks | testing.md | crates/*/tests, crates/claude/scripts |
+| Tests, e2e, fixtures, manual checks | testing.md | apps/desktop/tests/e2e, crates/*/tests, crates/claude/scripts |
 | Adding a provider | architecture.md, claude-protocol.md, antigravity-protocol.md | crates/core/src/provider.rs |

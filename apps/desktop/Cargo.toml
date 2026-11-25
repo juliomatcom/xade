@@ -1,6 +1,6 @@
 [package]
 name = "xade"
-version = "0.4.2"
+version = "0.4.3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -34,6 +34,9 @@ uuid = { version = "=1.29.3", features = ["v4"] }
 ignore = "=0.4.35"
 arboard = { version = "=3.7.0", default-features = false }
 image = { version = "=0.25.10", default-features = false, features = ["png"] }
+
+[dev-dependencies]
+egui_kittest = { version = "=0.37.0", features = ["eframe"] }
 
 [lints]
 workspace = true
