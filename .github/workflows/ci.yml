@@ -17,7 +17,7 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  check:
+  build-and-test:
     # macOS is the primary target; Linux builds need GTK dev packages for rfd.
     runs-on: macos-latest
     steps:
@@ -30,19 +30,27 @@ jobs:
         run: cargo fmt --all --check
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
-      # The real app, driven like a person (apps/desktop/tests/e2e). Its own step so a broken
-      # core flow is named; `check` gates the build and publish jobs, so a red e2e ships nothing.
-      - name: E2E
-        run: cargo test -p xade --test e2e
       - name: Test
         run: cargo test --workspace
       - name: Build
         run: cargo build --workspace --release
 
+  e2e:
+    # The real app, driven like a person (apps/desktop/tests/e2e). Its own job so a broken core
+    # flow shows as its own stage and can be a required check; build-macos and publish wait
+    # for it, so a red e2e ships nothing.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: E2E
+        run: cargo test -p xade --test e2e
+
   build-macos:
     # Every push to main builds Xade.app; the publish job attaches it to the release.
     if: github.event_name == 'push'
-    needs: check
+    needs: [build-and-test, e2e]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4

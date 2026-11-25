@@ -33,6 +33,6 @@
 
 ## Definition of done
 - Phase acceptance passes; `cargo test --workspace`, clippy and fmt clean.
-- The e2e tests (`cargo test -p xade --test e2e`, see testing.md) must pass before every commit and in CI (the `E2E` step of the `check` job, which gates every build and release); a failing flow blocks the commit, and a change to a core flow updates its test in the same commit.
+- The e2e tests (`cargo test -p xade --test e2e`, see testing.md) must pass before every commit and in CI (the `e2e` job, which gates every build and release); a failing flow blocks the commit, and a change to a core flow updates its test in the same commit.
 - New CLI behavior has a fixture and a Translator test.
 - Wiki updated only if a flow, contract, invariant or non-obvious rule changed.
