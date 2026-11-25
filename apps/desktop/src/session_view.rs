@@ -1,7 +1,7 @@
 //! One session window's content: header, conversation, permission banner and composer.
 
 use egui::RichText;
-use xade_core::SessionStatus;
+use xade_core::{ProviderId, SessionStatus};
 use xade_runtime::ManagerCmd;
 
 use crate::app::SessionVm;
@@ -105,9 +105,53 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
                     .sense(egui::Sense::hover()),
             )
             .on_hover_text(provider);
+            fork_button(ui, vm, env);
             ui.add(egui::Label::new(RichText::new(format!("• {title}")).strong()).truncate());
         },
     );
+}
+
+/// Why the session cannot be forked now, or `None` when it can.
+pub(crate) fn fork_blocker(vm: &SessionVm, targets: &[ProviderId]) -> Option<&'static str> {
+    if vm.messages.is_empty() {
+        Some("Nothing to fork yet")
+    } else if vm.status != SessionStatus::Idle {
+        Some("Fork when the session is idle")
+    } else if targets.is_empty() {
+        Some("No provider available to fork to")
+    } else {
+        None
+    }
+}
+
+/// Fork menu: one entry per available provider, enabled while the session is idle (or closed
+/// and dormant) and has history; a fork mid-turn would copy a half-finished turn.
+fn fork_button(ui: &mut egui::Ui, vm: &SessionVm, env: &Env) {
+    let why_not = fork_blocker(vm, env.fork_targets);
+    let resp = ui
+        .add_enabled_ui(why_not.is_none(), |ui| {
+            ui.menu_button(icons::FORK, |ui| {
+                for target in env.fork_targets {
+                    let name = env
+                        .providers
+                        .iter()
+                        .find(|p| p.id() == *target)
+                        .map_or("agent", |p| p.display_name());
+                    if ui.button(format!("Fork to {name}")).clicked() {
+                        let _ = env.cmd_tx.send(ManagerCmd::Fork {
+                            session_id: vm.session.id,
+                            provider: *target,
+                        });
+                    }
+                }
+            })
+            .response
+        })
+        .inner;
+    match why_not {
+        Some(tip) => resp.on_disabled_hover_text(tip),
+        None => resp.on_hover_text("Fork this session to a provider"),
+    };
 }
 
 /// The fork warnings under the header: the session is open in another process too, or that

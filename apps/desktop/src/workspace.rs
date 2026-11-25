@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use egui::{Id, Order, Rect};
 use tokio::sync::mpsc::UnboundedSender;
-use xade_core::{AgentProvider, SessionId};
+use xade_core::{AgentProvider, ProviderId, SessionId};
 use xade_runtime::ManagerCmd;
 
 use crate::app::{App, SessionVm};
@@ -80,6 +80,8 @@ pub(crate) fn geom_of(app: &mut App, kind: WindowKind) -> Option<Geom<'_>> {
 pub struct Env<'a> {
     pub cmd_tx: &'a UnboundedSender<ManagerCmd>,
     pub providers: &'a [Arc<dyn AgentProvider>],
+    /// Providers a session can be forked to: every available one.
+    pub fork_targets: &'a [ProviderId],
     pub vscode: Option<&'a Path>,
     pub maximized: Option<SessionId>,
     pub send_mode: SendMode,
@@ -273,6 +275,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .pointer_interact_pos()
         .filter(|_| pointer_down)
         .and_then(|p| ctx.layer_id_at(p));
+    let fork_targets = app.selectable_providers();
     for (i, kind) in kinds.iter().enumerate() {
         let taken = match *kind {
             WindowKind::Session(id) => app
@@ -293,6 +296,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let env = Env {
             cmd_tx: &app.cmd_tx,
             providers: &app.providers,
+            fork_targets: &fork_targets,
             vscode: app.vscode.as_deref(),
             maximized: app.maximized.and_then(WindowKind::session),
             send_mode: app.config.send_while_running,
@@ -767,6 +771,7 @@ mod tests {
         let env = Env {
             cmd_tx: &tx,
             providers: &[],
+            fork_targets: &[],
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
@@ -812,6 +817,7 @@ mod tests {
         let env = Env {
             cmd_tx: &tx,
             providers: &[],
+            fork_targets: &[],
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
@@ -887,5 +893,27 @@ mod tests {
         assert_eq!(app.open_windows.len(), 2);
         assert!(app.tiling.auto);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fork_is_offered_only_when_idle_with_history_and_a_target() {
+        let both = [ProviderId::Claude, ProviderId::Antigravity];
+        let mut v = vm();
+        v.status = SessionStatus::Idle;
+        assert!(!v.messages.is_empty());
+        assert_eq!(session_view::fork_blocker(&v, &both), None);
+        assert!(session_view::fork_blocker(&v, &[]).is_some());
+        for busy in [
+            SessionStatus::Streaming,
+            SessionStatus::NeedsApproval,
+            SessionStatus::Starting,
+            SessionStatus::Error("x".into()),
+        ] {
+            v.status = busy;
+            assert!(session_view::fork_blocker(&v, &both).is_some());
+        }
+        v.status = SessionStatus::Idle;
+        v.messages.clear();
+        assert!(session_view::fork_blocker(&v, &both).is_some());
     }
 }

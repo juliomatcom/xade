@@ -187,6 +187,7 @@ mod tests {
         let env = Env {
             cmd_tx: &tx,
             providers: &[],
+            fork_targets: &[],
             vscode: None,
             maximized: None,
             send_mode: crate::config::SendMode::Queue,

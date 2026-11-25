@@ -1993,6 +1993,11 @@ impl App {
                 self.refresh_workspaces();
                 self.refresh_cards();
             }
+            (Some(id), AppEventKind::SessionForked { .. }) => {
+                self.refresh_workspaces();
+                self.refresh_cards();
+                self.open_session(id);
+            }
             (Some(_), AppEventKind::SessionCreated(s)) => {
                 self.insert_vm(s, Vec::new());
                 self.refresh_workspaces();

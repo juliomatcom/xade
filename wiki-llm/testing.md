@@ -1,5 +1,6 @@
 # Testing
 - Protocol fixtures: `python3 -I crates/claude/scripts/record.py <scenario> <sandbox-dir>`; scenarios are listed in the script. Record in `$(mktemp -d)`: a cwd under the home or scratchpad path leaks the user name through streamed chunks, and the script refuses such fixtures. Output is redacted (home path, user name, emails, account keys).
+- Real-CLI runtime e2e (both `claude` and `agy` signed in; spends a little quota): `XADE_E2E_AGY=1 cargo test -p xade-runtime --test e2e_providers -- --ignored --test-threads=1`; it deletes every provider conversation it creates.
 - Manual acceptance (macOS), one line per §1 success criterion:
   1. Add two directories; start a session in each from Home; both stream side by side.
   2. Replies render markdown (code, table, list) while streaming and after; "Thinking… ~N tokens" shows; tool calls are cards.

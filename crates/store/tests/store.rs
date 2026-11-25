@@ -427,6 +427,64 @@ fn delete_session_removes_row_messages_and_search_rows() {
 }
 
 #[test]
+fn insert_session_with_messages_is_one_transaction_with_search_rows() {
+    let f = Fixture::new();
+    let s = session(f.ws, "Fork: origin", f.base);
+    let id = s.id;
+    let mut call = message(id, 2, Role::ToolCall, "");
+    call.tool_name = Some("Read".into());
+    let messages = vec![
+        message(id, 1, Role::User, "pelican question"),
+        call,
+        message(id, 3, Role::Assistant, "heron answer"),
+    ];
+    f.writer
+        .send(WriteOp::InsertSessionWithMessages {
+            session: s,
+            messages: messages.clone(),
+        })
+        .unwrap();
+    f.writer.flush().unwrap();
+    let (row, got) = block_on(f.reader.load_session(id)).unwrap();
+    assert_eq!(row.title, "Fork: origin");
+    assert_eq!(row.preview_snippet, "heron answer");
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[1].tool_name.as_deref(), Some("Read"));
+    assert_eq!(block_on(f.reader.max_seq(id)).unwrap(), 3);
+    // The triggers index the title and the user/assistant text only.
+    assert_eq!(f.titles("pelican"), vec!["Fork: origin".to_string()]);
+    assert_eq!(f.titles("heron"), vec!["Fork: origin".to_string()]);
+    assert_eq!(f.titles("origin"), vec!["Fork: origin".to_string()]);
+
+    // A failing message (duplicate seq) leaves neither the session nor any message behind.
+    let bad = session(f.ws, "Half copy", f.base);
+    let bad_id = bad.id;
+    f.writer
+        .send(WriteOp::InsertSessionWithMessages {
+            session: bad,
+            messages: vec![
+                message(bad_id, 1, Role::User, "narwhal one"),
+                message(bad_id, 1, Role::User, "narwhal two"),
+            ],
+        })
+        .unwrap();
+    f.writer.flush().unwrap();
+    assert!(block_on(f.reader.load_session(bad_id)).is_err());
+    assert!(f.titles("narwhal").is_empty());
+    assert!(f.titles("half copy").is_empty());
+    let conn = rusqlite::Connection::open(&f.path).unwrap();
+    let left: i64 = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM messages WHERE session_id = ?1)
+                  + (SELECT COUNT(*) FROM search_index WHERE session_id = ?1)",
+            [bad_id.0.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
 fn load_session_roundtrip_and_max_seq() {
     let f = Fixture::new();
     let id = f.add_session("Round trip", 1);

@@ -43,6 +43,8 @@ pub(crate) struct Actor {
     pending_model: Option<String>,
     pending_effort: Option<Effort>,
     last_error: Option<String>,
+    /// Transcript of a forked history, prepended to the first prompt only.
+    handoff: Option<String>,
 }
 
 impl Actor {
@@ -67,7 +69,14 @@ impl Actor {
             pending_model: None,
             pending_effort: None,
             last_error: None,
+            handoff: None,
         }
+    }
+
+    /// Text the provider gets in front of the first prompt (a fork's history).
+    pub(crate) fn with_handoff(mut self, handoff: Option<String>) -> Self {
+        self.handoff = handoff;
+        self
     }
 
     pub(crate) fn id(&self) -> SessionId {
@@ -190,9 +199,13 @@ impl Actor {
                 if self.status != SessionStatus::Streaming {
                     self.set_status(SessionStatus::Streaming);
                 }
-                let prompt = match context {
-                    Some(c) => format!("{c}\n{text}"),
-                    None => text,
+                let prompt = match (self.handoff.take(), context) {
+                    (None, None) => text,
+                    (handoff, context) => [handoff, context, Some(text)]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 };
                 self.command(SessionCommand::SendPrompt(prompt));
             }

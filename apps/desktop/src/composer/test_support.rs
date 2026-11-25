@@ -66,6 +66,7 @@ pub(super) fn height_with_note(note: Option<(String, std::time::Instant)>) -> f3
     let env = Env {
         cmd_tx: &tx,
         providers: &[],
+        fork_targets: &[],
         vscode: None,
         maximized: None,
         send_mode: crate::config::SendMode::Queue,
@@ -103,6 +104,7 @@ pub(super) fn render(input: String) -> egui::Rect {
     let env = Env {
         cmd_tx: &tx,
         providers: &[],
+        fork_targets: &[],
         vscode: None,
         maximized: None,
         send_mode: crate::config::SendMode::Queue,
@@ -138,6 +140,7 @@ pub(super) fn frame(
     let env = Env {
         cmd_tx: &tx,
         providers: &[],
+        fork_targets: &[],
         vscode: None,
         maximized: None,
         send_mode: crate::config::SendMode::Queue,

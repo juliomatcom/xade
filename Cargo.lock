@@ -4990,6 +4990,7 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+ "xade-antigravity",
  "xade-claude",
  "xade-core",
  "xade-store",

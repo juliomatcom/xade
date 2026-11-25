@@ -10,12 +10,13 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
 use xade_core::{
-    panic_message, AgentProvider, Effort, ImportedSession, Message, ProviderId, Session, SessionId,
-    SessionOrigin, SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
+    panic_message, AgentProvider, Effort, ImportedSession, Message, ProviderId, Role, Session,
+    SessionId, SessionOrigin, SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
 };
 use xade_store::{throwaway, StoreReader, WriteOp, WriterHandle};
 
 use crate::session_actor::{Actor, ActorCmd};
+use crate::transcript::transcript;
 use crate::{flush, AppEvent, AppEventKind, ManagerCmd};
 
 pub struct SessionManager {
@@ -38,6 +39,9 @@ struct Dormant {
     cwd: std::path::PathBuf,
     provider: Arc<dyn AgentProvider>,
     next_seq: i64,
+    /// Set while the provider has not stored a session id yet but the history is not empty: a
+    /// fork's first prompt carries it. Derived on every open, never stored.
+    handoff: Option<String>,
 }
 
 impl SessionManager {
@@ -164,6 +168,10 @@ impl SessionManager {
                     }
                 }
                 ManagerCmd::DeleteSession { session_id } => self.delete(session_id).await,
+                ManagerCmd::Fork {
+                    session_id,
+                    provider,
+                } => self.fork(session_id, provider).await,
                 ManagerCmd::Import => self.start_import(),
                 ManagerCmd::ShutdownAll(done) => {
                     for (_, tx) in self.live.drain() {
@@ -230,7 +238,8 @@ impl SessionManager {
                     self.events.clone(),
                     handle,
                     d.next_seq,
-                );
+                )
+                .with_handoff(d.handoff);
                 self.start_actor(actor);
                 true
             }
@@ -475,6 +484,108 @@ impl SessionManager {
         self.emit(Some(id), AppEventKind::SessionDeleted { session_id: id });
     }
 
+    /// Replies `SessionForked`, or an `Error` with nothing written.
+    async fn fork(&mut self, source: SessionId, target: ProviderId) {
+        match self.try_fork(source, target).await {
+            Ok(id) => self.emit(
+                Some(id),
+                AppEventKind::SessionForked {
+                    from: source,
+                    session_id: id,
+                },
+            ),
+            Err(msg) => self.emit(
+                Some(source),
+                AppEventKind::Error(format!("Could not fork the session: {msg}")),
+            ),
+        }
+    }
+
+    /// Copies the stored history into a new session of `target`, in one transaction. The new
+    /// session has no provider id, so opening it derives the hand-off.
+    async fn try_fork(
+        &mut self,
+        source: SessionId,
+        target: ProviderId,
+    ) -> Result<SessionId, String> {
+        let provider = self
+            .provider(target)
+            .ok_or("that provider is not available")?;
+        // A live or just-closed actor's latest messages may still be queued in the writer.
+        flush(&self.writer).await;
+        let (src, history) = self
+            .reader
+            .load_session(source)
+            .await
+            .map_err(|e| e.to_string())?;
+        if history.is_empty() {
+            return Err("it has no messages yet".into());
+        }
+        let (model_id, effort) = match self
+            .reader
+            .last_model_choice(target)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            Some((model, effort, _)) => (model, effort),
+            None => (provider.default_model(), Effort::Default),
+        };
+        let effort = supported_effort(provider.as_ref(), &model_id, effort);
+        let basis = match src.title.trim() {
+            "" => history
+                .iter()
+                .find(|m| m.role == Role::User)
+                .map_or(String::new(), |m| m.content_text.clone()),
+            title => title.to_string(),
+        };
+        let title = match Session::derive_title(&format!("Fork: {basis}")) {
+            t if t.trim() == "Fork:" => "Fork".to_string(),
+            t => t,
+        };
+        let id = SessionId::new();
+        let now = OffsetDateTime::now_utc();
+        let session = Session {
+            id,
+            workspace_id: src.workspace_id,
+            provider_id: target,
+            provider_session_id: None,
+            origin: SessionOrigin::Xade,
+            title,
+            preview_snippet: String::new(),
+            sent_model_id: String::new(),
+            sent_effort: effort,
+            model_id,
+            effort,
+            auto_mode: src.auto_mode,
+            usage: UsageTotals::default(),
+            created_at: now,
+            updated_at: now,
+        };
+        let count = history.len() as i64;
+        let messages = history
+            .into_iter()
+            .zip(1..)
+            .map(|(m, seq)| Message {
+                id: Uuid::new_v4(),
+                session_id: id,
+                seq,
+                thinking_text: None,
+                ..m
+            })
+            .collect();
+        self.writer
+            .send(WriteOp::InsertSessionWithMessages { session, messages })
+            .map_err(|e| e.to_string())?;
+        let _ = self.writer.send(WriteOp::TouchWorkspace(src.workspace_id));
+        flush(&self.writer).await;
+        // The writer only logs a failed transaction; the stored count says whether it landed.
+        match self.reader.max_seq(id).await {
+            Ok(n) if n == count => Ok(id),
+            Ok(_) => Err("the copy was not saved".into()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
+
     async fn open(&mut self, id: SessionId) {
         if self.dormant.contains_key(&id) || self.live.get(&id).is_some_and(|tx| !tx.is_closed()) {
             return;
@@ -501,6 +612,11 @@ impl SessionManager {
                 )
             }
         };
+        let handoff = session
+            .provider_session_id
+            .is_none()
+            .then(|| transcript(&messages))
+            .filter(|t| !t.is_empty());
         let _ = self
             .writer
             .send(WriteOp::TouchWorkspace(session.workspace_id));
@@ -520,6 +636,7 @@ impl SessionManager {
                         cwd,
                         provider,
                         next_seq,
+                        handoff,
                     },
                 );
                 self.emit(Some(id), AppEventKind::Status(SessionStatus::Idle));
@@ -562,6 +679,19 @@ async fn supervise(
         session_id: None,
         kind,
     });
+}
+
+/// `effort` when the model lists it (or the provider does, for an unknown model), else `Default`.
+fn supported_effort(provider: &dyn AgentProvider, model_id: &str, effort: Effort) -> Effort {
+    let levels = match provider.models().into_iter().find(|m| m.id == model_id) {
+        Some(m) => m.effort_levels,
+        None => provider.effort_levels(),
+    };
+    if effort == Effort::Default || levels.contains(&effort) {
+        effort
+    } else {
+        Effort::Default
+    }
 }
 
 /// The store keeps microseconds. A finer clock would make a stored row look older than the import

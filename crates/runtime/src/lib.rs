@@ -3,6 +3,7 @@
 pub mod git;
 mod manager;
 mod session_actor;
+mod transcript;
 
 use std::path::PathBuf;
 
@@ -15,6 +16,7 @@ use xade_store::WriterHandle;
 
 pub use git::GitState;
 pub use manager::SessionManager;
+pub use transcript::transcript;
 
 pub enum ManagerCmd {
     Create {
@@ -68,6 +70,13 @@ pub enum ManagerCmd {
     DeleteSession {
         session_id: SessionId,
     },
+    /// Copies the session's history into a new Xade session for `provider`, which continues
+    /// there with a one-time transcript hand-off. Replies with `SessionForked`, or `Error`
+    /// (nothing written) on any failure.
+    Fork {
+        session_id: SessionId,
+        provider: ProviderId,
+    },
     /// Reads every provider's own history and imports what is new or newer (idempotent).
     /// Replies with `AppEventKind::ImportDone`.
     Import,
@@ -105,6 +114,11 @@ pub enum AppEventKind {
         state: GitState,
     },
     SessionDeleted {
+        session_id: SessionId,
+    },
+    /// Reply to `Fork`: the stored copy, not yet opened.
+    SessionForked {
+        from: SessionId,
         session_id: SessionId,
     },
     Error(String),
