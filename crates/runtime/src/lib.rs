@@ -1,6 +1,8 @@
 //! Session manager and per-session actors between the UI and the providers.
 
+mod fork;
 pub mod git;
+mod handoff;
 mod manager;
 mod session_actor;
 mod transcript;
@@ -71,11 +73,14 @@ pub enum ManagerCmd {
         session_id: SessionId,
     },
     /// Copies the session's history into a new Xade session for `provider`, which continues
-    /// there with a one-time transcript hand-off. Replies with `SessionForked`, or `Error`
-    /// (nothing written) on any failure.
+    /// there with a one-time hand-off: a state snapshot the source provider writes from
+    /// `handoff_prompt`, else the history transcript. Replies `ForkPreparing`, then
+    /// `SessionForked`, or `Error` (nothing written) on any failure.
     Fork {
         session_id: SessionId,
         provider: ProviderId,
+        /// What the source provider is asked about the transcript to produce the snapshot.
+        handoff_prompt: String,
     },
     /// Reads every provider's own history and imports what is new or newer (idempotent).
     /// Replies with `AppEventKind::ImportDone`.
@@ -115,6 +120,10 @@ pub enum AppEventKind {
     },
     SessionDeleted {
         session_id: SessionId,
+    },
+    /// A `Fork` started (the session id is the source); it ends with `SessionForked` or `Error`.
+    ForkPreparing {
+        from: SessionId,
     },
     /// Reply to `Fork`: the stored copy, not yet opened.
     SessionForked {

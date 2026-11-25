@@ -14,6 +14,11 @@ pub const DEFAULT_FONT_SIZE: f32 = 13.5;
 /// The family shipped inside the app (JetBrains Mono, SIL OFL); it needs no install.
 pub const BUNDLED_FONT: &str = "JetBrains Mono";
 const BUNDLED_FONT_DATA: &[u8] = include_bytes!("../../../assets/fonts/JetBrainsMono-Regular.ttf");
+/// The prompt a fork asks the source provider to write its state hand-off with (shipped in the
+/// app, copied to `DEFAULT_FORK_PROMPT_FILE` on first run).
+pub const BUNDLED_FORK_PROMPT: &str = include_str!("../../../assets/prompts/fork-handoff.md");
+/// Where the prompt file lives by default, relative to the data dir.
+pub const DEFAULT_FORK_PROMPT_FILE: &str = "prompts/fork-handoff.md";
 const MIN_FONT_SIZE: f32 = 9.0;
 const MAX_FONT_SIZE: f32 = 28.0;
 /// How often the file's mtime is checked.
@@ -50,6 +55,9 @@ pub struct Config {
     pub show_whitespace: bool,
     /// Whether a plain launch reopens the windows left open (they are saved only while true).
     pub restore_windows: bool,
+    /// File with the prompt a fork asks the source provider; relative to the data dir unless
+    /// absolute.
+    pub fork_handoff_prompt: PathBuf,
     pub shortcuts: Arc<Keymap>,
     /// The `theme` block: hex colors by name; missing ones keep their defaults.
     pub theme: Palette,
@@ -64,6 +72,7 @@ impl Default for Config {
             show_fps: false,
             show_whitespace: true,
             restore_windows: true,
+            fork_handoff_prompt: PathBuf::from(DEFAULT_FORK_PROMPT_FILE),
             shortcuts: Arc::default(),
             theme: Palette::default(),
         }
@@ -114,6 +123,13 @@ impl Config {
             Some(Value::Bool(b)) => cfg.restore_windows = *b,
             Some(_) => return Err("restore_windows must be true or false".into()),
         }
+        match obj.get("fork_handoff_prompt") {
+            None => {}
+            Some(Value::String(s)) if !s.trim().is_empty() => {
+                cfg.fork_handoff_prompt = PathBuf::from(s.trim());
+            }
+            Some(_) => return Err("fork_handoff_prompt must be a file path".into()),
+        }
         match obj.get("shortcuts") {
             None => {}
             Some(Value::Object(map)) => cfg.shortcuts = Arc::new(Keymap::parse(map)?),
@@ -151,10 +167,52 @@ fn defaults_json() -> String {
         "show_fps": false,
         "show_whitespace": true,
         "restore_windows": true,
+        "fork_handoff_prompt": DEFAULT_FORK_PROMPT_FILE,
         "shortcuts": keymap::default_shortcuts(),
         "theme": Palette::defaults_json(),
     }))
     .unwrap_or_default()
+}
+
+/// Creates the default fork prompt file from the bundled text unless it already exists (an
+/// edited or deleted-and-recreated file is never overwritten). Blocking.
+pub fn ensure_default_fork_prompt(data_dir: &Path) {
+    let path = data_dir.join(DEFAULT_FORK_PROMPT_FILE);
+    let made = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| {
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+        })
+        .and_then(|mut f| std::io::Write::write_all(&mut f, BUNDLED_FORK_PROMPT.as_bytes()));
+    match made {
+        Ok(()) => tracing::info!("fork prompt file created"),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => tracing::warn!(error = %e, "could not create the fork prompt file"),
+    }
+}
+
+/// The fork prompt in `path`, or the bundled one plus a warning when it is missing, empty or
+/// unreadable. Blocking.
+pub fn read_fork_prompt(path: Option<&Path>) -> (String, Option<String>) {
+    let Some(path) = path else {
+        return (BUNDLED_FORK_PROMPT.to_string(), None);
+    };
+    let why = match std::fs::read_to_string(path) {
+        Ok(text) if !text.trim().is_empty() => return (text, None),
+        Ok(_) => "is empty".to_string(),
+        Err(e) => format!("cannot be read ({e})"),
+    };
+    (
+        BUNDLED_FORK_PROMPT.to_string(),
+        Some(format!(
+            "Fork prompt {} {why}; using the bundled one",
+            path.display()
+        )),
+    )
 }
 
 /// Replaces `path` with the defaults, keeping the old file as `<name>.bak`. The live reload
@@ -351,6 +409,62 @@ mod tests {
         );
         assert!(Config::parse(r#"{"restore_windows":"no"}"#).is_err());
         assert!(Config::parse(r#"{"restore_windows":null}"#).is_err());
+    }
+
+    #[test]
+    fn fork_handoff_prompt_defaults_to_the_data_dir_file_and_must_be_a_path() {
+        assert_eq!(
+            Config::default().fork_handoff_prompt,
+            PathBuf::from("prompts/fork-handoff.md")
+        );
+        let cfg = Config::parse(r#"{"fork_handoff_prompt":"/tmp/mine.md"}"#).unwrap();
+        assert_eq!(cfg.fork_handoff_prompt, PathBuf::from("/tmp/mine.md"));
+        for bad in [
+            r#"{"fork_handoff_prompt":""}"#,
+            r#"{"fork_handoff_prompt":3}"#,
+        ] {
+            assert!(Config::parse(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_default_fork_prompt_is_created_once_and_never_overwritten() {
+        let dir = temp_dir();
+        ensure_default_fork_prompt(&dir);
+        let file = dir.join(DEFAULT_FORK_PROMPT_FILE);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), BUNDLED_FORK_PROMPT);
+        std::fs::write(&file, "mine").unwrap();
+        ensure_default_fork_prompt(&dir);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "mine");
+        assert_eq!(read_fork_prompt(Some(&file)), ("mine".to_string(), None));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_empty_or_unreadable_fork_prompt_falls_back_with_a_warning() {
+        let dir = temp_dir();
+        let missing = dir.join("none.md");
+        let (text, warning) = read_fork_prompt(Some(&missing));
+        assert_eq!(text, BUNDLED_FORK_PROMPT);
+        assert!(warning.unwrap().contains("cannot be read"));
+        let empty = dir.join("empty.md");
+        std::fs::write(&empty, " \n").unwrap();
+        let (text, warning) = read_fork_prompt(Some(&empty));
+        assert_eq!(text, BUNDLED_FORK_PROMPT);
+        assert!(warning.unwrap().contains("is empty"));
+        // A folder cannot be read as text.
+        assert!(read_fork_prompt(Some(&dir)).1.is_some());
+        assert_eq!(
+            read_fork_prompt(None),
+            (BUNDLED_FORK_PROMPT.to_string(), None)
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_bundled_fork_prompt_is_the_shipped_asset() {
+        assert!(BUNDLED_FORK_PROMPT.starts_with("Generate a dense, machine-efficient"));
+        assert!(BUNDLED_FORK_PROMPT.contains("## NEXT ACTION"));
     }
 
     #[test]

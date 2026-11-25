@@ -4985,6 +4985,7 @@ dependencies = [
 name = "xade-runtime"
 version = "0.3.10"
 dependencies = [
+ "serde_json",
  "tempfile",
  "time",
  "tokio",

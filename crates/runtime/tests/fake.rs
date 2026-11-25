@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -22,6 +23,10 @@ struct FakeProvider {
     started: AtomicUsize,
     /// How the next prompt goes instead of the scripted turn.
     next_turn: Arc<Mutex<Option<Turn>>>,
+    /// Provider session ids `delete_session` was called with.
+    deleted: Mutex<Vec<String>>,
+    /// Answers to permission requests: request id and whether it was allowed.
+    responses: Arc<Mutex<Vec<(String, bool)>>>,
 }
 
 #[derive(Clone, Copy)]
@@ -34,6 +39,10 @@ enum Turn {
     ErrorNoOutput,
     /// No reply until an interrupt, which ends the turn stopped.
     Hold,
+    /// `Started`, then a normal turn with no text.
+    EmptyAnswer,
+    /// `Started`, a permission request, and only after its answer a text and the end.
+    AskPermission,
 }
 
 fn turn_complete(is_error: bool, interrupted: bool) -> ProviderEvent {
@@ -59,6 +68,8 @@ impl FakeProvider {
             prompts: Arc::default(),
             started: AtomicUsize::new(0),
             next_turn: Arc::default(),
+            deleted: Mutex::default(),
+            responses: Arc::default(),
         }
     }
 
@@ -86,6 +97,13 @@ impl AgentProvider for FakeProvider {
     fn preflight(&self) -> Result<(), ProviderError> {
         Ok(())
     }
+    fn delete_session(&self, provider_session_id: &str) -> Result<(), ProviderError> {
+        self.deleted
+            .lock()
+            .unwrap()
+            .push(provider_session_id.to_string());
+        Ok(())
+    }
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
         let model_id = cfg.model_id.clone();
         let n = self.started.fetch_add(1, Ordering::SeqCst);
@@ -95,11 +113,13 @@ impl AgentProvider for FakeProvider {
         });
         let prompts = self.prompts.clone();
         let next_turn = self.next_turn.clone();
+        let responses = self.responses.clone();
         self.spawns.lock().unwrap().push(cfg);
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         let (ev_tx, events) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let mut holding = false;
+            let mut asking = false;
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     SessionCommand::SendPrompt(text) => {
@@ -127,6 +147,28 @@ impl AgentProvider for FakeProvider {
                             }
                             Some(Turn::Hold) => {
                                 holding = true;
+                                continue;
+                            }
+                            Some(Turn::EmptyAnswer) => {
+                                let _ = ev_tx.send(ProviderEvent::Started {
+                                    provider_session_id: psid.clone(),
+                                    model_id: model_id.clone(),
+                                });
+                                let _ = ev_tx.send(turn_complete(false, false));
+                                continue;
+                            }
+                            Some(Turn::AskPermission) => {
+                                asking = true;
+                                let _ = ev_tx.send(ProviderEvent::Started {
+                                    provider_session_id: psid.clone(),
+                                    model_id: model_id.clone(),
+                                });
+                                let _ = ev_tx.send(ProviderEvent::PermissionRequest {
+                                    request_id: "r1".into(),
+                                    tool_use_id: "t9".into(),
+                                    tool_name: "Bash".into(),
+                                    input_json: r#"{"command":"ls"}"#.into(),
+                                });
                                 continue;
                             }
                             None => {}
@@ -173,6 +215,14 @@ impl AgentProvider for FakeProvider {
                         for ev in script {
                             let _ = ev_tx.send(ev);
                         }
+                    }
+                    SessionCommand::RespondPermission { request_id, allow } if asking => {
+                        asking = false;
+                        responses.lock().unwrap().push((request_id, allow));
+                        let _ = ev_tx.send(ProviderEvent::AssistantText {
+                            text: "after the denial".into(),
+                        });
+                        let _ = ev_tx.send(turn_complete(false, false));
                     }
                     SessionCommand::Interrupt if holding => {
                         holding = false;
@@ -410,11 +460,32 @@ async fn close(h: &mut Harness, id: SessionId) {
     h.until_status(5, SessionStatus::Closed).await;
 }
 
+const PROMPT: &str = "Write the handoff.";
+
+/// The fork's hand-off files.
+fn snapshot_file(h: &Harness, id: SessionId) -> PathBuf {
+    h.forks.join(format!("{}.snapshot.md", id.0))
+}
+
+fn transcript_file(h: &Harness, id: SessionId) -> PathBuf {
+    h.forks.join(format!("{}.transcript.md", id.0))
+}
+
+/// The first line of the first send to a fork that used its snapshot.
+fn snapshot_line(h: &Harness, id: SessionId) -> String {
+    format!("@{}", snapshot_file(h, id).display())
+}
+
+fn transcript_line(h: &Harness, id: SessionId) -> String {
+    format!("@{}", transcript_file(h, id).display())
+}
+
 /// Forks `id` and returns the new session id.
 async fn fork(h: &mut Harness, id: SessionId, to: ProviderId) -> SessionId {
     h.tx.send(ManagerCmd::Fork {
         session_id: id,
         provider: to,
+        handoff_prompt: PROMPT.into(),
     })
     .unwrap();
     let ev = h
@@ -425,6 +496,11 @@ async fn fork(h: &mut Harness, id: SessionId, to: ProviderId) -> SessionId {
             )
         })
         .await;
+    assert!(
+        matches!(&ev[0].kind, AppEventKind::ForkPreparing { from } if *from == id)
+            && ev[0].session_id == Some(id),
+        "ForkPreparing comes first"
+    );
     match &ev.last().unwrap().kind {
         AppEventKind::SessionForked { from, session_id } => {
             assert_eq!(*from, id);
@@ -433,8 +509,6 @@ async fn fork(h: &mut Harness, id: SessionId, to: ProviderId) -> SessionId {
         other => panic!("fork failed: {other:?}"),
     }
 }
-
-const HANDOFF_TAG: &str = "<previous_conversation>";
 
 #[tokio::test]
 async fn fork_copies_the_history_into_a_new_xade_session_of_the_target() {
@@ -482,31 +556,49 @@ async fn fork_copies_the_history_into_a_new_xade_session_of_the_target() {
 }
 
 #[tokio::test]
-async fn the_first_send_to_a_fork_carries_the_handoff_once() {
+async fn the_first_send_to_a_fork_carries_its_snapshot_once() {
     let dir = tempfile::tempdir().unwrap();
-    let (mut h, _claude, agy) = both(dir.path()).await;
+    let (mut h, claude, agy) = both(dir.path()).await;
     let src = create(&mut h, ProviderId::Claude).await;
     send(&mut h, src, "remember the word apple").await;
     close(&mut h, src).await;
     let new = fork(&mut h, src, ProviderId::Antigravity).await;
 
+    // The snapshot is what the source provider answered to the transcript and the prompt.
+    let snapshot = snapshot_file(&h, new);
+    assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), "pong");
+    let asked = &claude.prompts()[1];
+    assert!(
+        asked.starts_with(&format!("{}\n\n{PROMPT}", transcript_line(&h, new))),
+        "{asked}"
+    );
+    let t = std::fs::read_to_string(transcript_file(&h, new)).unwrap();
+    assert!(t.contains("[user] remember the word apple\n"));
+    assert!(t.contains("[tool_call Read] a.rs\n") && t.contains("[assistant] pong\n"));
+    assert!(!t.contains("contents"), "tool output stays out");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&h.forks), 0o700);
+        assert_eq!(mode(&snapshot), 0o600);
+        assert_eq!(mode(&transcript_file(&h, new)), 0o600);
+    }
+
     open(&mut h, new).await;
     send(&mut h, new, "what word was it?").await;
-    let prompts = agy.prompts();
-    assert_eq!(prompts.len(), 1);
-    let p = &prompts[0];
-    assert!(p.starts_with(HANDOFF_TAG), "{p}");
-    assert!(p.contains("[user] remember the word apple"));
-    assert!(p.contains(r#"[tool_call Read] {"file_path":"a.rs"}"#));
-    assert!(p.contains("[tool_result] contents"));
-    assert!(p.contains("[assistant] pong"));
-    assert!(p.ends_with("</previous_conversation>\nwhat word was it?"));
+    assert_eq!(
+        agy.prompts(),
+        vec![format!("{}\nwhat word was it?", snapshot_line(&h, new))]
+    );
 
     xade_runtime::flush(&h.writer).await;
     let (row, msgs) = h.reader.load_session(new).await.unwrap();
     let last_user = msgs.iter().rfind(|m| m.role == Role::User).unwrap();
     assert_eq!(last_user.content_text, "what word was it?");
-    assert!(msgs.iter().all(|m| !m.content_text.contains(HANDOFF_TAG)));
+    assert!(msgs
+        .iter()
+        .all(|m| !m.content_text.contains("xade") && !m.content_text.contains("@/")));
     assert!(row.provider_session_id.is_some());
 
     send(&mut h, new, "and again").await;
@@ -516,6 +608,159 @@ async fn the_first_send_to_a_fork_carries_the_handoff_once() {
     open(&mut h, new).await;
     send(&mut h, new, "third").await;
     assert_eq!(agy.prompts()[2], "third");
+}
+
+#[tokio::test]
+async fn the_snapshot_turn_is_a_throwaway_on_the_source_provider() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, claude, agy) = both(dir.path()).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    fork(&mut h, src, ProviderId::Antigravity).await;
+
+    {
+        let spawns = claude.spawns.lock().unwrap();
+        // The source session, its resume-less throwaway.
+        assert_eq!(spawns.len(), 2);
+        let cfg = &spawns[1];
+        assert_eq!(
+            (cfg.cwd.as_path(), cfg.resume.as_deref()),
+            (h.cwd.as_path(), None)
+        );
+        assert_eq!((cfg.model_id.as_str(), cfg.auto_mode), ("m", false));
+    }
+    assert!(agy.spawns.lock().unwrap().is_empty());
+    // Its conversation is deleted (the source's own is not), and it left no rows.
+    assert_eq!(*claude.deleted.lock().unwrap(), vec!["fake-session-1"]);
+    xade_runtime::flush(&h.writer).await;
+    let page = h.reader.list_sessions(None, None, 0, 24).await.unwrap();
+    assert_eq!(page.total, 2);
+}
+
+#[tokio::test]
+async fn permission_requests_during_the_snapshot_are_denied() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, claude, _agy) = both(dir.path()).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    *claude.next_turn.lock().unwrap() = Some(Turn::AskPermission);
+    let new = fork(&mut h, src, ProviderId::Antigravity).await;
+    assert_eq!(
+        *claude.responses.lock().unwrap(),
+        vec![("r1".to_string(), false)]
+    );
+    assert_eq!(
+        std::fs::read_to_string(snapshot_file(&h, new)).unwrap(),
+        "after the denial"
+    );
+    assert_eq!(*claude.deleted.lock().unwrap(), vec!["fake-session-1"]);
+}
+
+#[tokio::test]
+async fn a_failed_or_empty_snapshot_falls_back_to_the_transcript_file() {
+    for turn in [Turn::ErrorNoOutput, Turn::EmptyAnswer] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut h, claude, agy) = both(dir.path()).await;
+        let src = create(&mut h, ProviderId::Claude).await;
+        send(&mut h, src, "remember the word apple").await;
+        close(&mut h, src).await;
+        *claude.next_turn.lock().unwrap() = Some(turn);
+        let new = fork(&mut h, src, ProviderId::Antigravity).await;
+        assert!(!snapshot_file(&h, new).exists());
+        open(&mut h, new).await;
+        send(&mut h, new, "go on").await;
+        assert_eq!(
+            agy.prompts(),
+            vec![format!("{}\ngo on", transcript_line(&h, new))]
+        );
+        let t = std::fs::read_to_string(transcript_file(&h, new)).unwrap();
+        assert!(t.contains("[user] remember the word apple"));
+    }
+}
+
+#[tokio::test]
+async fn a_fork_never_starts_empty_when_the_files_cannot_be_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _claude, agy) = both(dir.path()).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    // A file where the folder should be.
+    std::fs::write(&h.forks, "in the way").unwrap();
+    let new = fork(&mut h, src, ProviderId::Antigravity).await;
+    open(&mut h, new).await;
+    send(&mut h, new, "go on").await;
+    let p = &agy.prompts()[0];
+    assert!(p.starts_with("<previous_conversation>"), "{p}");
+    assert!(p.contains("[user] remember the word apple") && p.ends_with("\ngo on"));
+}
+
+#[tokio::test]
+async fn deleting_a_session_removes_its_hand_off_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _claude, _agy) = both(dir.path()).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    let new = fork(&mut h, src, ProviderId::Antigravity).await;
+    let other = fork(&mut h, src, ProviderId::Antigravity).await;
+    assert!(snapshot_file(&h, new).exists() && transcript_file(&h, new).exists());
+
+    h.tx.send(ManagerCmd::DeleteSession { session_id: new })
+        .unwrap();
+    h.until(5, |e| matches!(e.kind, AppEventKind::SessionDeleted { .. }))
+        .await;
+    assert!(!snapshot_file(&h, new).exists() && !transcript_file(&h, new).exists());
+    // Another fork's files stay, and a session without any is fine.
+    assert!(snapshot_file(&h, other).exists());
+    h.tx.send(ManagerCmd::DeleteSession { session_id: src })
+        .unwrap();
+    h.until(5, |e| matches!(e.kind, AppEventKind::SessionDeleted { .. }))
+        .await;
+    assert!(snapshot_file(&h, other).exists());
+}
+
+#[tokio::test]
+async fn a_slow_snapshot_does_not_block_the_manager_and_shutdown_cancels_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, claude, _agy) = both(dir.path()).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    *claude.next_turn.lock().unwrap() = Some(Turn::Hold);
+    h.tx.send(ManagerCmd::Fork {
+        session_id: src,
+        provider: ProviderId::Antigravity,
+        handoff_prompt: PROMPT.into(),
+    })
+    .unwrap();
+    h.until(5, |e| matches!(e.kind, AppEventKind::ForkPreparing { .. }))
+        .await;
+    // The manager still serves commands while the snapshot turn hangs.
+    let other = create(&mut h, ProviderId::Antigravity).await;
+    assert_ne!(other, src);
+
+    let (done, closed) = oneshot::channel();
+    h.tx.send(ManagerCmd::ShutdownAll(done)).unwrap();
+    // Cancelled: the fork completes without a snapshot.
+    let ev = h
+        .until(10, |e| {
+            matches!(
+                e.kind,
+                AppEventKind::SessionForked { .. } | AppEventKind::Error(_)
+            )
+        })
+        .await;
+    let AppEventKind::SessionForked {
+        session_id: new, ..
+    } = ev.last().unwrap().kind
+    else {
+        panic!("fork failed: {:?}", ev.last().unwrap().kind);
+    };
+    closed.await.unwrap();
+    assert!(!snapshot_file(&h, new).exists() && transcript_file(&h, new).exists());
 }
 
 #[tokio::test]
@@ -532,8 +777,9 @@ async fn a_first_turn_stopped_before_the_provider_started_keeps_the_handoff() {
     send(&mut h, new, "second try").await;
     let prompts = agy.prompts();
     assert_eq!(prompts.len(), 2);
-    assert!(prompts[0].starts_with(HANDOFF_TAG));
-    assert!(prompts[1].starts_with(HANDOFF_TAG), "{}", prompts[1]);
+    let line = snapshot_line(&h, new);
+    assert!(prompts[0].starts_with(&line));
+    assert!(prompts[1].starts_with(&line), "{}", prompts[1]);
     send(&mut h, new, "third").await;
     assert_eq!(agy.prompts()[2], "third");
 }
@@ -575,9 +821,10 @@ async fn a_steer_before_the_provider_answers_does_not_drop_the_handoff() {
     h.until_status(5, SessionStatus::Idle).await;
     send(&mut h, new, "again").await;
     let prompts = agy.prompts();
-    assert!(prompts[0].starts_with(HANDOFF_TAG));
+    let line = snapshot_line(&h, new);
+    assert!(prompts[0].starts_with(&line));
     assert_eq!(prompts[1], "steer");
-    assert!(prompts[2].starts_with(HANDOFF_TAG), "{}", prompts[2]);
+    assert!(prompts[2].starts_with(&line), "{}", prompts[2]);
     send(&mut h, new, "last").await;
     assert_eq!(agy.prompts()[3], "last");
 }
@@ -590,8 +837,9 @@ async fn a_turn_started_then_stopped_without_output_keeps_the_handoff() {
     send(&mut h, new, "first try").await;
     send(&mut h, new, "second try").await;
     let prompts = agy.prompts();
-    assert!(prompts[0].starts_with(HANDOFF_TAG));
-    assert!(prompts[1].starts_with(HANDOFF_TAG), "{}", prompts[1]);
+    let line = snapshot_line(&h, new);
+    assert!(prompts[0].starts_with(&line));
+    assert!(prompts[1].starts_with(&line), "{}", prompts[1]);
     send(&mut h, new, "third").await;
     assert_eq!(agy.prompts()[2], "third");
 }
@@ -603,7 +851,7 @@ async fn an_errored_first_turn_without_output_keeps_the_handoff() {
     *agy.next_turn.lock().unwrap() = Some(Turn::ErrorNoOutput);
     send(&mut h, new, "first try").await;
     send(&mut h, new, "second try").await;
-    assert!(agy.prompts()[1].starts_with(HANDOFF_TAG));
+    assert!(agy.prompts()[1].starts_with(&snapshot_line(&h, new)));
     send(&mut h, new, "third").await;
     assert_eq!(agy.prompts()[2], "third");
 }
@@ -630,12 +878,14 @@ async fn the_handoff_survives_closing_the_fork_before_its_first_send() {
     })
     .unwrap();
     h.until_status(5, SessionStatus::Idle).await;
-    let p = claude.prompts().pop().unwrap();
-    assert!(
-        p.starts_with(HANDOFF_TAG) && p.contains("[user] first task"),
-        "{p}"
+    // The fork's snapshot came from a throwaway turn of the same provider.
+    assert_eq!(
+        claude.prompts().pop().unwrap(),
+        format!(
+            "{}\n<ide_opened_file>a.rs</ide_opened_file>\ngo on",
+            snapshot_line(&h, new)
+        )
     );
-    assert!(p.ends_with("</previous_conversation>\n<ide_opened_file>a.rs</ide_opened_file>\ngo on"));
 }
 
 #[tokio::test]
@@ -649,18 +899,25 @@ async fn a_fork_of_a_fork_does_not_nest_the_transcript() {
     open(&mut h, one).await;
     send(&mut h, one, "second question").await;
     close(&mut h, one).await;
-    assert!(agy.prompts()[0].starts_with(HANDOFF_TAG));
+    assert!(agy.prompts()[0].starts_with(&snapshot_line(&h, one)));
 
     let two = fork(&mut h, one, ProviderId::Claude).await;
     let (_, msgs) = h.reader.load_session(two).await.unwrap();
     assert_eq!(msgs.len(), 8);
-    assert!(msgs.iter().all(|m| !m.content_text.contains(HANDOFF_TAG)));
+    assert!(msgs.iter().all(|m| !m.content_text.contains("@/")));
+    // The snapshot was asked of the fork's own provider, from the history without hand-offs.
+    assert!(agy.prompts()[1].starts_with(&format!("{}\n\n{PROMPT}", transcript_line(&h, two))));
+    let t = std::fs::read_to_string(transcript_file(&h, two)).unwrap();
+    assert_eq!(t.matches("<previous_conversation>").count(), 1, "{t}");
+    assert_eq!(t.matches("[user] start here").count(), 1);
+    assert_eq!(t.matches("[user] second question").count(), 1);
+    assert!(!t.contains("xade-forks") && !t.contains("@/"));
     open(&mut h, two).await;
     send(&mut h, two, "third question").await;
-    let p = claude.prompts().pop().unwrap();
-    assert_eq!(p.matches(HANDOFF_TAG).count(), 1, "{p}");
-    assert!(p.contains("[user] start here") && p.contains("[user] second question"));
-    assert_eq!(p.matches("[user] start here").count(), 1);
+    assert_eq!(
+        claude.prompts().pop().unwrap(),
+        format!("{}\nthird question", snapshot_line(&h, two))
+    );
 }
 
 #[tokio::test]
@@ -674,6 +931,7 @@ async fn forking_to_a_missing_provider_fails_and_writes_nothing() {
     h.tx.send(ManagerCmd::Fork {
         session_id: src,
         provider: ProviderId::Antigravity,
+        handoff_prompt: PROMPT.into(),
     })
     .unwrap();
     let ev = h
@@ -709,6 +967,7 @@ async fn a_session_without_messages_cannot_be_forked() {
     h.tx.send(ManagerCmd::Fork {
         session_id: src,
         provider: ProviderId::Antigravity,
+        handoff_prompt: PROMPT.into(),
     })
     .unwrap();
     h.until(5, |e| matches!(e.kind, AppEventKind::Error(_)))
@@ -815,5 +1074,7 @@ async fn an_imported_session_forks_into_an_xade_session() {
     assert_eq!(msgs.len(), 1);
     open(&mut h, new).await;
     send(&mut h, new, "continue").await;
-    assert!(agy.prompts()[0].contains("[user] an old task"));
+    let t = std::fs::read_to_string(transcript_file(&h, new)).unwrap();
+    assert!(t.contains("[user] an old task"));
+    assert!(agy.prompts()[0].starts_with(&snapshot_line(&h, new)));
 }

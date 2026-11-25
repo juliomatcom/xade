@@ -6,15 +6,18 @@ use std::time::Duration;
 
 use time::OffsetDateTime;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
 use xade_core::{
-    panic_message, AgentProvider, Effort, ImportedSession, Message, ProviderId, Role, Session,
-    SessionId, SessionOrigin, SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
+    panic_message, AgentProvider, Effort, ImportedSession, Message, ProviderId, Session, SessionId,
+    SessionOrigin, SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
 };
 use xade_store::{throwaway, StoreReader, WriteOp, WriterHandle};
 
+use crate::fork::ForkJob;
+use crate::handoff;
 use crate::session_actor::{Actor, ActorCmd};
 use crate::transcript::transcript;
 use crate::{flush, AppEvent, AppEventKind, ManagerCmd};
@@ -30,6 +33,10 @@ pub struct SessionManager {
     tasks: Vec<JoinHandle<()>>,
     /// Parsed histories coming back from the blocking import tasks.
     import_tx: UnboundedSender<Vec<(ProviderId, Vec<ImportedSession>)>>,
+    /// Where fork hand-off files live.
+    forks_dir: std::path::PathBuf,
+    /// Set to true on shutdown so a running fork snapshot stops and cleans up.
+    fork_cancel: watch::Sender<bool>,
 }
 
 /// An opened session with no provider process yet: resuming one is how the CLI touches the
@@ -51,6 +58,16 @@ impl SessionManager {
         writer: WriterHandle,
         reader: StoreReader,
     ) -> (UnboundedSender<ManagerCmd>, UnboundedReceiver<AppEvent>) {
+        Self::start_in(providers, writer, reader, handoff::default_dir())
+    }
+
+    /// Like `start`, with fork hand-off files in `forks_dir` instead of the temp folder.
+    pub fn start_in(
+        providers: Vec<Arc<dyn AgentProvider>>,
+        writer: WriterHandle,
+        reader: StoreReader,
+        forks_dir: std::path::PathBuf,
+    ) -> (UnboundedSender<ManagerCmd>, UnboundedReceiver<AppEvent>) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (events, event_rx) = mpsc::unbounded_channel();
         let (import_tx, import_rx) = mpsc::unbounded_channel();
@@ -64,6 +81,8 @@ impl SessionManager {
             dormant: HashMap::new(),
             tasks: Vec::new(),
             import_tx,
+            forks_dir,
+            fork_cancel: watch::channel(false).0,
         };
         let task = tokio::spawn(manager.run(cmd_rx, import_rx));
         tokio::spawn(supervise(
@@ -171,9 +190,11 @@ impl SessionManager {
                 ManagerCmd::Fork {
                     session_id,
                     provider,
-                } => self.fork(session_id, provider).await,
+                    handoff_prompt,
+                } => self.fork(session_id, provider, handoff_prompt),
                 ManagerCmd::Import => self.start_import(),
                 ManagerCmd::ShutdownAll(done) => {
+                    let _ = self.fork_cancel.send(true);
                     for (_, tx) in self.live.drain() {
                         let _ = tx.send(ActorCmd::Close);
                     }
@@ -481,109 +502,50 @@ impl SessionManager {
             return fail(self, format!("Could not delete the session: {e}"));
         }
         flush(&self.writer).await;
+        let dir = self.forks_dir.clone();
+        if let Err(e) = tokio::task::spawn_blocking(move || handoff::remove_all(&dir, id)).await {
+            tracing::warn!(error = %e, "fork file cleanup failed");
+        }
         self.emit(Some(id), AppEventKind::SessionDeleted { session_id: id });
     }
 
-    /// Replies `SessionForked`, or an `Error` with nothing written.
-    async fn fork(&mut self, source: SessionId, target: ProviderId) {
-        match self.try_fork(source, target).await {
-            Ok(id) => self.emit(
-                Some(id),
-                AppEventKind::SessionForked {
-                    from: source,
-                    session_id: id,
-                },
-            ),
-            Err(msg) => self.emit(
-                Some(source),
-                AppEventKind::Error(format!("Could not fork the session: {msg}")),
-            ),
-        }
-    }
-
-    /// Copies the stored history into a new session of `target`, in one transaction. The new
-    /// session has no provider id, so opening it derives the hand-off.
-    async fn try_fork(
-        &mut self,
-        source: SessionId,
-        target: ProviderId,
-    ) -> Result<SessionId, String> {
-        let provider = self
-            .provider(target)
-            .ok_or("that provider is not available")?;
-        // A live or just-closed actor's latest messages may still be queued in the writer.
-        flush(&self.writer).await;
-        let (src, history) = self
-            .reader
-            .load_session(source)
-            .await
-            .map_err(|e| e.to_string())?;
-        if history.is_empty() {
-            return Err("it has no messages yet".into());
-        }
-        let (model_id, effort) = match self
-            .reader
-            .last_model_choice(target)
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            Some((model, effort, _)) => (model, effort),
-            None => (provider.default_model(), Effort::Default),
+    /// Replies `ForkPreparing` at once, then `SessionForked` or an `Error` with nothing written,
+    /// from a task of its own: the snapshot turn can take minutes.
+    fn fork(&mut self, source: SessionId, target: ProviderId, handoff_prompt: String) {
+        self.emit(Some(source), AppEventKind::ForkPreparing { from: source });
+        let job = ForkJob {
+            providers: self.providers.clone(),
+            writer: self.writer.clone(),
+            reader: self.reader.clone(),
+            dir: self.forks_dir.clone(),
+            cancel: self.fork_cancel.subscribe(),
         };
-        let effort = supported_effort(provider.as_ref(), &model_id, effort);
-        let basis = match src.title.trim() {
-            "" => history
-                .iter()
-                .find(|m| m.role == Role::User)
-                .map_or(String::new(), |m| m.content_text.clone()),
-            title => title.to_string(),
-        };
-        let title = match Session::derive_title(&format!("Fork: {basis}")) {
-            t if t.trim() == "Fork:" => "Fork".to_string(),
-            t => t,
-        };
-        let id = SessionId::new();
-        let now = OffsetDateTime::now_utc();
-        let session = Session {
-            id,
-            workspace_id: src.workspace_id,
-            provider_id: target,
-            provider_session_id: None,
-            origin: SessionOrigin::Xade,
-            title,
-            preview_snippet: String::new(),
-            sent_model_id: String::new(),
-            sent_effort: effort,
-            model_id,
-            effort,
-            auto_mode: src.auto_mode,
-            usage: UsageTotals::default(),
-            created_at: now,
-            updated_at: now,
-        };
-        let count = history.len() as i64;
-        let messages = history
-            .into_iter()
-            .zip(1..)
-            .map(|(m, seq)| Message {
-                id: Uuid::new_v4(),
-                session_id: id,
-                seq,
-                thinking_text: None,
-                ..m
-            })
-            .collect();
-        self.writer
-            .send(WriteOp::InsertSessionWithMessages { session, messages })
-            .map_err(|e| e.to_string())?;
-        let _ = self.writer.send(WriteOp::TouchWorkspace(src.workspace_id));
-        flush(&self.writer).await;
-        // The writer only logs a failed transaction; the stored count says whether it landed.
-        match self.reader.max_seq(id).await {
-            Ok(n) if n == count => Ok(id),
-            Ok(_) => Err("the copy was not saved".into()),
-            Err(e) => Err(e.to_string()),
-        }
+        let events = self.events.clone();
+        let task = tokio::spawn({
+            let events = events.clone();
+            async move {
+                let (session_id, kind) = match job.run(source, target, handoff_prompt).await {
+                    Ok(id) => (
+                        id,
+                        AppEventKind::SessionForked {
+                            from: source,
+                            session_id: id,
+                        },
+                    ),
+                    Err(msg) => (
+                        source,
+                        AppEventKind::Error(format!("Could not fork the session: {msg}")),
+                    ),
+                };
+                let _ = events.send(AppEvent {
+                    session_id: Some(session_id),
+                    kind,
+                });
+            }
+        });
+        self.tasks.retain(|t| !t.is_finished());
+        self.tasks
+            .push(tokio::spawn(supervise(task, "A fork", None, events)));
     }
 
     async fn open(&mut self, id: SessionId) {
@@ -612,11 +574,17 @@ impl SessionManager {
                 )
             }
         };
-        let handoff = session
-            .provider_session_id
-            .is_none()
-            .then(|| transcript(&messages))
-            .filter(|t| !t.is_empty());
+        let handoff = if session.provider_session_id.is_none() {
+            let (dir, text) = (self.forks_dir.clone(), transcript(&messages));
+            tokio::task::spawn_blocking(move || handoff::first_prompt(&dir, id, text))
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "fork hand-off task failed");
+                    None
+                })
+        } else {
+            None
+        };
         let _ = self
             .writer
             .send(WriteOp::TouchWorkspace(session.workspace_id));
@@ -679,19 +647,6 @@ async fn supervise(
         session_id: None,
         kind,
     });
-}
-
-/// `effort` when the model lists it (or the provider does, for an unknown model), else `Default`.
-fn supported_effort(provider: &dyn AgentProvider, model_id: &str, effort: Effort) -> Effort {
-    let levels = match provider.models().into_iter().find(|m| m.id == model_id) {
-        Some(m) => m.effort_levels,
-        None => provider.effort_levels(),
-    };
-    if effort == Effort::Default || levels.contains(&effort) {
-        effort
-    } else {
-        Effort::Default
-    }
 }
 
 /// The store keeps microseconds. A finer clock would make a stored row look older than the import

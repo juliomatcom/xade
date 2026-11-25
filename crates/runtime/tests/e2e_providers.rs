@@ -26,6 +26,8 @@ const CLAUDE: &str = "haiku";
 const AGY: &str = "gemini-3.8-flash";
 const WAIT: u64 = 180;
 const REMEMBER: &str = "Remember the word kiwi. Reply with just: ok";
+/// The prompt the app ships for the snapshot turn.
+const HANDOFF_PROMPT: &str = include_str!("../../../assets/prompts/fork-handoff.md");
 const RECALL: &str = "What word did I ask you to remember? Reply with one word.";
 
 fn enabled() -> bool {
@@ -213,6 +215,7 @@ impl Ctx {
             .send(ManagerCmd::Fork {
                 session_id: id,
                 provider: to,
+                handoff_prompt: HANDOFF_PROMPT.into(),
             })
             .unwrap();
         let evs = self
@@ -379,12 +382,74 @@ async fn delete_session_removes_the_antigravity_conversation() {
     c.shutdown().await;
 }
 
+/// Names of the conversations the providers hold for the test's folder (Claude) and in
+/// total (agy, whose files are not tied to a folder): a throwaway one left behind shows up.
+fn conversations(c: &Ctx) -> (Vec<String>, Vec<String>) {
+    let home = PathBuf::from(std::env::var_os("HOME").expect("HOME"));
+    let key: String =
+        c.h.cwd
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|n| {
+                n.to_string_lossy()
+                    .chars()
+                    .filter(|c| c.is_alphanumeric())
+                    .collect()
+            })
+            .unwrap_or_default();
+    let names = |dir: &std::path::Path, ext: &str| -> Vec<String> {
+        let mut v: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|e| e == ext))
+            .map(|p| p.display().to_string())
+            .collect();
+        v.sort();
+        v
+    };
+    let mut claude = Vec::new();
+    for project in std::fs::read_dir(home.join(".claude/projects"))
+        .into_iter()
+        .flatten()
+        .flatten()
+    {
+        let name: String = project
+            .file_name()
+            .to_string_lossy()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .collect();
+        if !key.is_empty() && name.contains(&key) {
+            claude.extend(names(&project.path(), "jsonl"));
+        }
+    }
+    (
+        claude,
+        names(&home.join(".gemini/antigravity-cli/conversations"), "db"),
+    )
+}
+
 /// Fork `from` to `to`: the copy shows the history and the first send answers from it.
 async fn fork_recalls(from: ProviderId, to: ProviderId) {
     let mut c = ctx().await;
     let src = c.create(from).await;
     c.send(src, REMEMBER).await;
+    let before = conversations(&c);
     let new = c.fork(src, to).await;
+    // The snapshot turn ran and its throwaway conversation is gone again.
+    assert_eq!(
+        conversations(&c),
+        before,
+        "a snapshot conversation was left behind"
+    );
+    let snapshot = c.h.forks.join(format!("{}.snapshot.md", new.0));
+    let text = std::fs::read_to_string(&snapshot).expect("snapshot file written");
+    assert!(
+        text.to_lowercase().contains("kiwi"),
+        "snapshot lacks the state: {text}"
+    );
     {
         xade_runtime::flush(&c.h.writer).await;
         let (row, msgs) = c.h.reader.load_session(new).await.unwrap();

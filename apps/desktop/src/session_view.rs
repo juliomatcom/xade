@@ -27,6 +27,8 @@ pub struct ViewOut {
     pub index_files: bool,
     /// A clipboard image to save and mention.
     pub pasted_image: Option<std::sync::Arc<egui::ColorImage>>,
+    /// Fork the session to this provider.
+    pub fork: Option<ProviderId>,
 }
 
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
@@ -80,6 +82,7 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
         .unwrap_or_default();
     let maximized = env.maximized == Some(vm.session.id);
     let badge = |ui: &mut egui::Ui| home::origin_badge(ui, vm.session.origin);
+    let mut fork = None;
     chrome::header(
         ui,
         chrome::HeaderState {
@@ -97,7 +100,7 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
                     .on_hover_text(vm.cwd.display().to_string());
             }
             // Before the truncating labels, which take all the width left.
-            fork_button(ui, vm, env);
+            fork = fork_button(ui, vm, env);
             if let Some(tex) = conversation::provider_symbol(ui.ctx(), vm.session.provider_id) {
                 ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)));
             }
@@ -110,11 +113,14 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
             ui.add(egui::Label::new(RichText::new(format!("• {title}")).strong()).truncate());
         },
     );
+    out.fork = fork;
 }
 
 /// Why the session cannot be forked now, or `None` when it can.
 pub(crate) fn fork_blocker(vm: &SessionVm, targets: &[ProviderId]) -> Option<&'static str> {
-    if vm.messages.is_empty() {
+    if vm.fork_preparing {
+        Some("Preparing fork\u{2026}")
+    } else if vm.messages.is_empty() {
         Some("Nothing to fork yet")
     } else if vm.status != SessionStatus::Idle {
         Some("Fork when the session is idle")
@@ -127,8 +133,16 @@ pub(crate) fn fork_blocker(vm: &SessionVm, targets: &[ProviderId]) -> Option<&'s
 
 /// Fork menu: one entry per available provider, enabled while the session is idle (or closed
 /// and dormant) and has history; a fork mid-turn would copy a half-finished turn.
-fn fork_button(ui: &mut egui::Ui, vm: &SessionVm, env: &Env) {
+fn fork_button(ui: &mut egui::Ui, vm: &SessionVm, env: &Env) -> Option<ProviderId> {
     let why_not = fork_blocker(vm, env.fork_targets);
+    let mut chosen = None;
+    if vm.fork_preparing {
+        ui.label(
+            RichText::new("Preparing fork\u{2026}")
+                .small()
+                .color(theme::text_muted()),
+        );
+    }
     let resp = ui
         .add_enabled_ui(why_not.is_none(), |ui| {
             ui.menu_button(icons::FORK, |ui| {
@@ -139,10 +153,8 @@ fn fork_button(ui: &mut egui::Ui, vm: &SessionVm, env: &Env) {
                         .find(|p| p.id() == *target)
                         .map_or("agent", |p| p.display_name());
                     if ui.button(format!("Fork to {name}")).clicked() {
-                        let _ = env.cmd_tx.send(ManagerCmd::Fork {
-                            session_id: vm.session.id,
-                            provider: *target,
-                        });
+                        chosen = Some(*target);
+                        ui.close();
                     }
                 }
             })
@@ -153,6 +165,7 @@ fn fork_button(ui: &mut egui::Ui, vm: &SessionVm, env: &Env) {
         Some(tip) => resp.on_disabled_hover_text(tip),
         None => resp.on_hover_text("Fork this session to a provider"),
     };
+    chosen
 }
 
 /// The fork warnings under the header: the session is open in another process too, or that

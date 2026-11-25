@@ -18,6 +18,8 @@ pub struct Harness {
     pub writer: WriterHandle,
     pub workspace_id: WorkspaceId,
     pub cwd: PathBuf,
+    /// Where the manager keeps fork hand-off files.
+    pub forks: PathBuf,
 }
 
 /// Temp store with one workspace at `cwd`, and a manager over `provider`.
@@ -43,7 +45,9 @@ pub async fn start_with(dir: &Path, providers: Vec<Arc<dyn AgentProvider>>) -> H
         .expect("upsert");
     xade_runtime::flush(&writer).await;
     let reader = StoreReader::open(&db).expect("reader");
-    let (tx, rx) = SessionManager::start(providers, writer.clone(), reader.clone());
+    let forks = dir.join("forks");
+    let (tx, rx) =
+        SessionManager::start_in(providers, writer.clone(), reader.clone(), forks.clone());
     Harness {
         tx,
         rx,
@@ -51,6 +55,7 @@ pub async fn start_with(dir: &Path, providers: Vec<Arc<dyn AgentProvider>>) -> H
         writer,
         workspace_id,
         cwd,
+        forks,
     }
 }
 

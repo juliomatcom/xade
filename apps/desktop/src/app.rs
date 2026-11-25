@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -65,6 +65,13 @@ pub enum UiMsg {
     Preflight(ProviderId, Result<(), ProviderError>),
     /// Provider of the latest Xade session, the default for a new one.
     LastProvider(Option<ProviderId>),
+    /// The fork prompt, read off the UI thread; `warning` says why the bundled one is used.
+    ForkPrompt {
+        session: SessionId,
+        provider: ProviderId,
+        prompt: String,
+        warning: Option<String>,
+    },
     /// Quota rows saved by earlier runs.
     SavedQuota(Vec<QuotaWindow>),
     /// An error from a background task.
@@ -189,6 +196,8 @@ pub struct SessionVm {
     pub subagent_msgs: Vec<Message>,
     /// The chat area shows `subagent_msgs` instead of the main transcript.
     pub view_subagents: bool,
+    /// A fork of this session is being prepared; its fork button stays off until it ends.
+    pub fork_preparing: bool,
 }
 
 pub struct DiffState {
@@ -350,6 +359,9 @@ impl App {
     ) -> Self {
         theme::apply(&cc.egui_ctx);
         let (config, config_error) = config::load(&config_path);
+        if let Some(dir) = config_path.parent().map(Path::to_path_buf) {
+            rt.spawn_blocking(move || config::ensure_default_fork_prompt(&dir));
+        }
         let (tx, events_rx) = std::sync::mpsc::channel();
         let bridge = Bridge {
             tx,
@@ -1906,6 +1918,26 @@ impl App {
             }
             UiMsg::LastProvider(p) => self.home.last_provider = p,
             UiMsg::Report(report) => self.report(report),
+            UiMsg::ForkPrompt {
+                session,
+                provider,
+                prompt,
+                warning,
+            } => {
+                if let Some(w) = warning {
+                    self.warn(w);
+                }
+                let sent = self.cmd_tx.send(ManagerCmd::Fork {
+                    session_id: session,
+                    provider,
+                    handoff_prompt: prompt,
+                });
+                if sent.is_err() {
+                    if let Some(vm) = self.sessions.get_mut(&session) {
+                        vm.fork_preparing = false;
+                    }
+                }
+            }
             UiMsg::SavedQuota(saved) => {
                 // A live report may have arrived first; it wins.
                 for q in saved {
@@ -1969,6 +2001,7 @@ impl App {
                 attach_note: None,
                 subagent_msgs: Vec::new(),
                 view_subagents: false,
+                fork_preparing: false,
             },
         );
         if self.background.remove(&id) {
@@ -1980,6 +2013,12 @@ impl App {
 
     fn on_app_event(&mut self, ev: AppEvent) {
         let AppEvent { session_id, kind } = ev;
+        match (session_id, &kind) {
+            (Some(id), AppEventKind::Error(_)) => self.set_fork_preparing(id, false),
+            (_, AppEventKind::ForkPreparing { from }) => self.set_fork_preparing(*from, true),
+            (_, AppEventKind::SessionForked { from, .. }) => self.set_fork_preparing(*from, false),
+            _ => {}
+        }
         match (session_id, kind) {
             (_, AppEventKind::Quota(q)) => {
                 self.quota.retain(|x| x.kind != q.kind);
@@ -2073,6 +2112,33 @@ impl App {
             (Some(id), AppEventKind::Provider(p)) => self.on_provider_event(id, p),
             _ => {}
         }
+    }
+
+    fn set_fork_preparing(&mut self, id: SessionId, on: bool) {
+        if let Some(vm) = self.sessions.get_mut(&id) {
+            vm.fork_preparing = on;
+        }
+    }
+
+    /// Forks a session to `provider`: reads the hand-off prompt off the UI thread, then sends
+    /// `ManagerCmd::Fork`. The session's fork button is off from now until the fork ends.
+    pub fn fork_session(&mut self, id: SessionId, provider: ProviderId) {
+        self.set_fork_preparing(id, true);
+        let path = self.config_watch.as_ref().and_then(|w| {
+            w.path()
+                .parent()
+                .map(|dir| dir.join(&self.config.fork_handoff_prompt))
+        });
+        let bridge = self.bridge.clone();
+        self.rt.spawn_blocking(move || {
+            let (prompt, warning) = config::read_fork_prompt(path.as_deref());
+            bridge.send(UiMsg::ForkPrompt {
+                session: id,
+                provider,
+                prompt,
+                warning,
+            });
+        });
     }
 
     /// Sessions mid-turn or waiting on an approval.
@@ -2837,6 +2903,77 @@ mod tests {
     }
 
     #[test]
+    fn a_fork_reads_the_prompt_file_off_thread_and_stays_off_until_it_ends() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        app.config_watch = Some(config::Watch::new(dir.join("settings.json")));
+        std::fs::create_dir_all(dir.join("prompts")).unwrap();
+        std::fs::write(dir.join("prompts/mine.md"), "my prompt").unwrap();
+        app.config.fork_handoff_prompt = PathBuf::from("prompts/mine.md");
+        let session = new_session_row();
+        let id = session.id;
+        app.insert_vm(session, Vec::new());
+
+        app.fork_session(id, ProviderId::Claude);
+        assert!(
+            app.sessions[&id].fork_preparing,
+            "off at once, before the read"
+        );
+        assert!(
+            cmds.try_recv().is_err(),
+            "nothing is sent before the file is read"
+        );
+        pump(&mut app);
+        match cmds.try_recv() {
+            Ok(ManagerCmd::Fork {
+                session_id,
+                provider,
+                handoff_prompt,
+            }) => assert_eq!(
+                (session_id, provider, handoff_prompt.as_str()),
+                (id, ProviderId::Claude, "my prompt")
+            ),
+            _ => panic!("no Fork sent"),
+        }
+        assert!(app.warning_text().is_none());
+
+        // The manager's events keep it off, then clear it, for the source session.
+        let event = |kind| AppEvent {
+            session_id: Some(id),
+            kind,
+        };
+        app.on_app_event(event(AppEventKind::ForkPreparing { from: id }));
+        assert!(app.sessions[&id].fork_preparing);
+        app.on_app_event(event(AppEventKind::Error("nope".into())));
+        assert!(!app.sessions[&id].fork_preparing);
+        app.on_app_event(event(AppEventKind::ForkPreparing { from: id }));
+        app.on_app_event(AppEvent {
+            session_id: Some(SessionId::new()),
+            kind: AppEventKind::SessionForked {
+                from: id,
+                session_id: SessionId::new(),
+            },
+        });
+        assert!(!app.sessions[&id].fork_preparing);
+
+        // A missing file sends the bundled prompt and warns.
+        while cmds.try_recv().is_ok() {}
+        app.config.fork_handoff_prompt = PathBuf::from("prompts/gone.md");
+        app.fork_session(id, ProviderId::Claude);
+        pump_until_fork(&mut app, &mut cmds);
+        match cmds.try_recv() {
+            Ok(ManagerCmd::Fork { handoff_prompt, .. }) => {
+                assert_eq!(handoff_prompt, config::BUNDLED_FORK_PROMPT)
+            }
+            _ => panic!("no Fork sent"),
+        }
+        assert!(app.warning_text().is_some_and(|w| w.contains("gone.md")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn dropped_files_become_mentions_without_a_pointer_position() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (mut app, dir) = test_app(&rt);
@@ -2918,6 +3055,16 @@ mod tests {
             "did not wait for the ack"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Folds in bridge messages until one sends a `Fork` (other tasks report on the same channel).
+    fn pump_until_fork(app: &mut App, cmds: &mut tokio::sync::mpsc::UnboundedReceiver<ManagerCmd>) {
+        for _ in 0..20 {
+            if !cmds.is_empty() {
+                return;
+            }
+            pump(app);
+        }
     }
 
     /// Waits for the next bridge message and folds it in.

@@ -7,4 +7,4 @@ Xade can run sessions on the Antigravity CLI (`agy`) next to Claude Code.
 - Auto OFF gates shell commands and URLs. `agy` does not ask before editing files in the workspace, so edits are not gated.
 - There is no quota meter and no cost for Antigravity sessions.
 - Antigravity history is not imported; only sessions started in Xade appear.
-- The Fork button in a session header continues the conversation on any available provider. The history is copied into a new session and sent once to the new provider with its first prompt.
+- The Fork button in a session header continues the conversation on any available provider. The history is copied into a new session, and the source provider first writes a short state summary of it (a few seconds to a minute, shown as "Preparing fork…"); the new provider gets that summary, or the full transcript if the summary failed, with its first prompt. Both are plain files in the system temp folder (`xade-forks`) and are removed when the session is deleted. The summary prompt is the `fork_handoff_prompt` setting.

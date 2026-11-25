@@ -261,6 +261,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ide_context = app.editors.ide_context();
     let mut closes = Vec::new();
     let mut reloads = Vec::new();
+    let mut forks = Vec::new();
     let mut attaches = Vec::new();
     let mut indexes = Vec::new();
     let mut images = Vec::new();
@@ -383,6 +384,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let (true, WindowKind::Session(id)) = (out.reload, *kind) {
             reloads.push(id);
         }
+        if let (Some(to), WindowKind::Session(id)) = (out.fork, *kind) {
+            forks.push((id, to));
+        }
         if let (true, WindowKind::Session(id)) = (out.attach, *kind) {
             attaches.push(id);
         }
@@ -457,6 +461,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     for id in reloads {
         app.reload_session(id);
+    }
+    for (id, to) in forks {
+        app.fork_session(id, to);
     }
     for path in opens {
         app.open_path(path);
@@ -670,6 +677,7 @@ mod tests {
             attach_note: None,
             subagent_msgs: Vec::new(),
             view_subagents: false,
+            fork_preparing: false,
         }
     }
 
@@ -915,5 +923,16 @@ mod tests {
         v.status = SessionStatus::Idle;
         v.messages.clear();
         assert!(session_view::fork_blocker(&v, &both).is_some());
+    }
+
+    #[test]
+    fn fork_stays_off_while_a_fork_is_preparing() {
+        let both = [ProviderId::Claude, ProviderId::Antigravity];
+        let mut v = vm();
+        v.status = SessionStatus::Idle;
+        assert_eq!(session_view::fork_blocker(&v, &both), None);
+        v.fork_preparing = true;
+        assert!(session_view::fork_blocker(&v, &both)
+            .is_some_and(|why| why.starts_with("Preparing fork")));
     }
 }
