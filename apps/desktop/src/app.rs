@@ -209,6 +209,10 @@ pub struct SessionVm {
     pub view_subagents: bool,
     /// A fork of this session is being prepared; its fork button stays off until it ends.
     pub fork_preparing: bool,
+    /// The header title is being edited; holds the text so far.
+    pub renaming: Option<String>,
+    /// The user just sent a message: the conversation jumps to the bottom and sticks there.
+    pub scroll_to_end: bool,
 }
 
 pub struct DiffState {
@@ -2079,6 +2083,8 @@ impl App {
                 subagent_msgs: Vec::new(),
                 view_subagents: false,
                 fork_preparing: false,
+                renaming: None,
+                scroll_to_end: false,
             },
         );
         if self.background.remove(&id) {
@@ -2208,6 +2214,26 @@ impl App {
             (Some(id), AppEventKind::Provider(p)) => self.on_provider_event(id, p),
             _ => {}
         }
+    }
+
+    /// Renames a session: the title shows at once, the store and the runtime follow.
+    pub fn rename_session(&mut self, id: SessionId, title: String) {
+        let title = title.trim().to_string();
+        let Some(vm) = self.sessions.get_mut(&id) else {
+            return;
+        };
+        if title.is_empty() || vm.session.title == title {
+            return;
+        }
+        vm.session.title.clone_from(&title);
+        // The card is patched in place: a re-read could land before the store write does.
+        for card in self.home.cards.iter_mut().filter(|c| c.id == id) {
+            card.title.clone_from(&title);
+        }
+        let _ = self.cmd_tx.send(ManagerCmd::Rename {
+            session_id: id,
+            title,
+        });
     }
 
     fn set_fork_preparing(&mut self, id: SessionId, on: bool) {
@@ -3075,6 +3101,33 @@ mod tests {
         assert!(app.running.is_empty() && !app.running_import_due);
         app.on_app_event(throwaway(false));
         assert!(!app.live_provider_ids().contains("psid-1"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn renaming_updates_the_window_and_card_and_sends_one_command() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let mut session = new_session_row();
+        session.title = "old".into();
+        let id = session.id;
+        app.insert_vm(session, Vec::new());
+
+        app.rename_session(id, "  new name ".into());
+        assert_eq!(app.sessions[&id].session.title, "new name");
+        match cmds.try_recv() {
+            Ok(ManagerCmd::Rename { session_id, title }) => {
+                assert_eq!((session_id, title.as_str()), (id, "new name"));
+            }
+            _ => panic!("expected Rename"),
+        }
+        // Unchanged and empty names send nothing.
+        app.rename_session(id, "new name".into());
+        app.rename_session(id, "   ".into());
+        assert!(cmds.try_recv().is_err());
+        assert_eq!(app.sessions[&id].session.title, "new name");
         let _ = std::fs::remove_dir_all(dir);
     }
 

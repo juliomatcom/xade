@@ -28,6 +28,7 @@ pub(crate) enum ActorCmd {
     SetAutoMode(bool),
     SetModel(String),
     SetEffort(Effort),
+    Rename(String),
     Close,
 }
 
@@ -252,6 +253,15 @@ impl Actor {
                 self.write(op);
                 self.pending_effort = Some(e);
                 return self.apply_pending().await;
+            }
+            ActorCmd::Rename(title) => {
+                // Also keeps the first send from deriving a title over the chosen one.
+                self.session.title.clone_from(&title);
+                let mut op = self.update();
+                if let WriteOp::UpdateSession { title: t, .. } = &mut op {
+                    *t = Some(title);
+                }
+                self.write(op);
             }
             ActorCmd::Close => {
                 self.shutdown_child().await;

@@ -616,7 +616,7 @@ fn app_menu(app: &mut App, ui: &mut egui::Ui) {
     .on_hover_text("Menu");
 }
 
-fn origin_label(o: SessionOrigin) -> &'static str {
+pub(crate) fn origin_label(o: SessionOrigin) -> &'static str {
     match o {
         SessionOrigin::Xade => "Xade",
         SessionOrigin::ClaudeCode => "Claude Code",
@@ -660,12 +660,16 @@ fn heading(ui: &mut egui::Ui, text: &str) {
 }
 
 pub fn grid(app: &mut App, ui: &mut egui::Ui) {
-    // One banner per installed provider that failed its preflight, each with its own Retry.
-    let failing: Vec<_> = app
-        .visible_providers()
-        .into_iter()
-        .filter_map(|id| Some((id, app.unavailable_text(id)?)))
-        .collect();
+    // Only when no provider is usable: using a single provider is valid, and the Status modal
+    // lists the rest. One banner per installed provider that failed, each with its own Retry.
+    let failing: Vec<_> = match app.any_available() {
+        true => vec![],
+        false => app
+            .visible_providers()
+            .into_iter()
+            .filter_map(|id| Some((id, app.unavailable_text(id)?)))
+            .collect(),
+    };
     for (id, text) in failing {
         egui::Frame::new()
             .fill(theme::bg_raised())
@@ -1623,7 +1627,7 @@ mod tests {
     }
 
     #[test]
-    fn the_banner_lists_each_installed_failing_provider_and_hides_a_missing_one() {
+    fn the_banner_shows_only_when_no_provider_is_usable_and_hides_a_missing_one() {
         use xade_core::{ProviderError, ProviderId};
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
@@ -1636,13 +1640,12 @@ mod tests {
                 .collect()
         };
         assert!(banners(&mut app, &ctx).is_empty());
+        // One provider signed out is fine while another works: no banner on Home.
         app.home
             .preflight
             .insert(ProviderId::Antigravity, Err(ProviderError::NotLoggedIn));
-        assert_eq!(
-            banners(&mut app, &ctx),
-            vec!["Antigravity is not available: provider CLI is not logged in"]
-        );
+        assert!(banners(&mut app, &ctx).is_empty());
+        // None usable: each installed provider gets its banner.
         app.home
             .preflight
             .insert(ProviderId::Claude, Err(ProviderError::NotLoggedIn));

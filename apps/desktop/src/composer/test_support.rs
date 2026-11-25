@@ -56,6 +56,8 @@ pub(super) fn vm(input: String) -> SessionVm {
         subagent_msgs: Vec::new(),
         view_subagents: false,
         fork_preparing: false,
+        renaming: None,
+        scroll_to_end: false,
     }
 }
 

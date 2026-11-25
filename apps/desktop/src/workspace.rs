@@ -264,6 +264,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut closes = Vec::new();
     let mut reloads = Vec::new();
     let mut forks = Vec::new();
+    let mut renames = Vec::new();
     let mut attaches = Vec::new();
     let mut indexes = Vec::new();
     let mut images = Vec::new();
@@ -390,6 +391,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let (Some(to), WindowKind::Session(id)) = (out.fork, *kind) {
             forks.push((id, to));
         }
+        if let (Some(title), WindowKind::Session(id)) = (out.rename.take(), *kind) {
+            renames.push((id, title));
+        }
         if let (true, WindowKind::Session(id)) = (out.attach, *kind) {
             attaches.push(id);
         }
@@ -467,6 +471,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     for (id, to) in forks {
         app.fork_session(id, to);
+    }
+    for (id, title) in renames {
+        app.rename_session(id, title);
     }
     for path in opens {
         app.open_path(path);
@@ -683,6 +690,8 @@ mod tests {
             subagent_msgs: Vec::new(),
             view_subagents: false,
             fork_preparing: false,
+            renaming: None,
+            scroll_to_end: false,
         }
     }
 
@@ -944,11 +953,12 @@ mod tests {
     }
 
     #[test]
-    fn focused_xade_session_badge_uses_white_text() {
+    fn header_badges_share_one_muted_color_and_sit_right_of_the_title() {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-        let badge_color = |origin: xade_core::SessionOrigin, focused: bool, label: &str| {
+        // The badge's color and left edge, and the title's right edge, in one header.
+        let probe = |origin: xade_core::SessionOrigin, focused: bool, label: &str| {
             let mut v = vm();
             v.session.origin = origin;
             v.collapsed = true;
@@ -973,30 +983,262 @@ mod tests {
             let out = ctx.run_ui(input, |ui| {
                 session_view::show(ui, &mut v, &env);
             });
-            fn find(s: &egui::Shape, label: &str) -> Option<egui::Color32> {
+            // (color, rect) of the text shape whose text is `needle`.
+            fn find(s: &egui::Shape, needle: &str) -> Option<(egui::Color32, Rect)> {
                 match s {
-                    egui::Shape::Text(t) if t.galley.text() == label => {
-                        t.galley.job.sections.first().map(|sec| sec.format.color)
+                    egui::Shape::Text(t) if t.galley.text().contains(needle) => {
+                        let color = t.galley.job.sections.first()?.format.color;
+                        Some((color, Rect::from_min_size(t.pos, t.galley.size())))
                     }
-                    egui::Shape::Vec(v) => v.iter().find_map(|c| find(c, label)),
+                    egui::Shape::Vec(v) => v.iter().find_map(|c| find(c, needle)),
                     _ => None,
                 }
             }
-            let color = out.shapes.iter().find_map(|c| find(&c.shape, label));
+            let badge = out.shapes.iter().find_map(|c| find(&c.shape, label));
+            let title = out
+                .shapes
+                .iter()
+                .find_map(|c| find(&c.shape, "Fix the thing"));
             out.drop_without_applying_deltas();
-            color
+            (badge.expect("badge drawn"), title.expect("title drawn"))
         };
-        assert_eq!(
-            badge_color(xade_core::SessionOrigin::Xade, true, "Xade"),
-            Some(theme::text())
+        for (origin, label) in [
+            (xade_core::SessionOrigin::Xade, "Xade"),
+            (xade_core::SessionOrigin::ClaudeCode, "Claude Code"),
+        ] {
+            for focused in [true, false] {
+                let ((color, badge), (_, title)) = probe(origin, focused, label);
+                assert_eq!(color, theme::text_muted(), "{label} focused={focused}");
+                assert!(
+                    badge.left() > title.right(),
+                    "{label}: badge beside the buttons"
+                );
+                // Right beside the window buttons, not mid-strip.
+                assert!(badge.right() > 400.0, "{label} badge at {badge:?}");
+            }
+        }
+    }
+
+    /// Drives the collapsed header of `v` over frames: click the title, type, press a key.
+    fn rename_run(
+        origin: xade_core::SessionOrigin,
+        steps: impl Fn(egui::Pos2) -> Vec<Vec<egui::Event>>,
+    ) -> (SessionVm, Vec<Option<String>>) {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut v = vm();
+        v.session.origin = origin;
+        v.collapsed = true;
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            fork_targets: &[],
+            vscode: None,
+            maximized: None,
+            send_mode: SendMode::Queue,
+            break_all: true,
+            ide_context: None,
+            focused: true,
+        };
+        let mut renames = Vec::new();
+        let mut frame = |v: &mut SessionVm, evs: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 200.0),
+                )),
+                events: evs,
+                ..Default::default()
+            };
+            let mut found = None;
+            let out = ctx.run_ui(input, |ui| {
+                renames.push(session_view::show(ui, v, &env).rename);
+            });
+            fn find(s: &egui::Shape, needle: &str, at: &mut Option<egui::Pos2>) {
+                match s {
+                    egui::Shape::Text(t) if t.galley.text().contains(needle) => {
+                        *at = Some(egui::Rect::from_min_size(t.pos, t.galley.size()).center());
+                    }
+                    egui::Shape::Vec(v) => v.iter().for_each(|c| find(c, needle, at)),
+                    _ => {}
+                }
+            }
+            out.shapes
+                .iter()
+                .for_each(|c| find(&c.shape, "Fix the thing", &mut found));
+            out.drop_without_applying_deltas();
+            found
+        };
+        // Two frames so the layout settles, then find the title.
+        frame(&mut v, vec![]);
+        let at = frame(&mut v, vec![]).expect("title drawn");
+        for evs in steps(at) {
+            frame(&mut v, evs);
+            // A settling frame after each step, like real input arriving between frames.
+            frame(&mut v, vec![]);
+        }
+        (v, renames)
+    }
+
+    fn click(at: egui::Pos2) -> Vec<egui::Event> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        vec![egui::Event::PointerMoved(at), button(true), button(false)]
+    }
+
+    #[test]
+    fn clicking_an_xade_session_title_starts_editing_it() {
+        let (v, _) = rename_run(xade_core::SessionOrigin::Xade, |at| vec![click(at)]);
+        assert_eq!(v.renaming.as_deref(), Some("Fix the thing"));
+    }
+
+    #[test]
+    fn an_imported_session_title_stays_read_only() {
+        let (v, renames) = rename_run(xade_core::SessionOrigin::ClaudeCode, |at| vec![click(at)]);
+        assert_eq!(v.renaming, None);
+        assert!(renames.iter().all(Option::is_none));
+    }
+
+    fn key(k: egui::Key) -> Vec<egui::Event> {
+        vec![egui::Event::Key {
+            key: k,
+            physical_key: Some(k),
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }]
+    }
+
+    fn typed(text: &str) -> Vec<egui::Event> {
+        vec![egui::Event::Text(text.into())]
+    }
+
+    #[test]
+    fn enter_commits_the_typed_title_replacing_the_selected_old_one() {
+        let (v, renames) = rename_run(xade_core::SessionOrigin::Xade, |at| {
+            vec![click(at), typed("Better name"), key(egui::Key::Enter)]
+        });
+        assert_eq!(v.renaming, None);
+        let got: Vec<_> = renames.into_iter().flatten().collect();
+        assert_eq!(got, vec!["Better name".to_string()]);
+    }
+
+    #[test]
+    fn escape_cancels_the_edit() {
+        let (v, renames) = rename_run(xade_core::SessionOrigin::Xade, |at| {
+            vec![click(at), typed("Nope"), key(egui::Key::Escape)]
+        });
+        assert_eq!(v.renaming, None);
+        assert!(renames.iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn clicking_away_commits_the_edit() {
+        let (v, renames) = rename_run(xade_core::SessionOrigin::Xade, |at| {
+            vec![click(at), typed("Away"), click(egui::pos2(300.0, 150.0))]
+        });
+        assert_eq!(v.renaming, None);
+        let got: Vec<_> = renames.into_iter().flatten().collect();
+        assert_eq!(got, vec!["Away".to_string()]);
+    }
+
+    /// Whether a drag and double clicks on a session header title would open the Copy / Quote
+    /// popup (a settled selection outside a marked text box).
+    fn header_selection_settles(origin: xade_core::SessionOrigin) -> bool {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut v = vm();
+        v.session.origin = origin;
+        v.collapsed = true;
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            fork_targets: &[],
+            vscode: None,
+            maximized: None,
+            send_mode: SendMode::Queue,
+            break_all: true,
+            ide_context: None,
+            focused: true,
+        };
+        let mut settled = false;
+        let mut at = None;
+        let mut frame =
+            |v: &mut SessionVm, events: Vec<egui::Event>, at: &mut Option<egui::Pos2>| {
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600.0, 200.0),
+                    )),
+                    events,
+                    ..Default::default()
+                };
+                let mut marked = false;
+                let out = ctx.run_ui(input, |ui| {
+                    session_view::show(ui, v, &env);
+                    marked = crate::widgets::selection_menu::in_text_box(ui.ctx());
+                });
+                // A settled selection the app would turn into the popup: not from a text box.
+                settled |= !marked
+                    && out
+                        .platform_output
+                        .commands
+                        .iter()
+                        .any(|c| matches!(c, egui::OutputCommand::TextSelectionSettled(_)));
+                fn find(s: &egui::Shape, at: &mut Option<egui::Pos2>) {
+                    match s {
+                        egui::Shape::Text(t) if t.galley.text().contains("Fix the thing") => {
+                            *at = Some(t.pos);
+                        }
+                        egui::Shape::Vec(v) => v.iter().for_each(|c| find(c, at)),
+                        _ => {}
+                    }
+                }
+                out.shapes.iter().for_each(|c| find(&c.shape, at));
+                out.drop_without_applying_deltas();
+            };
+        frame(&mut v, vec![], &mut at);
+        frame(&mut v, vec![], &mut at);
+        let start = at.expect("title drawn") + egui::vec2(4.0, 6.0);
+        let end = start + egui::vec2(60.0, 0.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        // A drag across the title, then a double click on it.
+        frame(
+            &mut v,
+            vec![egui::Event::PointerMoved(start), button(start, true)],
+            &mut at,
         );
-        assert_eq!(
-            badge_color(xade_core::SessionOrigin::Xade, false, "Xade"),
-            Some(theme::accent())
-        );
-        assert_eq!(
-            badge_color(xade_core::SessionOrigin::ClaudeCode, true, "Claude Code"),
-            Some(theme::claude())
-        );
+        frame(&mut v, vec![egui::Event::PointerMoved(end)], &mut at);
+        frame(&mut v, vec![button(end, false)], &mut at);
+        for _ in 0..2 {
+            frame(
+                &mut v,
+                vec![button(start, true), button(start, false)],
+                &mut at,
+            );
+        }
+        frame(&mut v, vec![], &mut at);
+        settled
+    }
+
+    #[test]
+    fn selecting_the_window_top_bar_text_never_offers_the_selection_menu() {
+        for origin in [
+            xade_core::SessionOrigin::Xade,
+            xade_core::SessionOrigin::ClaudeCode,
+        ] {
+            assert!(!header_selection_settles(origin), "{origin:?}");
+        }
     }
 }

@@ -29,6 +29,8 @@ pub struct ViewOut {
     pub pasted_image: Option<std::sync::Arc<egui::ColorImage>>,
     /// Fork the session to this provider.
     pub fork: Option<ProviderId>,
+    /// The title the user committed in the header.
+    pub rename: Option<String>,
 }
 
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
@@ -61,7 +63,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
     out
 }
 
-fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
+fn header(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env, out: &mut ViewOut) {
     let found = env
         .providers
         .iter()
@@ -70,10 +72,9 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
     let model = found
         .and_then(|p| p.models().into_iter().find(|m| m.id == vm.session.model_id))
         .map_or_else(|| vm.session.model_id.clone(), |m| m.label);
-    let title = if vm.session.title.is_empty() {
-        "New session"
-    } else {
-        vm.session.title.as_str()
+    let title = match vm.session.title.is_empty() {
+        true => "New session".to_string(),
+        false => vm.session.title.clone(),
     };
     let cwd = vm
         .cwd
@@ -81,14 +82,10 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let maximized = env.maximized == Some(vm.session.id);
-    let badge = |ui: &mut egui::Ui| {
-        if env.focused && vm.session.origin == SessionOrigin::Xade {
-            chrome::badge(ui, "Xade", theme::text());
-        } else {
-            home::origin_badge(ui, vm.session.origin);
-        }
-    };
+    let origin = vm.session.origin;
+    let badge = |ui: &mut egui::Ui| chrome::header_badge(ui, home::origin_label(origin));
     let mut fork = None;
+    let mut renamed = None;
     chrome::header(
         ui,
         chrome::HeaderState {
@@ -98,7 +95,7 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
         },
         "Close session",
         out,
-        Some(&badge),
+        &badge,
         |ui| {
             status_dot(ui, &vm.status);
             if !cwd.is_empty() {
@@ -116,10 +113,57 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
                     .sense(egui::Sense::hover()),
             )
             .on_hover_text(provider);
-            ui.add(egui::Label::new(RichText::new(format!("• {title}")).strong()).truncate());
+            renamed = title_label(ui, vm, &title);
         },
     );
     out.fork = fork;
+    out.rename = renamed;
+}
+
+/// The header title. In Xade-origin sessions a click turns it into a text field: Enter or
+/// leaving the field commits (returned), Esc cancels. Imported sessions are read-only, since
+/// the next import would overwrite the name.
+fn title_label(ui: &mut egui::Ui, vm: &mut SessionVm, title: &str) -> Option<String> {
+    let id = egui::Id::unique(("rename_title", vm.session.id));
+    if let Some(buf) = vm.renaming.as_mut() {
+        // Its selections are not chat text: no Copy / Quote popup.
+        crate::widgets::selection_menu::mark_text_box(ui.ctx());
+        ui.label(RichText::new("•").strong());
+        let edit = ui.add(
+            egui::TextEdit::singleline(buf)
+                .id(id)
+                .desired_width(f32::INFINITY),
+        );
+        if edit.lost_focus() {
+            let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            let text = vm.renaming.take().unwrap_or_default();
+            return (!cancelled).then_some(text);
+        }
+        return None;
+    }
+    let label = egui::Label::new(RichText::new(format!("• {title}")).strong()).truncate();
+    if vm.session.origin != SessionOrigin::Xade {
+        ui.add(label);
+        return None;
+    }
+    let resp = ui
+        .add(label.sense(egui::Sense::click()))
+        .on_hover_cursor(egui::CursorIcon::Text)
+        .on_hover_text("Click to rename");
+    if resp.clicked() {
+        let len = vm.session.title.chars().count();
+        vm.renaming = Some(vm.session.title.clone());
+        let mut state = egui::text_edit::TextEditState::default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(len),
+            )));
+        state.store(ui.ctx(), id);
+        ui.memory_mut(|m| m.request_focus(id));
+    }
+    None
 }
 
 /// Why the session cannot be forked now, or `None` when it can.

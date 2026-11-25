@@ -37,6 +37,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
         status,
         pending_permission,
         error,
+        scroll_to_end,
         ..
     } = &mut *vm;
     let results: HashMap<&str, &Message> = messages
@@ -107,17 +108,19 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                                     tool_card::group(ui, md_cache, &calls);
                                 }
                                 Role::User => {
-                                    open = open
-                                        .take()
-                                        .or(user_bubble(ui, md_cache, path_links, cwd, m));
+                                    let clicked = with_time(ui, m, |ui| {
+                                        user_bubble(ui, md_cache, path_links, cwd, m)
+                                    });
+                                    open = open.take().or(clicked);
                                 }
                                 Role::Assistant => {
                                     let id = m.id;
                                     let text = &m.content_text;
-                                    let clicked =
+                                    let clicked = with_time(ui, m, |ui| {
                                         assistant(ui, avatar_provider(m, provider), |ui| {
                                             path_links.markdown(ui, md_cache, cwd, id, text)
-                                        });
+                                        })
+                                    });
                                     open = open.take().or(clicked);
                                 }
                                 Role::ToolCall => {
@@ -253,6 +256,10 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                         ui.label(RichText::new(&*e).color(theme::danger()));
                     }
                 });
+            // After a send: land on the end, which also re-arms `stick_to_bottom`.
+            if std::mem::take(scroll_to_end) {
+                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+            }
         });
     if let Some(id) = review {
         vm.open_diff(&id);
@@ -306,6 +313,33 @@ fn row(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) -> egui::Rect {
     #[cfg(test)]
     probe::finish(ui, painted, rect);
     rect
+}
+
+/// The clock time and the full date of a message, in the machine's timezone. `tz` is a
+/// parameter so tests do not depend on the machine's.
+fn time_labels<Tz: chrono::TimeZone>(at: time::OffsetDateTime, tz: &Tz) -> Option<(String, String)>
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let local = chrono::DateTime::from_timestamp(at.unix_timestamp(), 0)?.with_timezone(tz);
+    Some((
+        local.format("%H:%M").to_string(),
+        local.format("%a %-d %b %Y, %H:%M:%S").to_string(),
+    ))
+}
+
+/// A message's time, small and right-aligned on its own line above the message; hovering it
+/// shows the date as well. Then `body` draws the message in the full width.
+fn with_time<R>(ui: &mut egui::Ui, m: &Message, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    if let Some((clock, full)) = time_labels(m.created_at, &chrono::Local) {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            ui.add(egui::Label::new(
+                RichText::new(clock).small().color(theme::text_muted()),
+            ))
+            .on_hover_text(full);
+        });
+    }
+    body(ui)
 }
 
 /// User messages longer than this many lines show a head and a "Show all" toggle.
@@ -602,6 +636,8 @@ mod tests {
             subagent_msgs: Vec::new(),
             view_subagents: false,
             fork_preparing: false,
+            renaming: None,
+            scroll_to_end: false,
         }
     }
 
@@ -889,5 +925,168 @@ mod tests {
             .iter()
             .filter(|r| matches!(r, crate::diff::Row::Sep(_)));
         assert_eq!(seps.count(), 2);
+    }
+
+    /// Renders the chat in a 400x300 area for a few frames and returns the top of the text
+    /// containing `needle` (`None` when culled), so a test sees what is on screen.
+    fn y_of(
+        ctx: &egui::Context,
+        vm: &mut SessionVm,
+        events: Vec<egui::Event>,
+        needle: &str,
+    ) -> Option<f32> {
+        fn find(s: &egui::Shape, needle: &str) -> Option<f32> {
+            match s {
+                egui::Shape::Text(t) if t.galley.text().contains(needle) => Some(t.pos.y),
+                egui::Shape::Vec(v) => v.iter().find_map(|c| find(c, needle)),
+                _ => None,
+            }
+        }
+        let mut found = None;
+        // Frames settle: the scroll offset and the sticky state take one or two to apply.
+        for i in 0..4 {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                events: if i == 0 { events.clone() } else { vec![] },
+                // Time must pass for egui's scroll animation to run.
+                time: Some(ctx.cumulative_pass_nr() as f64 * 0.5),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                show(ui, vm);
+            });
+            found = out.shapes.iter().find_map(|c| find(&c.shape, needle));
+            out.drop_without_applying_deltas();
+        }
+        found
+    }
+
+    #[test]
+    fn sending_jumps_to_the_bottom_and_keeps_following_new_messages() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let rows: Vec<_> = (0..40)
+            .map(|i| msg(Role::Assistant, &format!("filler row {i}"), None, None))
+            .collect();
+        let mut v = vm(rows);
+        let visible = |y: Option<f32>| y.is_some_and(|y| (0.0..300.0).contains(&y));
+        let push =
+            |v: &mut SessionVm, text: &str| v.messages.push(msg(Role::User, text, None, None));
+
+        push(&mut v, "zzlast");
+        assert!(
+            visible(y_of(&ctx, &mut v, vec![], "zzlast")),
+            "starts at the end"
+        );
+
+        // The reader scrolls up, which turns the automatic scroll off.
+        let wheel = vec![
+            egui::Event::PointerMoved(egui::pos2(200.0, 150.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                source: egui::MouseWheelSource::Wheel,
+                delta: egui::vec2(0.0, 5000.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        assert!(
+            !visible(y_of(&ctx, &mut v, wheel, "zzlast")),
+            "scrolled away"
+        );
+        push(&mut v, "zzcontrol");
+        assert!(
+            !visible(y_of(&ctx, &mut v, vec![], "zzcontrol")),
+            "without a send, a new message does not pull the view down"
+        );
+
+        // A send lands on the newest message...
+        push(&mut v, "zzsent");
+        v.scroll_to_end = true;
+        assert!(
+            visible(y_of(&ctx, &mut v, vec![], "zzsent")),
+            "jumps to the bottom"
+        );
+        assert!(!v.scroll_to_end, "the request is consumed");
+        // ...and the automatic scroll is back on: the reply is followed.
+        push(&mut v, "zzreply");
+        assert!(
+            visible(y_of(&ctx, &mut v, vec![], "zzreply")),
+            "follows again"
+        );
+    }
+
+    #[test]
+    fn a_message_time_is_clock_only_and_its_hover_adds_the_date() {
+        let at = OffsetDateTime::from_unix_timestamp(1_795_703_528).unwrap(); // Thu 26 Nov 2026, 14:32:08 UTC
+        let utc = time_labels(at, &chrono::Utc).unwrap();
+        assert_eq!(
+            utc,
+            ("14:32".to_string(), "Thu 26 Nov 2026, 14:32:08".to_string())
+        );
+        let plus2 = chrono::FixedOffset::east_opt(2 * 3600).unwrap();
+        let (clock, full) = time_labels(at, &plus2).unwrap();
+        assert_eq!(
+            (clock.as_str(), full.as_str()),
+            ("16:32", "Thu 26 Nov 2026, 16:32:08")
+        );
+    }
+
+    #[test]
+    fn user_and_assistant_messages_show_their_time_on_a_line_above_at_the_right() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let rows = vec![
+            msg(Role::User, "zzuser", None, None),
+            msg(Role::Assistant, "zzassistant", None, None),
+        ];
+        // Both rows are built within the same minute unless the clock rolls over mid-test.
+        let (clock, _) = time_labels(rows[0].created_at, &chrono::Local).unwrap();
+        assert_eq!(clock.len(), 5, "24-hour HH:MM: {clock}");
+        let mut v = vm(rows);
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(500.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        // (text, rect) of every text shape.
+        fn texts(s: &egui::Shape, out: &mut Vec<(String, egui::Rect)>) {
+            match s {
+                egui::Shape::Text(t) => out.push((
+                    t.galley.text().to_string(),
+                    egui::Rect::from_min_size(t.pos, t.galley.size()),
+                )),
+                egui::Shape::Vec(v) => v.iter().for_each(|c| texts(c, out)),
+                _ => {}
+            }
+        }
+        let mut shapes = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |ui| {
+                show(ui, &mut v);
+            });
+            shapes.clear();
+            out.shapes.iter().for_each(|c| texts(&c.shape, &mut shapes));
+            out.drop_without_applying_deltas();
+        }
+        let mut times: Vec<_> = shapes.iter().filter(|(t, _)| *t == clock).collect();
+        times.sort_by(|a, b| a.1.top().total_cmp(&b.1.top()));
+        assert_eq!(times.len(), 2, "one time per message: {clock}");
+        let body = |needle: &str| shapes.iter().find(|(t, _)| t.contains(needle)).unwrap().1;
+        for ((_, time), needle) in times.iter().zip(["zzuser", "zzassistant"]) {
+            let text = body(needle);
+            assert!(time.right() > 480.0, "at the right edge: {time:?}");
+            assert!(
+                time.bottom() <= text.top(),
+                "above its message: {time:?} / {text:?}"
+            );
+        }
+        // Each line belongs to its own message: the second time is below the first message.
+        assert!(times[1].1.top() > body("zzuser").bottom());
     }
 }

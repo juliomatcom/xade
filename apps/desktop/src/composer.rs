@@ -209,6 +209,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
     mention_popup_show(ui, vm, input_id, input_box.response.rect, popup);
     if let Some(other) = send {
         send_anim::trigger(ui.ctx(), id);
+        vm.scroll_to_end = true;
         let text = std::mem::take(&mut vm.input);
         let mode = if other {
             env.send_mode.other()

@@ -64,6 +64,12 @@ pub enum ManagerCmd {
         session_id: SessionId,
         effort: Effort,
     },
+    /// Sets the title (live or dormant); an empty one is ignored. Imports overwrite the titles
+    /// of imported sessions, so the UI offers this for Xade-origin sessions only.
+    Rename {
+        session_id: SessionId,
+        title: String,
+    },
     Close {
         session_id: SessionId,
     },

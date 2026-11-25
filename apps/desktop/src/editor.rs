@@ -295,9 +295,8 @@ pub fn show(
         },
         "Close file",
         &mut out.view,
-        None,
+        &chrome::file_badge,
         |ui| {
-            chrome::file_badge(ui);
             ui.add(egui::Label::new(RichText::new(label).strong()).truncate())
                 .on_hover_text(hover);
             if markdown_file && ui.selectable_label(vm.preview, "Preview").clicked() {

@@ -505,6 +505,49 @@ async fn close(h: &mut Harness, id: SessionId) {
     h.until_status(5, SessionStatus::Closed).await;
 }
 
+async fn title_of(h: &Harness, id: SessionId) -> String {
+    xade_runtime::flush(&h.writer).await;
+    h.reader.load_session(id).await.unwrap().0.title
+}
+
+fn rename(h: &Harness, id: SessionId, title: &str) {
+    h.tx.send(ManagerCmd::Rename {
+        session_id: id,
+        title: title.into(),
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_rename_sticks_live_and_dormant_and_the_first_send_does_not_override_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _claude, _agy) = both(dir.path()).await;
+    let id = create(&mut h, ProviderId::Claude).await;
+
+    // Live and still untitled: the first send must not derive a title over the chosen one.
+    rename(&h, id, "  My name  ");
+    send(&mut h, id, "fix the bug").await;
+    assert_eq!(title_of(&h, id).await, "My name");
+
+    // Empty names are ignored.
+    rename(&h, id, "   ");
+    send(&mut h, id, "again").await;
+    assert_eq!(title_of(&h, id).await, "My name");
+
+    // Dormant: stored, and kept after waking. The manager handles the command asynchronously,
+    // so wait for the title to land instead of reading it once.
+    close(&mut h, id).await;
+    open(&mut h, id).await;
+    rename(&h, id, "Dormant name");
+    let start = std::time::Instant::now();
+    while title_of(&h, id).await != "Dormant name" {
+        assert!(start.elapsed().as_secs() < 5, "the rename never landed");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    send(&mut h, id, "wake up").await;
+    assert_eq!(title_of(&h, id).await, "Dormant name");
+}
+
 const PROMPT: &str = "Write the handoff.";
 
 /// The fork's hand-off files.

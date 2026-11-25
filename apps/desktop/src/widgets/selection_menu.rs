@@ -43,7 +43,7 @@ pub fn mark_text_box(ctx: &egui::Context) {
     ctx.data_mut(|d| d.insert_temp(Id::unique(TEXT_BOX), frame));
 }
 
-fn in_text_box(ctx: &egui::Context) -> bool {
+pub(crate) fn in_text_box(ctx: &egui::Context) -> bool {
     let frame = ctx.cumulative_frame_nr();
     ctx.data(|d| d.get_temp::<u64>(Id::unique(TEXT_BOX))) == Some(frame)
 }

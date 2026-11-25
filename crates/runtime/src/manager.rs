@@ -200,6 +200,12 @@ impl SessionManager {
                 ManagerCmd::SetEffort { session_id, effort } => {
                     self.forward(session_id, ActorCmd::SetEffort(effort));
                 }
+                ManagerCmd::Rename { session_id, title } => {
+                    let title = title.trim().to_string();
+                    if !title.is_empty() {
+                        self.forward(session_id, ActorCmd::Rename(title));
+                    }
+                }
                 ManagerCmd::Close { session_id } => {
                     if self.dormant.remove(&session_id).is_some() {
                         self.emit(
@@ -247,7 +253,10 @@ impl SessionManager {
                         return;
                     }
                 }
-                ActorCmd::SetAutoMode(_) | ActorCmd::SetModel(_) | ActorCmd::SetEffort(_) => {
+                ActorCmd::SetAutoMode(_)
+                | ActorCmd::SetModel(_)
+                | ActorCmd::SetEffort(_)
+                | ActorCmd::Rename(_) => {
                     return self.configure_dormant(id, cmd);
                 }
                 // Nothing runs, so there is nothing to interrupt or approve.
@@ -300,7 +309,7 @@ impl SessionManager {
         }
     }
 
-    /// Stores a model, effort or auto-mode change for the first spawn.
+    /// Stores a model, effort, auto-mode or title change for the first spawn.
     fn configure_dormant(&mut self, id: SessionId, cmd: ActorCmd) {
         let Some(d) = self.dormant.get_mut(&id) else {
             return;
@@ -316,6 +325,7 @@ impl SessionManager {
             usage: None,
         };
         if let WriteOp::UpdateSession {
+            title,
             model_id,
             effort,
             auto_mode,
@@ -334,6 +344,10 @@ impl SessionManager {
                 ActorCmd::SetEffort(e) => {
                     d.session.effort = e;
                     *effort = Some(e);
+                }
+                ActorCmd::Rename(t) => {
+                    d.session.title.clone_from(&t);
+                    *title = Some(t);
                 }
                 _ => return,
             }

@@ -6,9 +6,6 @@ use crate::icons;
 use crate::session_view::{ViewOut, HEADER_HEIGHT};
 use crate::theme;
 
-/// Space kept free around a centered badge: half its widest form plus a gap.
-const CENTER_CLEAR: f32 = 50.0;
-
 /// What the header shows of its window.
 pub struct HeaderState {
     pub maximized: bool,
@@ -16,14 +13,14 @@ pub struct HeaderState {
     pub focused: bool,
 }
 
-/// The header: maximize / collapse / close on the right, `left` fills the rest; `center`, when
-/// given, is drawn in the middle of the strip and `left` stops short of it.
+/// The header: maximize / collapse / close on the right, then `badge` (the window's kind) right
+/// beside them, and `left` fills the rest.
 pub fn header(
     ui: &mut egui::Ui,
     state: HeaderState,
     close_tip: &str,
     out: &mut ViewOut,
-    center: Option<&dyn Fn(&mut egui::Ui)>,
+    badge: &dyn Fn(&mut egui::Ui),
     left: impl FnOnce(&mut egui::Ui),
 ) {
     let HeaderState {
@@ -49,33 +46,9 @@ pub fn header(
         .corner_radius(radius)
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
+            // The bar's text is chrome, not content: selecting it must not offer Copy / Quote.
+            ui.style_mut().interaction.selectable_labels = false;
             ui.set_height(HEADER_HEIGHT - 12.0);
-            let strip = ui.max_rect();
-            if let Some(center) = center {
-                // Child uis: they draw without taking room from the buttons or `left`. A first,
-                // invisible pass measures the piece, since a frame cannot be centered blind.
-                let top_left = |w: f32| {
-                    let x = strip.center().x - w / 2.0;
-                    egui::Rect::from_min_size(
-                        egui::pos2(x, strip.top()),
-                        egui::vec2(w.max(1.0), strip.height()),
-                    )
-                };
-                let mut probe = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(strip)
-                        .layout(Layout::left_to_right(Align::Center))
-                        .invisible(),
-                );
-                center(&mut probe);
-                let width = probe.min_rect().width();
-                let mut mid = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(top_left(width))
-                        .layout(Layout::left_to_right(Align::Center)),
-                );
-                center(&mut mid);
-            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if ui
                     .small_button(icons::CLOSE)
@@ -100,12 +73,8 @@ pub fn header(
                 if ui.small_button(glyph).on_hover_text(tip).clicked() {
                     out.maximize = true;
                 }
-                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                    if center.is_some() {
-                        ui.set_max_width((strip.width() / 2.0 - CENTER_CLEAR).max(0.0));
-                    }
-                    left(ui);
-                });
+                badge(ui);
+                ui.with_layout(Layout::left_to_right(Align::Center), left);
             });
         });
 }
@@ -124,4 +93,9 @@ pub fn badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
 /// The neutral badge editor windows carry where sessions show their origin.
 pub fn file_badge(ui: &mut egui::Ui) {
     badge(ui, "File", theme::text_muted());
+}
+
+/// A window header's badge: every kind shares one muted color, focused or not.
+pub fn header_badge(ui: &mut egui::Ui, text: &str) {
+    badge(ui, text, theme::text_muted());
 }
