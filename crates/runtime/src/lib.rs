@@ -1,8 +1,11 @@
 //! Session manager and per-session actors between the UI and the providers.
 
+mod fork;
 pub mod git;
+mod handoff;
 mod manager;
 mod session_actor;
+mod transcript;
 
 use std::path::PathBuf;
 
@@ -15,6 +18,7 @@ use xade_store::WriterHandle;
 
 pub use git::GitState;
 pub use manager::SessionManager;
+pub use transcript::transcript;
 
 pub enum ManagerCmd {
     Create {
@@ -68,6 +72,19 @@ pub enum ManagerCmd {
     DeleteSession {
         session_id: SessionId,
     },
+    /// Copies the session's history into a new Xade session for `provider`, which continues
+    /// there with a one-time hand-off: a state snapshot the source provider writes from
+    /// `handoff_prompt`, else the history transcript, followed by `resume_prompt`. Replies `ForkPreparing`, then
+    /// `SessionForked`, or `ForkFailed` (nothing written) on any failure.
+    Fork {
+        session_id: SessionId,
+        provider: ProviderId,
+        /// What the source provider is asked about the transcript to produce the snapshot.
+        handoff_prompt: String,
+        /// Tells the new provider to continue the conversation, not discuss the hand-off; stored
+        /// beside the hand-off files and added after the `@` line of the first send. Empty: none.
+        resume_prompt: String,
+    },
     /// Reads every provider's own history and imports what is new or newer (idempotent).
     /// Replies with `AppEventKind::ImportDone`.
     Import,
@@ -105,6 +122,28 @@ pub enum AppEventKind {
         state: GitState,
     },
     SessionDeleted {
+        session_id: SessionId,
+    },
+    /// A `Fork` started (the session id is the source); it always ends with `SessionForked` or
+    /// `ForkFailed` for that source.
+    ForkPreparing {
+        from: SessionId,
+    },
+    /// A `Fork` of `from` ended with nothing written; `message` is ready to show.
+    ForkFailed {
+        from: SessionId,
+        message: String,
+    },
+    /// A fork's snapshot turn runs a throwaway conversation on a provider (`active`) until it
+    /// is deleted (not active). Global event; its id must not count as a change in the sessions
+    /// running elsewhere.
+    Throwaway {
+        provider_session_id: String,
+        active: bool,
+    },
+    /// Reply to `Fork`: the stored copy, not yet opened.
+    SessionForked {
+        from: SessionId,
         session_id: SessionId,
     },
     Error(String),

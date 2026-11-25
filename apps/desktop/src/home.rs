@@ -1,11 +1,15 @@
 //! Home view and the shell panels it shares with the workspace view (top bar, sidebar).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use egui::{Align, Layout, RichText};
 use time::OffsetDateTime;
-use xade_core::{QuotaKind, QuotaWindow, SessionOrigin, SessionStatus, Workspace, WorkspaceId};
+use xade_core::{
+    ProviderError, ProviderId, QuotaGroup, QuotaKind, QuotaWindow, SessionOrigin, SessionStatus,
+    Workspace, WorkspaceId,
+};
 use xade_runtime::git::GitState;
 use xade_store::SessionCard;
 
@@ -38,7 +42,14 @@ pub struct HomeState {
     pub total: u64,
     /// Bumped per query; stale results are dropped.
     pub generation: u64,
-    pub preflight_error: Option<String>,
+    /// Each provider's preflight; a provider with no entry (and not pending) counts as available.
+    pub preflight: HashMap<ProviderId, Result<(), ProviderError>>,
+    /// Providers whose startup preflight still runs in the background.
+    pub pending: std::collections::HashSet<ProviderId>,
+    /// The provider chosen in the top bar for new sessions; memory only.
+    pub provider_pick: Option<ProviderId>,
+    /// Provider of the latest Xade session, the default for new ones.
+    pub last_provider: Option<ProviderId>,
     /// `None` lists every origin.
     pub origin: Option<SessionOrigin>,
     pub importing: bool,
@@ -46,9 +57,9 @@ pub struct HomeState {
     pub md_cache: std::cell::RefCell<egui_commonmark::CommonMarkCache>,
 }
 
-/// Room the provider dropdown and the right-hand cluster (buttons, quota meters) take; the
-/// top-bar test fails if they outgrow it.
-const TOP_BAR_RESERVED: f32 = 108.0 + 704.0 + 90.0;
+/// Room the session controls container, view toggle and right-hand cluster (buttons, quota
+/// meters) take; the top-bar test fails if they outgrow it.
+const TOP_BAR_RESERVED: f32 = 290.0 + 214.0 + 180.0;
 
 /// The search field shrinks with the space left of `TOP_BAR_RESERVED`.
 fn search_width(available: f32) -> f32 {
@@ -128,7 +139,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             if resp.changed() {
                 app.home.search_changed_at = Some(Instant::now());
             }
-            provider_dropdown(ui);
+            session_controls(app, ui);
             let left_end = ui.min_rect().right();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 settings_button(app, ui);
@@ -153,43 +164,26 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 {
                     app.tiling.retile();
                 }
-                let enabled = app.home.scope.is_some() && app.home.preflight_error.is_none();
-                let new = ui
-                    .add_enabled(
-                        enabled,
-                        egui::Button::new(
-                            RichText::new(icons::with(icons::NEW_SESSION, "New Session"))
-                                .color(theme::text()),
-                        )
-                        .fill(theme::accent()),
-                    )
-                    .on_disabled_hover_text("Select a workspace in the sidebar first");
-                let new = new.on_hover_text(format!(
-                    "New session ({})",
-                    keymap::shortcut_text(Action::NewSession)
-                ));
-                if new.clicked() {
-                    app.new_session();
-                }
-                if ui
-                    .button(icons::OPEN_SESSION)
-                    .on_hover_text(format!(
-                        "Open session ({})",
-                        keymap::shortcut_text(Action::OpenPicker)
-                    ))
-                    .clicked()
-                {
-                    app.run_action(Action::OpenPicker);
-                }
                 // The meters give way when the centered toggle would not fit beside them.
                 let toggle = ui
                     .data(|d| d.get_temp::<f32>(egui::Id::unique("view_toggle_width")))
                     .unwrap_or(190.0);
                 let room = ui.min_rect().left() - left_end;
-                if room >= QUOTA_METERS_WIDTH + toggle + 24.0 {
-                    for kind in [QuotaKind::SevenDay, QuotaKind::FiveHour] {
-                        quota_meter(ui, kind, app.quota.iter().find(|q| q.kind == kind));
-                    }
+                // Every available provider gets a group, even one that reports no quota.
+                let shown: Vec<(ProviderId, Vec<QuotaGroup>)> = app
+                    .selectable_providers()
+                    .into_iter()
+                    .map(|p| (p, quota_groups(app, p)))
+                    .collect();
+                let widths: Vec<f32> = shown
+                    .iter()
+                    .map(|(_, g)| quota_slot_width(g.len()))
+                    .collect();
+                let fit = quota_groups_that_fit(room, toggle, &widths);
+                // Right to left: the last provider is drawn first, so the first ends up leftmost.
+                for (p, groups) in shown.iter().take(fit).rev() {
+                    quota_group(ui, *p, app.provider_name(*p), groups);
+                    ui.add_space(8.0);
                 }
                 let right_start = ui.min_rect().left();
                 ui.data_mut(|d| {
@@ -257,50 +251,213 @@ fn set_scope(app: &mut App, scope: Option<WorkspaceId>) {
     }
 }
 
-fn provider_dropdown(ui: &mut egui::Ui) {
-    egui::ComboBox::from_id_salt("provider")
-        .selected_text("Claude")
-        .show_ui(ui, |ui| {
-            let _ = ui.selectable_label(true, "Claude");
-            ui.add_enabled(false, egui::Button::new("Antigravity"))
-                .on_disabled_hover_text("Coming soon");
+/// Open session, New Session and (when 2+ providers are available) the provider picker, grouped
+/// in one container on the left of the top bar.
+fn session_controls(app: &mut App, ui: &mut egui::Ui) {
+    egui::Frame::new()
+        .stroke(egui::Stroke::new(1.0, theme::border_strong()))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(4, 2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(icons::OPEN_SESSION)
+                    .on_hover_text(format!(
+                        "Open session ({})",
+                        keymap::shortcut_text(Action::OpenPicker)
+                    ))
+                    .clicked()
+                {
+                    app.run_action(Action::OpenPicker);
+                }
+                let enabled = app.home.scope.is_some() && app.new_provider().is_some();
+                let new = ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(
+                            RichText::new(icons::with(icons::NEW_SESSION, "New Session"))
+                                .color(theme::text()),
+                        )
+                        .fill(theme::accent()),
+                    )
+                    .on_disabled_hover_text("Select a workspace in the sidebar first")
+                    .on_hover_text(format!(
+                        "New session ({})",
+                        keymap::shortcut_text(Action::NewSession)
+                    ));
+                if new.clicked() {
+                    app.new_session();
+                }
+                provider_dropdown(app, ui);
+            });
         });
 }
 
-/// Both meters side by side: two 150 px slots and their 8 px gaps.
-const QUOTA_METERS_WIDTH: f32 = 316.0;
-
-/// Drawn whenever the bar has room; `q` is `None` until the first quota report arrives.
-fn quota_meter(ui: &mut egui::Ui, kind: QuotaKind, q: Option<&QuotaWindow>) {
-    let label = match kind {
-        QuotaKind::FiveHour => "5h Session Use",
-        QuotaKind::SevenDay => "Weekly Quota",
+/// Picks the provider of new sessions; hidden unless two or more providers are available.
+fn provider_dropdown(app: &mut App, ui: &mut egui::Ui) {
+    let ids = app.selectable_providers();
+    let Some(current) = app.new_provider().filter(|_| ids.len() > 1) else {
+        return;
     };
-    // A fixed-size slot: inside the right-to-left top bar, an unsized `vertical`
-    // lets both meters land on the same rect.
-    let size = egui::vec2(150.0, ui.available_height());
-    let now = OffsetDateTime::now_utc();
-    ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(label).small().color(theme::text_muted()));
-            let used = q.map_or("\u{2014}".to_string(), |q| {
-                format!("{:.0}% Used", quota_pct(q, now))
-            });
-            ui.label(RichText::new(used).small().color(theme::text_muted()));
+    let mut picked = None;
+    egui::ComboBox::from_id_salt("provider")
+        .selected_text(app.provider_name(current))
+        .show_ui(ui, |ui| {
+            for id in ids {
+                if ui
+                    .selectable_label(id == current, app.provider_name(id))
+                    .clicked()
+                {
+                    picked = Some(id);
+                }
+            }
         });
-        let fraction = q.map_or(0.0, |q| (quota_pct(q, now) / 100.0).clamp(0.0, 1.0));
-        ui.add(
-            egui::ProgressBar::new(fraction)
-                .desired_width(140.0)
-                .desired_height(4.0)
-                .fill(theme::usage_color(fraction)),
+    if picked.is_some() {
+        app.home.provider_pick = picked;
+    }
+}
+
+/// Label colour of a provider on cards; Antigravity has no theme colour of its own.
+fn provider_color(id: ProviderId) -> egui::Color32 {
+    match id {
+        ProviderId::Claude => theme::claude(),
+        ProviderId::Antigravity => theme::text_muted(),
+    }
+}
+
+/// A provider's glyph is its symbol and one pair of bars per model group; with several groups the
+/// pairs are narrower so the glyph stays small. Gaps: symbol to bars, between pairs, after it.
+const QUOTA_SYMBOL: f32 = 16.0;
+const QUOTA_PAIR_GAP: f32 = 4.0;
+const QUOTA_SLOT_GAP: f32 = 8.0;
+
+fn quota_pair_width(pairs: usize) -> f32 {
+    if pairs <= 1 {
+        48.0
+    } else {
+        28.0
+    }
+}
+
+/// The glyph's own width for `groups` model groups (an empty one still draws a pair).
+fn quota_glyph_width(groups: usize) -> f32 {
+    let n = groups.max(1);
+    QUOTA_SYMBOL + 8.0 + n as f32 * quota_pair_width(n) + (n - 1) as f32 * QUOTA_PAIR_GAP
+}
+
+/// The glyph plus the gap after it.
+fn quota_slot_width(groups: usize) -> f32 {
+    quota_glyph_width(groups) + QUOTA_SLOT_GAP
+}
+
+/// How many glyphs, in order, fit in `room` once the centered toggle has its space.
+fn quota_groups_that_fit(room: f32, toggle: f32, widths: &[f32]) -> usize {
+    let mut free = room - toggle - 24.0;
+    let mut n = 0;
+    for w in widths {
+        if free < *w {
+            break;
+        }
+        free -= w;
+        n += 1;
+    }
+    n
+}
+
+/// Everything known about one provider's quota: the windows its events reported (one unnamed
+/// group) and the named groups it answered on request.
+fn quota_groups(app: &App, provider: ProviderId) -> Vec<QuotaGroup> {
+    let mut out = Vec::new();
+    let events: Vec<QuotaWindow> = app
+        .quota
+        .iter()
+        .filter(|(p, _)| *p == provider)
+        .map(|(_, w)| w.clone())
+        .collect();
+    if !events.is_empty() {
+        out.push(QuotaGroup {
+            name: String::new(),
+            windows: events,
+        });
+    }
+    out.extend(
+        app.provider_quota
+            .get(&provider)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    out
+}
+
+/// A provider's quota as a glyph: its symbol, then per model group a 5 px bar for the session
+/// window over a hairline for the weekly one; the numbers are in the tooltip, in the same order.
+fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[QuotaGroup]) {
+    let now = OffsetDateTime::now_utc();
+    let height = ui.available_height();
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(quota_glyph_width(groups.len()), height),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    let mid = rect.center().y;
+    if let Some(tex) = crate::conversation::provider_symbol(ui.ctx(), provider) {
+        let r = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + QUOTA_SYMBOL / 2.0, mid),
+            egui::vec2(QUOTA_SYMBOL, QUOTA_SYMBOL),
         );
-        if let Some(text) = q.and_then(|q| reset_text(q, now)) {
-            ui.label(RichText::new(text).small().color(theme::text_muted()));
+        painter.image(
+            tex.id(),
+            r,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    }
+    let pairs = groups.len().max(1);
+    let width = quota_pair_width(pairs);
+    for i in 0..pairs {
+        let left = rect.left() + QUOTA_SYMBOL + 8.0 + i as f32 * (width + QUOTA_PAIR_GAP);
+        let bar = |y: f32, h: f32, kind: QuotaKind| {
+            let fraction = groups
+                .get(i)
+                .and_then(|g| g.windows.iter().find(|q| q.kind == kind))
+                .map_or(0.0, |q| (quota_pct(q, now) / 100.0).clamp(0.0, 1.0));
+            let track =
+                egui::Rect::from_min_size(egui::pos2(left, y - h / 2.0), egui::vec2(width, h));
+            painter.rect_filled(track, h / 2.0, theme::border());
+            let mut fill = track;
+            fill.set_width(track.width() * fraction);
+            painter.rect_filled(fill, h / 2.0, theme::usage_color(fraction));
+        };
+        bar(mid - 4.0, 5.0, QuotaKind::FiveHour);
+        bar(mid + 3.0, 2.0, QuotaKind::SevenDay);
+    }
+    resp.on_hover_ui(|ui| {
+        ui.label(RichText::new(name).strong());
+        if groups.is_empty() {
+            ui.label("No usage data yet.");
+        }
+        for g in groups {
+            if !g.name.is_empty() {
+                ui.label(RichText::new(&g.name).color(theme::text_muted()));
+            }
+            for kind in [QuotaKind::FiveHour, QuotaKind::SevenDay] {
+                let label = match kind {
+                    QuotaKind::FiveHour => "5h session",
+                    QuotaKind::SevenDay => "Weekly",
+                };
+                ui.label(match g.windows.iter().find(|q| q.kind == kind) {
+                    Some(q) => {
+                        let used = format!("{label}: {:.0}% used", quota_pct(q, now));
+                        match reset_text(q, now) {
+                            Some(r) => format!("{used} \u{b7} {}", r.to_lowercase()),
+                            None => used,
+                        }
+                    }
+                    None => format!("{label}: no data"),
+                });
+            }
         }
     });
-    ui.add_space(8.0);
 }
 
 /// A window whose reset time has passed holds no usage any more.
@@ -435,7 +592,7 @@ fn refresh_button(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// The top-left menu: adding a folder and About.
+/// The top-left menu: adding a folder, Status and About.
 fn app_menu(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button(icons::MENU, |ui| {
         if ui
@@ -446,6 +603,13 @@ fn app_menu(app: &mut App, ui: &mut egui::Ui) {
         }
         if ui.button(icons::with(icons::ABOUT, "About Xade")).clicked() {
             app.about_open = true;
+        }
+        if ui.button(icons::with(icons::STATUS, "Status")).clicked() {
+            app.status_open = true;
+        }
+        ui.separator();
+        if ui.button(icons::with(icons::EXIT, "Exit")).clicked() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
     })
     .response
@@ -465,13 +629,7 @@ pub fn origin_badge(ui: &mut egui::Ui, origin: SessionOrigin) {
         SessionOrigin::Xade => theme::accent(),
         SessionOrigin::ClaudeCode => theme::claude(),
     };
-    egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0, color))
-        .corner_radius(8)
-        .inner_margin(egui::Margin::symmetric(6, 0))
-        .show(ui, |ui| {
-            ui.label(RichText::new(origin_label(origin)).small().color(color));
-        });
+    crate::chrome::badge(ui, origin_label(origin), color);
 }
 
 fn origin_filter(app: &mut App, ui: &mut egui::Ui) {
@@ -502,18 +660,22 @@ fn heading(ui: &mut egui::Ui, text: &str) {
 }
 
 pub fn grid(app: &mut App, ui: &mut egui::Ui) {
-    if let Some(err) = app.home.preflight_error.clone() {
+    // One banner per installed provider that failed its preflight, each with its own Retry.
+    let failing: Vec<_> = app
+        .visible_providers()
+        .into_iter()
+        .filter_map(|id| Some((id, app.unavailable_text(id)?)))
+        .collect();
+    for (id, text) in failing {
         egui::Frame::new()
             .fill(theme::bg_raised())
             .stroke(egui::Stroke::new(1.0, theme::danger()))
             .corner_radius(6)
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
-                ui.label(
-                    RichText::new(format!("Claude is not available: {err}")).color(theme::danger()),
-                );
+                ui.label(RichText::new(text).color(theme::danger()));
                 if ui.button(icons::with(icons::RETRY, "Retry")).clicked() {
-                    app.retry_preflight();
+                    app.retry_preflight(id);
                 }
             });
         ui.add_space(12.0);
@@ -767,7 +929,11 @@ fn card_ui(
     };
     row(ui, badges, &mut |ui| {
         origin_badge(ui, card.origin);
-        ui.label(RichText::new("Claude").small().color(theme::claude()));
+        ui.label(
+            RichText::new(app.provider_name(card.provider_id))
+                .small()
+                .color(provider_color(card.provider_id)),
+        );
         ui.add(
             egui::Label::new(
                 RichText::new(app.workspace_name(card.workspace_id))
@@ -851,6 +1017,7 @@ pub fn relative_time(t: OffsetDateTime) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::app::StubProvider;
 
     fn window(pct: f32, resets_in_secs: Option<i64>, now: OffsetDateTime) -> QuotaWindow {
         QuotaWindow {
@@ -875,8 +1042,58 @@ mod tests {
         assert_eq!(reset_text(&window(10.0, None, now), now), None);
     }
 
+    #[test]
+    fn quota_groups_give_way_to_the_toggle_and_cap_at_the_providers() {
+        let one = quota_slot_width(1);
+        assert_eq!(quota_groups_that_fit(200.0, 190.0, &[one, one]), 0);
+        assert_eq!(
+            quota_groups_that_fit(190.0 + 24.0 + one, 190.0, &[one, one]),
+            1
+        );
+        assert_eq!(quota_groups_that_fit(2000.0, 190.0, &[one, one]), 2);
+        assert_eq!(quota_groups_that_fit(2000.0, 190.0, &[]), 0);
+        // Wider glyphs (several model groups) take their own room.
+        let two = quota_slot_width(2);
+        assert!(two > one && two < 2.0 * one);
+        assert_eq!(
+            quota_groups_that_fit(190.0 + 24.0 + two, 190.0, &[two, one]),
+            1
+        );
+    }
+
+    #[test]
+    fn a_providers_quota_joins_its_events_and_its_answered_groups() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-ui-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let now = OffsetDateTime::now_utc();
+        app.quota = vec![(ProviderId::Claude, window(10.0, None, now))];
+        let group = QuotaGroup {
+            name: "Gemini".into(),
+            windows: vec![window(30.0, None, now)],
+        };
+        app.on_msg(crate::app::UiMsg::ProviderQuota(
+            ProviderId::Antigravity,
+            Ok(vec![group.clone()]),
+        ));
+        assert_eq!(quota_groups(&app, ProviderId::Claude).len(), 1);
+        assert_eq!(quota_groups(&app, ProviderId::Claude)[0].name, "");
+        assert_eq!(quota_groups(&app, ProviderId::Antigravity), vec![group]);
+        // A failed ask keeps what was shown.
+        app.on_msg(crate::app::UiMsg::ProviderQuota(
+            ProviderId::Antigravity,
+            Err(xade_core::ProviderError::NotLoggedIn),
+        ));
+        assert_eq!(quota_groups(&app, ProviderId::Antigravity).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// `(text rects, frame rects)` the top bar draws at window width `width`.
-    fn top_bar_rects(width: f32) -> (Vec<egui::Rect>, Vec<egui::Rect>) {
+    fn top_bar_rects(width: f32, two: bool) -> (Vec<egui::Rect>, Vec<egui::Rect>) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -885,14 +1102,32 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        if two {
+            app.providers
+                .push(std::sync::Arc::new(StubProvider::antigravity()));
+        }
         let now = OffsetDateTime::now_utc();
         app.quota = vec![
-            window(80.0, Some(5400), now),
-            QuotaWindow {
-                kind: QuotaKind::SevenDay,
-                ..window(20.0, Some(90_000), now)
-            },
+            (ProviderId::Claude, window(80.0, Some(5400), now)),
+            (
+                ProviderId::Claude,
+                QuotaWindow {
+                    kind: QuotaKind::SevenDay,
+                    ..window(20.0, Some(90_000), now)
+                },
+            ),
         ];
+        if two {
+            // Two model groups: the widest glyph the top bar draws.
+            let group = |name: &str| QuotaGroup {
+                name: name.into(),
+                windows: vec![window(30.0, Some(5400), now)],
+            };
+            app.provider_quota.insert(
+                ProviderId::Antigravity,
+                vec![group("Gemini Models"), group("Claude and GPT models")],
+            );
+        }
         let input = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -928,8 +1163,8 @@ mod tests {
         (texts, frames)
     }
 
-    fn assert_no_overlaps(width: f32) {
-        let (texts, frames) = top_bar_rects(width);
+    fn assert_no_overlaps(width: f32, two: bool) {
+        let (texts, frames) = top_bar_rects(width, two);
         assert!(texts.len() > 8, "top bar drew {} texts", texts.len());
         for (i, a) in texts.iter().enumerate() {
             assert!(a.max.x <= width, "text {a:?} leaves the window at {width}");
@@ -957,8 +1192,65 @@ mod tests {
     #[test]
     fn top_bar_has_no_overlaps_from_min_window_width_up() {
         for width in [crate::MIN_WINDOW_SIZE[0], 1400.0, 1600.0, 2000.0, 3000.0] {
-            assert_no_overlaps(width);
+            assert_no_overlaps(width, false);
+            assert_no_overlaps(width, true);
         }
+    }
+
+    #[test]
+    fn session_controls_group_open_new_and_provider_on_the_left() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, ctx, dir) = home_app(&rt, true);
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        ctx.run_ui(input(), |ui| top_bar(&mut app, ui))
+            .textures_delta
+            .clear();
+        let mut out = ctx.run_ui(input(), |ui| top_bar(&mut app, ui));
+        out.textures_delta.clear();
+        let (mut texts, mut frames) = (Vec::new(), Vec::new());
+        fn walk(shape: &egui::Shape, t: &mut Vec<(String, egui::Rect)>, f: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Text(s) => t.push((
+                    s.galley.text().to_string(),
+                    s.galley.rect.translate(s.pos.to_vec2()),
+                )),
+                egui::Shape::Rect(r) if r.rect.width() < 1600.0 * 0.9 => f.push(r.rect),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, t, f)),
+                _ => {}
+            }
+        }
+        out.shapes
+            .iter()
+            .for_each(|c| walk(&c.shape, &mut texts, &mut frames));
+        let find = |needle: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t.contains(needle))
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| panic!("missing {needle:?} in {texts:?}"))
+        };
+        let open = find(icons::OPEN_SESSION);
+        let new = find("New Session");
+        let provider = find("Claude");
+        let home = find("Home");
+        assert!(open.right() < new.left(), "{open:?} vs {new:?}");
+        assert!(new.right() < provider.left(), "{new:?} vs {provider:?}");
+        assert!(provider.right() < home.left(), "{provider:?} vs {home:?}");
+        assert!(
+            frames.iter().any(|f| f.contains_rect(open)
+                && f.contains_rect(new)
+                && f.contains_rect(provider)),
+            "no single container encloses Open, New Session and Provider: {frames:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn test_card(provider_session_id: Option<&str>, age_secs: i64) -> SessionCard {
@@ -972,6 +1264,7 @@ mod tests {
             updated_at: OffsetDateTime::now_utc() - time::Duration::seconds(age_secs),
             model_id: String::new(),
             provider_session_id: provider_session_id.map(Into::into),
+            provider_id: ProviderId::Claude,
         }
     }
 
@@ -1194,6 +1487,209 @@ mod tests {
         cc.origin = SessionOrigin::ClaudeCode;
         let (_, texts) = click_card(&app, &ctx, &cc, None);
         assert!(trash_of(&texts).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every text a headless frame of `draw` paints, in order.
+    fn painted(
+        app: &mut App,
+        ctx: &egui::Context,
+        mut draw: impl FnMut(&mut App, &mut egui::Ui),
+    ) -> Vec<String> {
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        // The second pass settles sizes that depend on the first.
+        ctx.run_ui(input(), |ui| draw(app, ui))
+            .textures_delta
+            .clear();
+        let mut out = ctx.run_ui(input(), |ui| draw(app, ui));
+        out.textures_delta.clear();
+        fn walk(s: &egui::Shape, t: &mut Vec<String>) {
+            match s {
+                egui::Shape::Text(x) => t.push(x.galley.text().to_string()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, t)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        out.shapes.iter().for_each(|c| walk(&c.shape, &mut texts));
+        texts
+    }
+
+    fn home_app(
+        rt: &tokio::runtime::Runtime,
+        two: bool,
+    ) -> (App, egui::Context, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("xade-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        if two {
+            app.providers
+                .push(std::sync::Arc::new(StubProvider::antigravity()));
+        }
+        (app, ctx, dir)
+    }
+
+    #[test]
+    fn the_provider_picker_shows_only_with_two_available_providers() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, ctx, dir) = home_app(&rt, false);
+        let has_picker = |app: &mut App, ctx: &egui::Context| {
+            painted(app, ctx, top_bar)
+                .iter()
+                .any(|t| t == "Claude" || t == "Antigravity")
+        };
+        // Claude only: no picker, as before.
+        assert!(!has_picker(&mut app, &ctx));
+        let (mut app, ctx, dir2) = home_app(&rt, true);
+        assert!(has_picker(&mut app, &ctx));
+        app.home.provider_pick = Some(xade_core::ProviderId::Antigravity);
+        let texts = painted(&mut app, &ctx, top_bar);
+        assert!(texts.iter().any(|t| t == "Antigravity"), "{texts:?}");
+        // Antigravity not installed: back to a single provider, no picker.
+        app.home.preflight.insert(
+            xade_core::ProviderId::Antigravity,
+            Err(xade_core::ProviderError::NotInstalled),
+        );
+        assert!(!has_picker(&mut app, &ctx));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn the_menu_status_item_opens_the_status_dialog() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, ctx, dir) = home_app(&rt, false);
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 760.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| app_menu(app, ui));
+            let mut rects = Vec::new();
+            fn walk(s: &egui::Shape, v: &mut Vec<(String, egui::Rect)>) {
+                match s {
+                    egui::Shape::Text(t) => v.push((
+                        t.galley.text().to_string(),
+                        t.galley.rect.translate(t.pos.to_vec2()),
+                    )),
+                    egui::Shape::Vec(l) => l.iter().for_each(|s| walk(s, v)),
+                    _ => {}
+                }
+            }
+            out.shapes.iter().for_each(|c| walk(&c.shape, &mut rects));
+            out.drop_without_applying_deltas();
+            rects
+        };
+        let click = |at: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            vec![egui::Event::PointerMoved(at), button(true), button(false)]
+        };
+        let find = |texts: &[(String, egui::Rect)], needle: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t.contains(needle))
+                .map(|(_, r)| r.center())
+        };
+        let texts = run(&mut app, vec![]);
+        let menu = find(&texts, icons::MENU).unwrap();
+        run(&mut app, click(menu));
+        run(&mut app, vec![]);
+        let texts = run(&mut app, vec![]);
+        let item = find(&texts, "Status").expect("menu item drawn");
+        run(&mut app, click(item));
+        assert!(app.status_open);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_banner_lists_each_installed_failing_provider_and_hides_a_missing_one() {
+        use xade_core::{ProviderError, ProviderId};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, ctx, dir) = home_app(&rt, true);
+        let banners = |app: &mut App, ctx: &egui::Context| -> Vec<String> {
+            painted(app, ctx, grid)
+                .into_iter()
+                .filter(|t| t.contains("is not available"))
+                .collect()
+        };
+        assert!(banners(&mut app, &ctx).is_empty());
+        app.home
+            .preflight
+            .insert(ProviderId::Antigravity, Err(ProviderError::NotLoggedIn));
+        assert_eq!(
+            banners(&mut app, &ctx),
+            vec!["Antigravity is not available: provider CLI is not logged in"]
+        );
+        app.home
+            .preflight
+            .insert(ProviderId::Claude, Err(ProviderError::NotLoggedIn));
+        assert_eq!(banners(&mut app, &ctx).len(), 2);
+        // Not installed hides Antigravity: the Claude banner is exactly today's.
+        app.home
+            .preflight
+            .insert(ProviderId::Antigravity, Err(ProviderError::NotInstalled));
+        assert_eq!(
+            banners(&mut app, &ctx),
+            vec!["Claude is not available: provider CLI is not logged in"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_card_names_its_own_provider() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (app, ctx, dir) = home_app(&rt, true);
+        let mut agy = test_card(None, 60);
+        agy.provider_id = ProviderId::Antigravity;
+        let claude = test_card(None, 60);
+        for card in [&agy, &claude] {
+            render_card(&app, &ctx, card);
+        }
+        let (agy_texts, _) = render_card(&app, &ctx, &agy);
+        let (claude_texts, _) = render_card(&app, &ctx, &claude);
+        assert!(
+            agy_texts.iter().any(|t| t == "Antigravity"),
+            "{agy_texts:?}"
+        );
+        assert!(!agy_texts.iter().any(|t| t == "Claude"));
+        assert!(
+            claude_texts.iter().any(|t| t == "Claude"),
+            "{claude_texts:?}"
+        );
+        assert_ne!(
+            provider_color(ProviderId::Claude),
+            provider_color(ProviderId::Antigravity)
+        );
+        assert_eq!(
+            provider_color(ProviderId::Antigravity),
+            theme::text_muted(),
+            "no theme colour of its own"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

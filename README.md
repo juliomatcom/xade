@@ -14,7 +14,7 @@ Xade is short for X-provider Agentic Development Environment (pronounced "zade")
 
 ## What it does
 
-- Run multiple Claude Code sessions in side-by-side windows.
+- Run multiple Claude Code and Antigravity sessions in side-by-side windows, and fork a session to the other provider.
 - Sessions are saved locally and searchable. Typos are fine in titles.
 - Review code changes in a side-by-side diff before they are applied, and open any file in VS Code.
 - Turn auto-approve on or off per session. With it on, changes still show up for review afterwards.
@@ -24,11 +24,11 @@ Xade is short for X-provider Agentic Development Environment (pronounced "zade")
 
 ## How it works
 
-Xade runs the official `claude` CLI that you already have installed and logged in. It talks to the CLI over its JSON streaming mode and never reads or touches your credentials. Sessions are stored in a local SQLite file. Other agent CLIs can be added later.
+Xade runs the official `claude` CLI that you already have installed and logged in. It talks to the CLI over its JSON streaming mode and never reads or touches your credentials. Sessions are stored in a local SQLite file. Antigravity runs through `agy acp`. Other agent CLIs can be added later.
 
 ## Status
 
-Early MVP. macOS and Linux (x86_64, aarch64). Claude Code is the only provider today.
+Early MVP. macOS and Linux (x86_64, aarch64). Claude Code and Antigravity (`agy`) are the providers; see [docs/antigravity.md](docs/antigravity.md).
 
 ## Install
 
@@ -55,7 +55,7 @@ Linux needs a Vulkan-capable GPU driver and, for file dialogs, xdg-desktop-porta
 ## Requirements
 
 - Rust (stable)
-- Claude Code CLI, installed and logged in (check with `claude auth status`)
+- Claude Code CLI, installed and logged in (check with `claude auth status`), and/or the Antigravity CLI `agy`, signed in
 - git
 - VS Code with the `code` command (optional, for opening files from the diff view)
 
@@ -70,6 +70,8 @@ To install it as a regular macOS app (so you can open it from Launchpad and keep
 ```sh
 ./scripts/bundle-macos.sh            # builds and installs /Applications/Xade.app
 ```
+
+On Linux, `./scripts/bundle-linux.sh --install` does the same: it builds and installs to `~/.local/share/xade` with a desktop entry, an icon and `~/.local/bin/xade`. Without `--install` it packs `dist/Xade-linux-<arch>.tar.gz` for releases.
 
 Run the script again after pulling changes to update the app.
 

@@ -66,13 +66,18 @@ impl StoreReader {
             .await
     }
 
-    /// Model, effort and Auto mode of the most recently updated session created in Xade.
-    pub async fn last_model_choice(&self) -> Result<Option<(String, Effort, bool)>, StoreError> {
-        self.with_conn(|c| {
+    /// Model, effort and Auto mode of the most recently updated session `provider` has in
+    /// Xade; another provider's model id is never returned.
+    pub async fn last_model_choice(
+        &self,
+        provider: ProviderId,
+    ) -> Result<Option<(String, Effort, bool)>, StoreError> {
+        self.with_conn(move |c| {
             Ok(c.query_row(
-                "SELECT model_id, effort, auto_mode FROM sessions WHERE origin = 'xade'
+                "SELECT model_id, effort, auto_mode FROM sessions
+                 WHERE origin = 'xade' AND provider_id = ?1
                  ORDER BY updated_at DESC LIMIT 1",
-                [],
+                [schema::provider_str(provider)],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
@@ -80,6 +85,20 @@ impl StoreReader {
                         r.get::<_, bool>(2)?,
                     ))
                 },
+            )
+            .optional()?)
+        })
+        .await
+    }
+
+    /// Provider of the most recently updated session created in Xade.
+    pub async fn last_provider(&self) -> Result<Option<ProviderId>, StoreError> {
+        self.with_conn(|c| {
+            Ok(c.query_row(
+                "SELECT provider_id FROM sessions WHERE origin = 'xade'
+                 ORDER BY updated_at DESC LIMIT 1",
+                [],
+                |r| schema::parse_provider(0, &r.get::<_, String>(0)?),
             )
             .optional()?)
         })
@@ -129,7 +148,7 @@ impl StoreReader {
 }
 
 pub(crate) const CARD_COLS: &str =
-    "id, workspace_id, title, preview_snippet, model_id, updated_at, origin, provider_session_id";
+    "id, workspace_id, title, preview_snippet, model_id, updated_at, origin, provider_session_id, provider_id";
 
 pub(crate) fn card_from_row(r: &Row) -> rusqlite::Result<SessionCard> {
     Ok(SessionCard {
@@ -142,6 +161,7 @@ pub(crate) fn card_from_row(r: &Row) -> rusqlite::Result<SessionCard> {
         origin: schema::parse_origin(6, &r.get::<_, String>(6)?)?,
         excerpt: None,
         provider_session_id: r.get(7)?,
+        provider_id: schema::parse_provider(8, &r.get::<_, String>(8)?)?,
     })
 }
 
@@ -277,7 +297,7 @@ fn load_session(conn: &Connection, id: SessionId) -> Result<(Session, Vec<Messag
 
     let mut stmt = conn.prepare(
         "SELECT id, session_id, seq, role, content_text, thinking_text, tool_name, tool_use_id,
-            tool_payload_json, is_error, created_at
+            tool_payload_json, is_error, created_at, provider_id
          FROM messages WHERE session_id = ?1 ORDER BY seq",
     )?;
     let messages = stmt
@@ -294,6 +314,10 @@ fn load_session(conn: &Connection, id: SessionId) -> Result<(Session, Vec<Messag
                 tool_payload_json: r.get(8)?,
                 is_error: r.get(9)?,
                 created_at: schema::parse_ts(10, &r.get::<_, String>(10)?)?,
+                provider_id: r
+                    .get::<_, Option<String>>(11)?
+                    .map(|p| schema::parse_provider(11, &p))
+                    .transpose()?,
             })
         })?
         .collect::<Result<_, _>>()?;

@@ -43,6 +43,11 @@ pub(crate) struct Actor {
     pending_model: Option<String>,
     pending_effort: Option<Effort>,
     last_error: Option<String>,
+    /// Transcript of a forked history, prepended to the first prompt only.
+    handoff: Option<String>,
+    /// The hand-off sent and not yet seen processed (no assistant output since). Put back when
+    /// the turn ends first (stopped during the handshake, errored), so it is not lost.
+    handoff_sent: Option<String>,
 }
 
 impl Actor {
@@ -67,7 +72,15 @@ impl Actor {
             pending_model: None,
             pending_effort: None,
             last_error: None,
+            handoff: None,
+            handoff_sent: None,
         }
+    }
+
+    /// Text the provider gets in front of the first prompt (a fork's history).
+    pub(crate) fn with_handoff(mut self, handoff: Option<String>) -> Self {
+        self.handoff = handoff;
+        self
     }
 
     pub(crate) fn id(&self) -> SessionId {
@@ -139,6 +152,7 @@ impl Actor {
             tool_payload_json: None,
             is_error: false,
             created_at: OffsetDateTime::now_utc(),
+            provider_id: None,
         };
         self.next_seq += 1;
         m
@@ -190,9 +204,17 @@ impl Actor {
                 if self.status != SessionStatus::Streaming {
                     self.set_status(SessionStatus::Streaming);
                 }
-                let prompt = match context {
-                    Some(c) => format!("{c}\n{text}"),
-                    None => text,
+                let handoff = self.handoff.take();
+                if handoff.is_some() {
+                    self.handoff_sent.clone_from(&handoff);
+                }
+                let prompt = match (handoff, context) {
+                    (None, None) => text,
+                    (handoff, context) => [handoff, context, Some(text)]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join("\n"),
                 };
                 self.command(SessionCommand::SendPrompt(prompt));
             }
@@ -265,6 +287,16 @@ impl Actor {
         {
             self.set_status(SessionStatus::Streaming);
         }
+        // The provider answering means it processed the prompt, hand-off included.
+        if matches!(
+            ev,
+            ProviderEvent::TextDelta(_)
+                | ProviderEvent::ThinkingProgress { .. }
+                | ProviderEvent::AssistantText { .. }
+                | ProviderEvent::ToolUse { .. }
+        ) {
+            self.handoff_sent = None;
+        }
         match &ev {
             ProviderEvent::Quota(q) => {
                 self.write(WriteOp::UpsertQuota(q.clone()));
@@ -324,6 +356,10 @@ impl Actor {
                 return true;
             }
             ProviderEvent::TurnComplete { usage, .. } => {
+                if let Some(h) = self.handoff_sent.take() {
+                    // The turn ended without any output: the provider may never have seen it.
+                    self.handoff = Some(h);
+                }
                 self.write(WriteOp::ApplyTurnUsage {
                     session_id: self.session.id,
                     turn: usage.clone(),

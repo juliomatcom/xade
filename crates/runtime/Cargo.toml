@@ -1,6 +1,6 @@
 [package]
 name = "xade-runtime"
-version = "0.3.10"
+version = "0.4.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,6 +9,8 @@ publish = false
 [dependencies]
 xade-core = { path = "../core" }
 xade-store = { path = "../store" }
+libc = "=0.2.191"
+serde_json = "=1.0.154"
 time = "=0.3.55"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt", "process", "time", "sync", "macros"] }
 tracing = "=0.1.44"
@@ -16,6 +18,7 @@ uuid = { version = "=1.29.3", features = ["v4"] }
 
 [dev-dependencies]
 xade-claude = { path = "../claude" }
+xade-antigravity = { path = "../antigravity" }
 tempfile = "=3.27.0"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync"] }
 

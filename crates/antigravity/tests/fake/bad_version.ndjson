@@ -1,0 +1,2 @@
+{"dir":"in","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":2}}}

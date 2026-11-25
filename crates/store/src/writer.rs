@@ -63,6 +63,13 @@ pub enum WriteOp {
         messages: Vec<Message>,
         workspace_root: PathBuf,
     },
+    /// A new session and all its messages in one transaction (a fork): either every row is
+    /// stored or none. The workspace must exist; the preview comes from the last user or
+    /// assistant message. Search rows come from the triggers.
+    InsertSessionWithMessages {
+        session: Session,
+        messages: Vec<Message>,
+    },
     /// Deletes `ClaudeCode`-origin sessions whose workspace root is throwaway (see
     /// `throwaway::is_throwaway_dir`; messages and search rows go with them), then workspaces
     /// that are throwaway and hold no session. Replies with the counts.
@@ -209,37 +216,18 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
                 params![id.0.to_string()],
             )?;
         }
-        WriteOp::InsertSession(s) => {
-            tx.execute(
-                "INSERT INTO sessions (id, workspace_id, provider_id, provider_session_id, title,
-                    preview_snippet, model_id, effort, auto_mode, context_tokens_used,
-                    context_window_max, input_tokens, output_tokens, cache_read_tokens, cost_usd,
-                    created_at, updated_at, origin, sent_model_id, sent_effort)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-                    ?18, ?19, ?20)",
-                params![
-                    s.id.0.to_string(),
-                    s.workspace_id.0.to_string(),
-                    schema::provider_str(s.provider_id),
-                    s.provider_session_id,
-                    s.title,
-                    s.preview_snippet,
-                    s.model_id,
-                    schema::effort_str(s.effort),
-                    s.auto_mode,
-                    to_i64(s.usage.context_tokens_used),
-                    to_i64(s.usage.context_window_max),
-                    to_i64(s.usage.input_tokens),
-                    to_i64(s.usage.output_tokens),
-                    to_i64(s.usage.cache_read_tokens),
-                    s.usage.cost_usd,
-                    fmt_ts(s.created_at),
-                    fmt_ts(s.updated_at),
-                    schema::origin_str(s.origin),
-                    s.sent_model_id,
-                    schema::effort_str(s.sent_effort),
-                ],
-            )?;
+        WriteOp::InsertSession(s) => insert_session(&tx, &s)?,
+        WriteOp::InsertSessionWithMessages {
+            mut session,
+            messages,
+        } => {
+            if let Some(m) = messages.iter().rev().find(|m| {
+                matches!(m.role, Role::User | Role::Assistant) && !m.content_text.is_empty()
+            }) {
+                session.preview_snippet = tail_chars(&m.content_text, PREVIEW_CHARS);
+            }
+            insert_session(&tx, &session)?;
+            insert_messages(&tx, &session.id.0.to_string(), messages)?;
         }
         WriteOp::MarkSent {
             id,
@@ -299,8 +287,8 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
         WriteOp::InsertMessage(m) => {
             tx.execute(
                 "INSERT INTO messages (id, session_id, seq, role, content_text, thinking_text,
-                    tool_name, tool_use_id, tool_payload_json, is_error, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    tool_name, tool_use_id, tool_payload_json, is_error, created_at, provider_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     m.id.to_string(),
                     m.session_id.0.to_string(),
@@ -313,6 +301,7 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
                     m.tool_payload_json,
                     m.is_error,
                     fmt_ts(m.created_at),
+                    m.provider_id.map(schema::provider_str),
                 ],
             )?;
             let preview = matches!(m.role, Role::User | Role::Assistant)
@@ -385,6 +374,69 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
         WriteOp::Poison => panic!("forced store writer failure"),
     }
     tx.commit()
+}
+
+fn insert_session(tx: &Transaction, s: &Session) -> rusqlite::Result<()> {
+    tx.execute(
+        "INSERT INTO sessions (id, workspace_id, provider_id, provider_session_id, title,
+            preview_snippet, model_id, effort, auto_mode, context_tokens_used,
+            context_window_max, input_tokens, output_tokens, cache_read_tokens, cost_usd,
+            created_at, updated_at, origin, sent_model_id, sent_effort)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+            ?18, ?19, ?20)",
+        params![
+            s.id.0.to_string(),
+            s.workspace_id.0.to_string(),
+            schema::provider_str(s.provider_id),
+            s.provider_session_id,
+            s.title,
+            s.preview_snippet,
+            s.model_id,
+            schema::effort_str(s.effort),
+            s.auto_mode,
+            to_i64(s.usage.context_tokens_used),
+            to_i64(s.usage.context_window_max),
+            to_i64(s.usage.input_tokens),
+            to_i64(s.usage.output_tokens),
+            to_i64(s.usage.cache_read_tokens),
+            s.usage.cost_usd,
+            fmt_ts(s.created_at),
+            fmt_ts(s.updated_at),
+            schema::origin_str(s.origin),
+            s.sent_model_id,
+            schema::effort_str(s.sent_effort),
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_messages(
+    tx: &Transaction,
+    session_id: &str,
+    messages: Vec<Message>,
+) -> rusqlite::Result<()> {
+    let mut insert = tx.prepare(
+        "INSERT INTO messages (id, session_id, seq, role, content_text, thinking_text,
+            tool_name, tool_use_id, tool_payload_json, is_error, created_at, provider_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+    )?;
+    for m in messages {
+        insert.execute(params![
+            m.id.to_string(),
+            session_id,
+            m.seq,
+            schema::role_str(m.role),
+            m.content_text,
+            m.thinking_text,
+            m.tool_name,
+            m.tool_use_id,
+            m.tool_payload_json,
+            m.is_error,
+            fmt_ts(m.created_at),
+            m.provider_id.map(schema::provider_str),
+        ])?;
+    }
+    Ok(())
 }
 
 fn prune_throwaway(tx: &Transaction) -> rusqlite::Result<PruneCounts> {
@@ -532,27 +584,7 @@ fn import_session(
             id
         }
     };
-    let mut insert = tx.prepare(
-        "INSERT INTO messages (id, session_id, seq, role, content_text, thinking_text,
-            tool_name, tool_use_id, tool_payload_json, is_error, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-    )?;
-    for m in messages {
-        insert.execute(params![
-            m.id.to_string(),
-            session_id,
-            m.seq,
-            schema::role_str(m.role),
-            m.content_text,
-            m.thinking_text,
-            m.tool_name,
-            m.tool_use_id,
-            m.tool_payload_json,
-            m.is_error,
-            fmt_ts(m.created_at),
-        ])?;
-    }
-    Ok(())
+    insert_messages(tx, &session_id, messages)
 }
 
 fn tail_chars(s: &str, n: usize) -> String {

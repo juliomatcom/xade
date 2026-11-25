@@ -128,6 +128,7 @@ fn message(session: SessionId, seq: i64, role: Role, text: &str) -> Message {
         tool_payload_json: None,
         is_error: false,
         created_at: OffsetDateTime::now_utc(),
+        provider_id: None,
     }
 }
 
@@ -153,6 +154,52 @@ fn migrations_are_idempotent_across_reopen() {
     }
     let after = block_on(f.reader.list_sessions(None, None, 0, 24)).unwrap();
     assert_eq!(before, after);
+}
+
+#[test]
+fn a_database_from_before_message_providers_opens_unchanged_and_gains_the_column() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("workspace.db");
+    let (ws, id) = (WorkspaceId::new(), SessionId::new());
+    {
+        let writer = StoreWriter::spawn(&path).unwrap();
+        writer
+            .send(WriteOp::UpsertWorkspace(workspace(ws, "/tmp/project")))
+            .unwrap();
+        let mut s = session(ws, "Old", OffsetDateTime::now_utc());
+        s.id = id;
+        writer.send(WriteOp::InsertSession(s)).unwrap();
+        writer
+            .send(WriteOp::InsertMessage(message(
+                id,
+                1,
+                Role::User,
+                "old text",
+            )))
+            .unwrap();
+        writer.flush().unwrap();
+    }
+    // Back to the previous schema: no column, version 4.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("ALTER TABLE messages DROP COLUMN provider_id; PRAGMA user_version = 4;")
+        .unwrap();
+    drop(conn);
+
+    let writer = StoreWriter::spawn(&path).unwrap();
+    let reader = StoreReader::open(&path).unwrap();
+    assert_eq!(user_version(&path), SCHEMA_VERSION);
+    let (_, msgs) = block_on(reader.load_session(id)).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(
+        (msgs[0].content_text.as_str(), msgs[0].provider_id),
+        ("old text", None)
+    );
+    let mut m = message(id, 2, Role::Assistant, "new text");
+    m.provider_id = Some(ProviderId::Claude);
+    writer.send(WriteOp::InsertMessage(m)).unwrap();
+    writer.flush().unwrap();
+    let (_, msgs) = block_on(reader.load_session(id)).unwrap();
+    assert_eq!(msgs[1].provider_id, Some(ProviderId::Claude));
 }
 
 #[test]
@@ -427,6 +474,64 @@ fn delete_session_removes_row_messages_and_search_rows() {
 }
 
 #[test]
+fn insert_session_with_messages_is_one_transaction_with_search_rows() {
+    let f = Fixture::new();
+    let s = session(f.ws, "Fork: origin", f.base);
+    let id = s.id;
+    let mut call = message(id, 2, Role::ToolCall, "");
+    call.tool_name = Some("Read".into());
+    let messages = vec![
+        message(id, 1, Role::User, "pelican question"),
+        call,
+        message(id, 3, Role::Assistant, "heron answer"),
+    ];
+    f.writer
+        .send(WriteOp::InsertSessionWithMessages {
+            session: s,
+            messages: messages.clone(),
+        })
+        .unwrap();
+    f.writer.flush().unwrap();
+    let (row, got) = block_on(f.reader.load_session(id)).unwrap();
+    assert_eq!(row.title, "Fork: origin");
+    assert_eq!(row.preview_snippet, "heron answer");
+    assert_eq!(got.len(), 3);
+    assert_eq!(got[1].tool_name.as_deref(), Some("Read"));
+    assert_eq!(block_on(f.reader.max_seq(id)).unwrap(), 3);
+    // The triggers index the title and the user/assistant text only.
+    assert_eq!(f.titles("pelican"), vec!["Fork: origin".to_string()]);
+    assert_eq!(f.titles("heron"), vec!["Fork: origin".to_string()]);
+    assert_eq!(f.titles("origin"), vec!["Fork: origin".to_string()]);
+
+    // A failing message (duplicate seq) leaves neither the session nor any message behind.
+    let bad = session(f.ws, "Half copy", f.base);
+    let bad_id = bad.id;
+    f.writer
+        .send(WriteOp::InsertSessionWithMessages {
+            session: bad,
+            messages: vec![
+                message(bad_id, 1, Role::User, "narwhal one"),
+                message(bad_id, 1, Role::User, "narwhal two"),
+            ],
+        })
+        .unwrap();
+    f.writer.flush().unwrap();
+    assert!(block_on(f.reader.load_session(bad_id)).is_err());
+    assert!(f.titles("narwhal").is_empty());
+    assert!(f.titles("half copy").is_empty());
+    let conn = rusqlite::Connection::open(&f.path).unwrap();
+    let left: i64 = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM messages WHERE session_id = ?1)
+                  + (SELECT COUNT(*) FROM search_index WHERE session_id = ?1)",
+            [bad_id.0.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(left, 0);
+}
+
+#[test]
 fn load_session_roundtrip_and_max_seq() {
     let f = Fixture::new();
     let id = f.add_session("Round trip", 1);
@@ -439,6 +544,7 @@ fn load_session_roundtrip_and_max_seq() {
     m.tool_payload_json = Some("{\"a\":1}".into());
     m.thinking_text = Some("hmm".into());
     m.is_error = true;
+    m.provider_id = Some(ProviderId::Antigravity);
     f.writer.send(WriteOp::InsertMessage(m.clone())).unwrap();
     f.add_message(id, 2, Role::User, "second");
     f.writer.flush().unwrap();
@@ -449,6 +555,7 @@ fn load_session_roundtrip_and_max_seq() {
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0], m_roundtrip(&m, &msgs[0]));
     assert_eq!(msgs[1].seq, 2);
+    assert_eq!(msgs[1].provider_id, None);
     assert_eq!(block_on(f.reader.max_seq(id)).unwrap(), 2);
 
     let missing = block_on(f.reader.load_session(SessionId::new()));
@@ -468,7 +575,9 @@ fn m_roundtrip(sent: &Message, got: &Message) -> Message {
 fn last_model_choice_carries_model_effort_and_auto() {
     let f = Fixture::new();
     f.writer.flush().unwrap();
-    assert!(block_on(f.reader.last_model_choice()).unwrap().is_none());
+    assert!(block_on(f.reader.last_model_choice(ProviderId::Claude))
+        .unwrap()
+        .is_none());
     let id = f.add_session("Last", 5);
     f.writer
         .send(WriteOp::UpdateSession {
@@ -483,8 +592,68 @@ fn last_model_choice_carries_model_effort_and_auto() {
         })
         .unwrap();
     f.writer.flush().unwrap();
-    let last = block_on(f.reader.last_model_choice()).unwrap();
+    let last = block_on(f.reader.last_model_choice(ProviderId::Claude)).unwrap();
     assert_eq!(last, Some(("opus".to_string(), Effort::High, true)));
+}
+
+/// Inserts an Xade session of `provider` with `model`, `age` seconds old.
+fn add_provider_session(f: &Fixture, provider: ProviderId, model: &str, age: i64) -> SessionId {
+    let mut s = session(f.ws, "p", f.base - Duration::seconds(age));
+    s.provider_id = provider;
+    s.model_id = model.into();
+    s.effort = Effort::Low;
+    let id = s.id;
+    f.writer.send(WriteOp::InsertSession(s)).unwrap();
+    id
+}
+
+#[test]
+fn last_model_choice_and_last_provider_are_per_provider() {
+    let f = Fixture::new();
+    f.writer.flush().unwrap();
+    assert!(block_on(f.reader.last_provider()).unwrap().is_none());
+    add_provider_session(&f, ProviderId::Claude, "opus", 30);
+    add_provider_session(&f, ProviderId::Antigravity, "gemini-4-neon", 10);
+    f.writer.flush().unwrap();
+    let choice = |p| block_on(f.reader.last_model_choice(p)).unwrap();
+    let claude = choice(ProviderId::Claude).unwrap();
+    assert_eq!(claude.0, "opus", "a Gemini model never reaches claude");
+    let agy = choice(ProviderId::Antigravity).unwrap();
+    assert_eq!((agy.0.as_str(), agy.1), ("gemini-4-neon", Effort::Low));
+    assert_eq!(
+        block_on(f.reader.last_provider()).unwrap(),
+        Some(ProviderId::Antigravity),
+        "the newest Xade session decides"
+    );
+    // A provider with no session has no choice; another provider's session never stands in.
+    let g = Fixture::new();
+    add_provider_session(&g, ProviderId::Claude, "opus", 5);
+    g.writer.flush().unwrap();
+    assert!(
+        block_on(g.reader.last_model_choice(ProviderId::Antigravity))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        block_on(g.reader.last_provider()).unwrap(),
+        Some(ProviderId::Claude)
+    );
+}
+
+#[test]
+fn cards_and_search_carry_their_provider() {
+    let f = Fixture::new();
+    add_provider_session(&f, ProviderId::Claude, "opus", 30);
+    add_provider_session(&f, ProviderId::Antigravity, "gemini-4-neon", 10);
+    f.writer.flush().unwrap();
+    let page = block_on(f.reader.list_sessions(None, None, 0, 10)).unwrap();
+    let ids: Vec<_> = page.items.iter().map(|c| c.provider_id).collect();
+    assert_eq!(ids, vec![ProviderId::Antigravity, ProviderId::Claude]);
+    let found = f.search(None, "p");
+    assert!(found
+        .items
+        .iter()
+        .any(|c| c.provider_id == ProviderId::Antigravity));
 }
 
 #[test]

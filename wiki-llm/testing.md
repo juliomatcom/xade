@@ -1,5 +1,7 @@
 # Testing
 - Protocol fixtures: `python3 -I crates/claude/scripts/record.py <scenario> <sandbox-dir>`; scenarios are listed in the script. Record in `$(mktemp -d)`: a cwd under the home or scratchpad path leaks the user name through streamed chunks, and the script refuses such fixtures. Output is redacted (home path, user name, emails, account keys).
+- Antigravity fixtures: `python3 -I crates/antigravity/scripts/record.py <scenario> <sandbox-dir>` (same sandbox and redaction rules); real-`agy` crate e2e: `XADE_E2E_AGY=1 cargo test -p xade-antigravity --test e2e -- --ignored --test-threads=1`.
+- Real-CLI runtime e2e (both `claude` and `agy` signed in; spends a little quota): `XADE_E2E_AGY=1 cargo test -p xade-runtime --test e2e_providers -- --ignored --test-threads=1`; it deletes every provider conversation it creates.
 - Manual acceptance (macOS), one line per §1 success criterion:
   1. Add two directories; start a session in each from Home; both stream side by side.
   2. Replies render markdown (code, table, list) while streaming and after; "Thinking… ~N tokens" shows; tool calls are cards.
@@ -11,3 +13,7 @@
   8. After quitting, `pgrep -f "claude -p"` is empty; after `kill -9` of the app, children exit within 2 s.
   9. Auto OFF: Edit/Write opens the diff modal (Accept applies, Cancel denies); Auto ON: "Review changes" opens it read-only; "Open in VS Code" jumps to the first changed line.
   10. The status bar shows branch and dirty state; the modified count rises within about 1 s of a tool result.
+  11. Claude and Antigravity sessions stream side by side; their pickers show each provider's own models.
+  12. Antigravity: Auto OFF gates a shell command; Stop keeps the pid; relaunch + resume keeps context.
+  13. Fork Claude→Antigravity and back; the fork answers from the copied history.
+  14. Without `agy` installed, the UI matches the Claude-only build.

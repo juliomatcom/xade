@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -12,8 +12,9 @@ use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use xade_core::{
-    AgentProvider, Delivery, Message, ProviderEvent, QuotaKind, QuotaWindow, Role, RunningSession,
-    Session, SessionId, SessionStatus, Workspace, WorkspaceId,
+    AgentProvider, Delivery, Message, ProviderError, ProviderEvent, ProviderId, QuotaGroup,
+    QuotaKind, QuotaWindow, Role, RunningSession, Session, SessionId, SessionStatus, Workspace,
+    WorkspaceId,
 };
 use xade_runtime::git::{git_status, GitState};
 use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
@@ -38,6 +39,11 @@ use crate::windows_state::Saved;
 use crate::workspace::{Tiling, WindowKind};
 use crate::{composer, home, logging, status_bar, theme, workspace};
 
+/// The only provider that reports quota so far; the runtime's quota event carries no provider.
+/// A second one adds its id to that event and replaces this constant where it is read.
+pub(crate) const QUOTA_PROVIDER: ProviderId = ProviderId::Claude;
+/// How often a provider is asked for its quota; a finished turn asks again sooner.
+const QUOTA_POLL: Duration = Duration::from_secs(300);
 const GIT_REFRESH: Duration = Duration::from_secs(5);
 /// A running-set change re-imports at most this often.
 const RUNNING_IMPORT_GAP: Duration = Duration::from_secs(30);
@@ -61,9 +67,22 @@ pub enum UiMsg {
     Workspaces(Vec<Workspace>),
     /// Sent after `Workspaces` for a folder given on the command line.
     OpenWorkspace(WorkspaceId),
-    Preflight(Option<String>),
+    /// One provider's preflight (startup, or its Retry).
+    Preflight(ProviderId, Result<(), ProviderError>),
+    /// Provider of the latest Xade session, the default for a new one.
+    LastProvider(Option<ProviderId>),
+    /// The fork prompts, read off the UI thread; `warning` says why a bundled one is used.
+    ForkPrompt {
+        session: SessionId,
+        provider: ProviderId,
+        prompt: String,
+        resume: String,
+        warning: Option<String>,
+    },
     /// Quota rows saved by earlier runs.
     SavedQuota(Vec<QuotaWindow>),
+    /// A provider's answer to `AgentProvider::quota`.
+    ProviderQuota(ProviderId, Result<Vec<QuotaGroup>, ProviderError>),
     /// An error from a background task.
     Report(ErrorReport),
     PickerCards {
@@ -182,10 +201,14 @@ pub struct SessionVm {
     pub mention: crate::mention::MentionState,
     /// Why an attachment was refused, shown above the input until it expires or a send.
     pub attach_note: Option<(String, std::time::Instant)>,
+    /// The next composer frame focuses the text box with the cursor at the end (after a quote).
+    pub focus_input: bool,
     /// What running subagents did this turn, in memory only (never stored); cleared when the turn ends.
     pub subagent_msgs: Vec<Message>,
     /// The chat area shows `subagent_msgs` instead of the main transcript.
     pub view_subagents: bool,
+    /// A fork of this session is being prepared; its fork button stays off until it ends.
+    pub fork_preparing: bool,
 }
 
 pub struct DiffState {
@@ -264,10 +287,18 @@ pub struct App {
     windows_saved: Vec<crate::windows_state::Saved>,
     /// Restored windows still opening; one that fails is dropped quietly instead of reported.
     restoring: HashSet<Saved>,
+    /// The windows file whose restore waits for a provider still running its preflight.
+    deferred_restore: Option<PathBuf>,
     pub focused: Option<WindowKind>,
     pub editors: Editors,
     pub tree: FileTree,
-    pub quota: Vec<QuotaWindow>,
+    /// Last quota window per provider and kind, in draw order (session before weekly).
+    pub quota: Vec<(ProviderId, QuotaWindow)>,
+    /// Quota providers report on request (`AgentProvider::quota`), by provider.
+    pub provider_quota: HashMap<ProviderId, Vec<QuotaGroup>>,
+    /// When each provider's quota was last asked for, and which asks are still out.
+    quota_checked: HashMap<ProviderId, Instant>,
+    quota_inflight: HashSet<ProviderId>,
     pub cmd_tx: UnboundedSender<ManagerCmd>,
     pub rt: Handle,
     pub git: HashMap<PathBuf, GitState>,
@@ -294,6 +325,7 @@ pub struct App {
     pub sidebar_visible: bool,
     pub keymaps_open: bool,
     pub about_open: bool,
+    pub status_open: bool,
     /// The Cmd+F bar, when open.
     pub find: Option<crate::find::FindState>,
     /// The session picker, when open.
@@ -310,9 +342,16 @@ pub struct App {
     /// Awaiting confirmation to quit while sessions are mid-turn.
     pub pending_quit: bool,
     quit_confirmed: bool,
+    /// Frames drawn with the "Saving workspaces…" overlay; the real close waits for it to paint.
+    saving_frames: Option<u8>,
+    /// Text selected in a chat and where the pointer left it: the Copy / Quote popup.
+    pub selection_menu: Option<crate::widgets::selection_menu::Pending>,
     running_checked: Option<Instant>,
     tree_checked: Option<Instant>,
     running_inflight: bool,
+    /// Provider session ids of fork snapshot turns running now; Xade's own, so they never count
+    /// as sessions running elsewhere.
+    throwaways: HashSet<String>,
     running_polled: bool,
     running_import_due: bool,
     running_import_at: Option<Instant>,
@@ -338,13 +377,18 @@ impl App {
         providers: Vec<Arc<dyn AgentProvider>>,
         writer: WriterHandle,
         reader: StoreReader,
-        preflight_error: Option<String>,
+        preflight: HashMap<ProviderId, Result<(), ProviderError>>,
         config_path: PathBuf,
         log_dir: PathBuf,
         initial_workspace: Option<PathBuf>,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
+        cc.egui_ctx
+            .add_plugin(crate::widgets::selection_menu::SelectionWatcher);
         let (config, config_error) = config::load(&config_path);
+        if let Some(dir) = config_path.parent().map(Path::to_path_buf) {
+            rt.spawn_blocking(move || config::ensure_default_fork_prompt(&dir));
+        }
         let (tx, events_rx) = std::sync::mpsc::channel();
         let bridge = Bridge {
             tx,
@@ -356,10 +400,18 @@ impl App {
                 fwd.send(UiMsg::App(Box::new(ev)));
             }
         });
+        // A provider with no startup result is checked in the background: not offered, and not
+        // an error, until it reports.
+        let pending: HashSet<_> = providers
+            .iter()
+            .map(|p| p.id())
+            .filter(|id| !preflight.contains_key(id))
+            .collect();
         let mut app = App {
             view: View::Home,
             home: HomeState {
-                preflight_error,
+                preflight,
+                pending: pending.clone(),
                 ..HomeState::default()
             },
             sessions: HashMap::new(),
@@ -367,10 +419,14 @@ impl App {
             windows_file: None,
             windows_saved: Vec::new(),
             restoring: HashSet::new(),
+            deferred_restore: None,
             focused: None,
             editors: Editors::default(),
             tree: FileTree::default(),
             quota: Vec::new(),
+            provider_quota: HashMap::new(),
+            quota_checked: HashMap::new(),
+            quota_inflight: HashSet::new(),
             cmd_tx,
             rt,
             git: HashMap::new(),
@@ -395,6 +451,7 @@ impl App {
             sidebar_visible: true,
             keymaps_open: false,
             about_open: false,
+            status_open: false,
             find: None,
             picker: None,
             picker_generation: 0,
@@ -404,9 +461,12 @@ impl App {
             pending_delete: None,
             pending_quit: false,
             quit_confirmed: false,
+            saving_frames: None,
+            selection_menu: None,
             running_checked: None,
             tree_checked: None,
             running_inflight: false,
+            throwaways: HashSet::new(),
             running_polled: false,
             running_import_due: false,
             running_import_at: None,
@@ -423,15 +483,19 @@ impl App {
             app.warn(e);
         }
         app.apply_config(&cc.egui_ctx, config);
+        for id in pending {
+            app.retry_preflight(id);
+        }
         app.refresh_workspaces();
         app.refresh_cards();
         app.load_saved_quota();
+        app.load_last_provider();
         if let Some(root) = initial_workspace {
             app.open_folder(root);
         } else {
             app.restore_windows(crate::windows_state::path(&config_path));
         }
-        if app.home.preflight_error.is_none() {
+        if app.any_available() {
             app.start_import();
         }
         app
@@ -451,17 +515,21 @@ impl App {
             windows_file: None,
             windows_saved: Vec::new(),
             restoring: HashSet::new(),
+            deferred_restore: None,
             focused: None,
             editors: Editors::default(),
             tree: FileTree::default(),
             quota: Vec::new(),
+            provider_quota: HashMap::new(),
+            quota_checked: HashMap::new(),
+            quota_inflight: HashSet::new(),
             cmd_tx: tokio::sync::mpsc::unbounded_channel().0,
             rt,
             git: HashMap::new(),
             errors: ErrorQueue::default(),
             warning: None,
             log_dir: None,
-            providers: Vec::new(),
+            providers: vec![Arc::new(StubProvider::claude())],
             writer,
             reader,
             tiling: Tiling::default(),
@@ -475,6 +543,7 @@ impl App {
             sidebar_visible: true,
             keymaps_open: false,
             about_open: false,
+            status_open: false,
             find: None,
             picker: None,
             picker_generation: 0,
@@ -484,9 +553,12 @@ impl App {
             pending_delete: None,
             pending_quit: false,
             quit_confirmed: false,
+            saving_frames: None,
+            selection_menu: None,
             running_checked: None,
             tree_checked: None,
             running_inflight: false,
+            throwaways: HashSet::new(),
             running_polled: false,
             running_import_due: false,
             running_import_at: None,
@@ -790,6 +862,26 @@ impl App {
         self.running_checked = None;
     }
 
+    /// Asks each available provider for its quota every `QUOTA_POLL` and after its turns; one ask
+    /// per provider in flight. Providers that report quota in events answer with nothing.
+    fn poll_provider_quota(&mut self) {
+        for p in self.providers.clone() {
+            let id = p.id();
+            let due = self
+                .quota_checked
+                .get(&id)
+                .is_none_or(|t| t.elapsed() >= QUOTA_POLL);
+            if !due || self.quota_inflight.contains(&id) || !self.available(id) {
+                continue;
+            }
+            self.quota_checked.insert(id, Instant::now());
+            self.quota_inflight.insert(id);
+            let bridge = self.bridge.clone();
+            self.rt
+                .spawn_blocking(move || bridge.send(UiMsg::ProviderQuota(id, p.quota())));
+        }
+    }
+
     /// Polls running sessions every `running::POLL`; one poll in flight at a time.
     fn poll_running(&mut self) {
         let due = self
@@ -829,11 +921,13 @@ impl App {
         });
     }
 
+    /// Provider session ids Xade runs itself: its live sessions and its fork snapshot turns.
     fn live_provider_ids(&self) -> HashSet<String> {
         self.sessions
             .values()
             .filter(|vm| live_status(&vm.status))
             .filter_map(|vm| vm.session.provider_session_id.clone())
+            .chain(self.throwaways.iter().cloned())
             .collect()
     }
 
@@ -920,6 +1014,7 @@ impl App {
         self.pending_delete = Some(PendingDelete {
             id: card.id,
             title: card.title.clone(),
+            provider: card.provider_id,
         });
     }
 
@@ -931,12 +1026,123 @@ impl App {
         }
     }
 
-    pub fn retry_preflight(&self) {
-        let (provider, bridge) = (self.providers.first().cloned(), self.bridge.clone());
+    /// Re-runs only `id`'s preflight, off the UI thread.
+    pub fn retry_preflight(&self, id: ProviderId) {
+        let (provider, bridge) = (self.provider(id).cloned(), self.bridge.clone());
         self.rt.spawn_blocking(move || {
-            let err = provider.and_then(|p| p.preflight().err().map(|e| e.to_string()));
-            bridge.send(UiMsg::Preflight(err));
+            if let Some(p) = provider {
+                bridge.send(UiMsg::Preflight(id, p.preflight()));
+            }
         });
+    }
+
+    fn provider(&self, id: ProviderId) -> Option<&Arc<dyn AgentProvider>> {
+        self.providers.iter().find(|p| p.id() == id)
+    }
+
+    /// The provider's name for messages; the id has no name of its own.
+    pub fn provider_name(&self, id: ProviderId) -> &'static str {
+        self.provider(id).map_or("Provider", |p| p.display_name())
+    }
+
+    /// Whether `id` passed its preflight (not one still running in the background).
+    pub fn available(&self, id: ProviderId) -> bool {
+        !self.home.pending.contains(&id)
+            && matches!(self.home.preflight.get(&id), None | Some(Ok(())))
+    }
+
+    pub fn any_available(&self) -> bool {
+        self.providers.iter().any(|p| self.available(p.id()))
+    }
+
+    /// Why `id` failed its preflight, or `None` when it did not.
+    pub fn preflight_error(&self, id: ProviderId) -> Option<String> {
+        self.home
+            .preflight
+            .get(&id)?
+            .as_ref()
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    /// `preflight_error` naming the provider, or `None` when it is available.
+    pub fn unavailable_text(&self, id: ProviderId) -> Option<String> {
+        let err = self.preflight_error(id)?;
+        Some(format!(
+            "{} is not available: {err}",
+            self.provider_name(id)
+        ))
+    }
+
+    /// Providers the UI shows (status bar, banner): every one whose CLI is installed and whose
+    /// preflight is done. When none is, only the first stays, so a machine without any CLI sees
+    /// today's Claude banner.
+    pub fn visible_providers(&self) -> Vec<ProviderId> {
+        let installed = |p: &&Arc<dyn AgentProvider>| {
+            !self.home.pending.contains(&p.id())
+                && !matches!(
+                    self.home.preflight.get(&p.id()),
+                    Some(Err(ProviderError::NotInstalled))
+                )
+        };
+        let shown: Vec<_> = self.providers.iter().filter(installed).collect();
+        match shown.is_empty() {
+            true => self.providers.iter().take(1).map(|p| p.id()).collect(),
+            false => shown.iter().map(|p| p.id()).collect(),
+        }
+    }
+
+    /// The providers a new session can use, in the app's provider order.
+    pub fn selectable_providers(&self) -> Vec<ProviderId> {
+        let mut ids: Vec<_> = self.providers.iter().map(|p| p.id()).collect();
+        ids.retain(|p| self.available(*p));
+        ids
+    }
+
+    /// The provider the next new session uses: the user's pick, else the latest Xade
+    /// session's, else the first available one. `None` when none is available.
+    pub fn new_provider(&self) -> Option<ProviderId> {
+        let ids = self.selectable_providers();
+        let usable = |p: &ProviderId| ids.contains(p);
+        self.home
+            .provider_pick
+            .filter(usable)
+            .or(self.home.last_provider.filter(usable))
+            .or_else(|| ids.first().copied())
+    }
+
+    fn load_last_provider(&self) {
+        let (reader, bridge) = (self.reader.clone(), self.bridge.clone());
+        self.rt.spawn(async move {
+            match reader.last_provider().await {
+                Ok(p) => bridge.send(UiMsg::LastProvider(p)),
+                Err(e) => read_failed(&bridge, "last provider", &e),
+            }
+        });
+    }
+
+    /// The provider of a session the UI already knows (open, or on the current Home page).
+    fn provider_of(&self, id: SessionId) -> Option<ProviderId> {
+        self.sessions
+            .get(&id)
+            .map(|vm| vm.session.provider_id)
+            .or_else(|| {
+                self.home
+                    .cards
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.provider_id)
+            })
+    }
+
+    /// Warns and returns true when session `id`'s provider is known and unavailable. A session
+    /// whose provider is not known yet (a restored window) opens dormant and fails on Send.
+    fn blocked_by_provider(&mut self, id: SessionId) -> bool {
+        let Some(text) = self.provider_of(id).and_then(|p| self.unavailable_text(p)) else {
+            return false;
+        };
+        self.warn(text);
+        true
     }
 
     pub fn add_directory(&self) {
@@ -1011,27 +1217,36 @@ impl App {
     // ----- actions -----
 
     pub fn new_session(&mut self) {
-        let (Some(ws_id), Some(provider)) = (self.home.scope, self.providers.first()) else {
+        let (Some(ws_id), Some(provider_id)) = (self.home.scope, self.new_provider()) else {
+            return;
+        };
+        let Some(provider) = self.provider(provider_id) else {
             return;
         };
         let Some(ws) = self.home.workspaces.iter().find(|w| w.id == ws_id) else {
             return;
         };
-        // New sessions start with the model, effort and Auto mode of the last one, across
-        // restarts.
+        // New sessions start with the model, effort and Auto mode of the last one of the same
+        // provider, across restarts.
         let (cmd_tx, reader) = (self.cmd_tx.clone(), self.reader.clone());
-        let (cwd, provider_id, default_model) = (
-            ws.root_path.clone(),
-            provider.id(),
-            provider.default_model(),
-        );
+        let (cwd, default_model) = (ws.root_path.clone(), provider.default_model());
+        let (models, levels) = (provider.models(), provider.effort_levels());
         self.rt.spawn(async move {
-            let last = reader.last_model_choice().await.unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "could not read the last model choice");
-                None
-            });
+            let last = reader
+                .last_model_choice(provider_id)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "could not read the last model choice");
+                    None
+                });
             let (model_id, effort, auto_mode) =
                 last.unwrap_or((default_model, xade_core::Effort::Default, false));
+            let supported = composer::effort_choices(&models, &model_id, &levels);
+            let effort = if supported.contains(&effort) {
+                effort
+            } else {
+                xade_core::Effort::Default
+            };
             let _ = cmd_tx.send(ManagerCmd::Create {
                 workspace_id: ws_id,
                 cwd,
@@ -1045,7 +1260,7 @@ impl App {
 
     /// Opens a stored session (spawning it when not live) and shows it.
     pub fn open_session(&mut self, id: SessionId) {
-        if self.home.preflight_error.is_some() {
+        if self.blocked_by_provider(id) {
             return;
         }
         self.background.remove(&id);
@@ -1057,7 +1272,7 @@ impl App {
 
     /// Opens a stored session as a window without leaving the current view (Cmd+click on Home).
     pub fn open_session_background(&mut self, id: SessionId) {
-        if self.home.preflight_error.is_some() {
+        if self.blocked_by_provider(id) {
             return;
         }
         if self.is_live(id) {
@@ -1093,7 +1308,11 @@ impl App {
     /// With no working provider nothing reopens and nothing is saved, so the list survives;
     /// with `restore_windows` off nothing reopens and the saved list is emptied on the next change.
     fn restore_windows(&mut self, file: PathBuf) {
-        if self.home.preflight_error.is_some() {
+        if !self.any_available() {
+            // A provider still checking may make it possible once it reports.
+            if !self.home.pending.is_empty() {
+                self.deferred_restore = Some(file);
+            }
             return;
         }
         let saved = crate::windows_state::load(&file);
@@ -1138,7 +1357,7 @@ impl App {
     }
 
     /// The focused window when it is a live session.
-    fn focused_session(&self) -> Option<SessionId> {
+    pub(crate) fn focused_session(&self) -> Option<SessionId> {
         self.focused
             .and_then(WindowKind::session)
             .filter(|id| self.sessions.contains_key(id))
@@ -1667,7 +1886,7 @@ impl App {
 
     // ----- event folding -----
 
-    fn on_msg(&mut self, msg: UiMsg) {
+    pub(crate) fn on_msg(&mut self, msg: UiMsg) {
         match msg {
             UiMsg::App(ev) => self.on_app_event(*ev),
             UiMsg::Cards { generation, page } => {
@@ -1747,26 +1966,62 @@ impl App {
                 self.home.scope = Some(id);
                 self.home.page = 0;
                 self.refresh_cards();
-                if self.home.preflight_error.is_none() {
-                    self.new_session();
-                }
+                self.new_session();
             }
-            UiMsg::Preflight(err) => {
-                let recovered = err.is_none() && self.home.preflight_error.is_some();
-                self.home.preflight_error = err;
+            UiMsg::Preflight(id, result) => {
+                let recovered = result.is_ok() && !self.available(id);
+                self.home.pending.remove(&id);
+                self.home.preflight.insert(id, result);
                 if recovered {
                     self.start_import();
+                    if let Some(file) = self.deferred_restore.take() {
+                        self.restore_windows(file);
+                    }
                 }
             }
+            UiMsg::ProviderQuota(id, result) => {
+                self.quota_inflight.remove(&id);
+                match result {
+                    Ok(groups) => {
+                        self.provider_quota.insert(id, groups);
+                    }
+                    // Keep what was shown; the next poll tries again.
+                    Err(e) => tracing::warn!(provider = ?id, error = %e, "quota unavailable"),
+                }
+            }
+            UiMsg::LastProvider(p) => self.home.last_provider = p,
             UiMsg::Report(report) => self.report(report),
+            UiMsg::ForkPrompt {
+                session,
+                provider,
+                prompt,
+                resume,
+                warning,
+            } => {
+                if let Some(w) = warning {
+                    self.warn(w);
+                }
+                let sent = self.cmd_tx.send(ManagerCmd::Fork {
+                    session_id: session,
+                    provider,
+                    handoff_prompt: prompt,
+                    resume_prompt: resume,
+                });
+                if sent.is_err() {
+                    if let Some(vm) = self.sessions.get_mut(&session) {
+                        vm.fork_preparing = false;
+                    }
+                }
+            }
             UiMsg::SavedQuota(saved) => {
                 // A live report may have arrived first; it wins.
                 for q in saved {
-                    if !self.quota.iter().any(|x| x.kind == q.kind) {
-                        self.quota.push(q);
+                    if !self.quota.iter().any(|(_, x)| x.kind == q.kind) {
+                        self.quota.push((QUOTA_PROVIDER, q));
                     }
                 }
-                self.quota.sort_by_key(|q| q.kind == QuotaKind::SevenDay);
+                self.quota
+                    .sort_by_key(|(p, q)| (*p as u8, q.kind == QuotaKind::SevenDay));
             }
         }
     }
@@ -1820,8 +2075,10 @@ impl App {
                 sync: Default::default(),
                 mention: Default::default(),
                 attach_note: None,
+                focus_input: false,
                 subagent_msgs: Vec::new(),
                 view_subagents: false,
+                fork_preparing: false,
             },
         );
         if self.background.remove(&id) {
@@ -1833,11 +2090,36 @@ impl App {
 
     fn on_app_event(&mut self, ev: AppEvent) {
         let AppEvent { session_id, kind } = ev;
+        // A fork ends with one of these two for its source; unrelated errors leave it alone.
+        match &kind {
+            AppEventKind::ForkPreparing { from } => self.set_fork_preparing(*from, true),
+            AppEventKind::SessionForked { from, .. } | AppEventKind::ForkFailed { from, .. } => {
+                self.set_fork_preparing(*from, false)
+            }
+            _ => {}
+        }
         match (session_id, kind) {
+            (
+                _,
+                AppEventKind::Throwaway {
+                    provider_session_id,
+                    active,
+                },
+            ) => {
+                if active {
+                    self.throwaways.insert(provider_session_id);
+                } else {
+                    self.throwaways.remove(&provider_session_id);
+                }
+            }
+            (_, AppEventKind::ForkFailed { message, .. }) => {
+                self.report(ErrorReport::new("Something went wrong", message))
+            }
             (_, AppEventKind::Quota(q)) => {
-                self.quota.retain(|x| x.kind != q.kind);
-                self.quota.push(q);
-                self.quota.sort_by_key(|q| q.kind == QuotaKind::SevenDay);
+                self.quota.retain(|(_, x)| x.kind != q.kind);
+                self.quota.push((QUOTA_PROVIDER, q));
+                self.quota
+                    .sort_by_key(|(p, q)| (*p as u8, q.kind == QuotaKind::SevenDay));
             }
             (_, AppEventKind::ImportDone { imported, updated }) => {
                 self.home.importing = false;
@@ -1871,6 +2153,11 @@ impl App {
                 }
                 self.refresh_workspaces();
                 self.refresh_cards();
+            }
+            (Some(id), AppEventKind::SessionForked { .. }) => {
+                self.refresh_workspaces();
+                self.refresh_cards();
+                self.open_session(id);
             }
             (Some(_), AppEventKind::SessionCreated(s)) => {
                 self.insert_vm(s, Vec::new());
@@ -1923,6 +2210,44 @@ impl App {
         }
     }
 
+    fn set_fork_preparing(&mut self, id: SessionId, on: bool) {
+        if let Some(vm) = self.sessions.get_mut(&id) {
+            vm.fork_preparing = on;
+        }
+    }
+
+    /// Forks a session to `provider`: reads the hand-off prompt off the UI thread, then sends
+    /// `ManagerCmd::Fork`. The session's fork button is off from now until the fork ends.
+    pub fn fork_session(&mut self, id: SessionId, provider: ProviderId) {
+        self.set_fork_preparing(id, true);
+        let dir = self
+            .config_watch
+            .as_ref()
+            .and_then(|w| w.path().parent().map(Path::to_path_buf));
+        let path = dir
+            .as_ref()
+            .map(|dir| dir.join(&self.config.fork_handoff_prompt));
+        let resume_path = dir
+            .as_ref()
+            .map(|dir| dir.join(&self.config.fork_resume_prompt));
+        let bridge = self.bridge.clone();
+        self.rt.spawn_blocking(move || {
+            let (prompt, warning) = config::read_fork_prompt(path.as_deref());
+            let (resume, resume_warning) = config::read_fork_resume_prompt(resume_path.as_deref());
+            let warning = match (warning, resume_warning) {
+                (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+                (a, b) => a.or(b),
+            };
+            bridge.send(UiMsg::ForkPrompt {
+                session: id,
+                provider,
+                prompt,
+                resume,
+                warning,
+            });
+        });
+    }
+
     /// Sessions mid-turn or waiting on an approval.
     pub fn busy_sessions(&self) -> usize {
         self.sessions
@@ -1941,17 +2266,45 @@ impl App {
         if !ctx.input(|i| i.viewport().close_requested()) || self.quit_confirmed {
             return;
         }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         if self.busy_sessions() > 0 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending_quit = true;
+        } else {
+            self.begin_exit(ctx);
         }
     }
 
-    /// Lets the next close request through and issues it.
+    /// Quit confirmed: shows the saving overlay first, because shutting down blocks the UI.
     pub fn confirm_quit(&mut self, ctx: &egui::Context) {
         self.pending_quit = false;
+        self.begin_exit(ctx);
+    }
+
+    fn begin_exit(&mut self, ctx: &egui::Context) {
         self.quit_confirmed = true;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        self.saving_frames = Some(0);
+        ctx.request_repaint();
+    }
+
+    /// Paints the overlay for two frames, then lets the close through (`on_exit` blocks).
+    fn saving_overlay(&mut self, ctx: &egui::Context) {
+        let Some(frames) = self.saving_frames else {
+            return;
+        };
+        crate::widgets::modal(ctx, egui::Id::unique("saving_workspaces")).show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("Saving workspaces…")
+                    .strong()
+                    .size(18.0),
+            );
+        });
+        if frames >= 2 {
+            self.saving_frames = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else {
+            self.saving_frames = Some(frames + 1);
+            ctx.request_repaint();
+        }
     }
 
     fn on_provider_event(&mut self, id: SessionId, ev: ProviderEvent) {
@@ -1961,6 +2314,8 @@ impl App {
         let dir = vm.cwd.clone();
         let mut refresh_git = false;
         let mut refresh_cards = false;
+        let provider = vm.session.provider_id;
+        let mut quota_stale = false;
         match ev {
             ProviderEvent::TextDelta(t) => {
                 vm.thinking_tokens = None;
@@ -2050,6 +2405,7 @@ impl App {
             }
             ProviderEvent::TurnComplete { usage, .. } => {
                 vm.turn_snapshotting = false;
+                quota_stale = true;
                 if let (Some(base), Some(anchor)) =
                     (vm.turn_base.take(), vm.messages.last().map(|m| m.id))
                 {
@@ -2083,6 +2439,10 @@ impl App {
         }
         if refresh_cards {
             self.refresh_cards();
+        }
+        if quota_stale {
+            // The turn used some: ask again at the next frame, unless an ask is out.
+            self.quota_checked.remove(&provider);
         }
     }
 }
@@ -2154,6 +2514,7 @@ pub(crate) fn new_message(
         tool_payload_json: None,
         is_error: false,
         created_at: OffsetDateTime::now_utc(),
+        provider_id: None,
     }
 }
 
@@ -2237,6 +2598,7 @@ impl App {
         self.reload_config(ctx);
         self.check_editors(ctx, false);
         self.poll_running();
+        self.poll_provider_quota();
         self.refresh_tree();
         self.run_due_import();
         ctx.request_repaint_after(running::POLL);
@@ -2319,12 +2681,93 @@ impl App {
         running::confirm_modal(self, &ctx);
         delete_modal::show(self, &ctx);
         quit_modal::show(self, &ctx);
+        crate::widgets::selection_menu::show(self, &ctx);
+        self.saving_overlay(&ctx);
         about_modal::show(self, &ctx);
+        crate::widgets::status_modal::show(self, &ctx);
         crate::find::show(self, &ctx);
         self.editor_modal(&ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {
             self.keymaps_open = false;
         }
+    }
+}
+
+/// A provider with fixed models and a preflight that always passes, for tests.
+#[cfg(test)]
+pub(crate) struct StubProvider {
+    id: ProviderId,
+    name: &'static str,
+    models: Vec<xade_core::ModelOption>,
+    /// How long `preflight` takes and what it returns.
+    preflight: (Duration, Result<(), ProviderError>),
+}
+
+#[cfg(test)]
+impl StubProvider {
+    /// A preflight that takes `delay` and returns `result`.
+    pub(crate) fn preflighting(
+        mut self,
+        delay: Duration,
+        result: Result<(), ProviderError>,
+    ) -> Self {
+        self.preflight = (delay, result);
+        self
+    }
+
+    pub(crate) fn claude() -> Self {
+        Self::new(ProviderId::Claude, "Claude", &["opus"])
+    }
+
+    pub(crate) fn antigravity() -> Self {
+        Self::new(ProviderId::Antigravity, "Antigravity", &["gemini-4-neon"])
+    }
+
+    fn new(id: ProviderId, name: &'static str, models: &[&str]) -> Self {
+        let models = models
+            .iter()
+            .map(|m| xade_core::ModelOption {
+                id: (*m).into(),
+                label: (*m).into(),
+                description: String::new(),
+                effort_levels: vec![xade_core::Effort::Low, xade_core::Effort::High],
+            })
+            .collect();
+        Self {
+            id,
+            name,
+            models,
+            preflight: (Duration::ZERO, Ok(())),
+        }
+    }
+}
+
+#[cfg(test)]
+impl AgentProvider for StubProvider {
+    fn id(&self) -> ProviderId {
+        self.id
+    }
+    fn display_name(&self) -> &'static str {
+        self.name
+    }
+    fn models(&self) -> Vec<xade_core::ModelOption> {
+        self.models.clone()
+    }
+    fn default_model(&self) -> String {
+        self.models[0].id.clone()
+    }
+    fn effort_levels(&self) -> Vec<xade_core::Effort> {
+        vec![xade_core::Effort::Low, xade_core::Effort::High]
+    }
+    fn preflight(&self) -> Result<(), ProviderError> {
+        std::thread::sleep(self.preflight.0);
+        self.preflight.1.clone()
+    }
+    fn spawn(
+        &self,
+        _cfg: xade_core::SpawnConfig,
+    ) -> Result<xade_core::SessionHandle, ProviderError> {
+        Err(ProviderError::NotInstalled)
     }
 }
 
@@ -2607,6 +3050,129 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_turn_is_xades_own_until_it_is_deleted() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let throwaway = |active| AppEvent {
+            session_id: None,
+            kind: AppEventKind::Throwaway {
+                provider_session_id: "psid-1".into(),
+                active,
+            },
+        };
+        assert!(!app.live_provider_ids().contains("psid-1"));
+        app.on_app_event(throwaway(true));
+        assert!(app.live_provider_ids().contains("psid-1"));
+        // A poll that lists it (a child of Xade) is no change in what runs elsewhere.
+        let entry = RunningSession {
+            provider_session_id: "psid-1".into(),
+            state: xade_core::RunState::Busy,
+            location: "SDK".into(),
+            pid: 1,
+        };
+        app.on_running(Vec::new(), Vec::new());
+        app.on_running(vec![entry], Vec::new());
+        assert!(app.running.is_empty() && !app.running_import_due);
+        app.on_app_event(throwaway(false));
+        assert!(!app.live_provider_ids().contains("psid-1"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_fork_reads_the_prompt_file_off_thread_and_stays_off_until_it_ends() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        app.config_watch = Some(config::Watch::new(dir.join("settings.json")));
+        std::fs::create_dir_all(dir.join("prompts")).unwrap();
+        std::fs::write(dir.join("prompts/mine.md"), "my prompt").unwrap();
+        app.config.fork_handoff_prompt = PathBuf::from("prompts/mine.md");
+        std::fs::write(dir.join("prompts/resume.md"), "my resume").unwrap();
+        app.config.fork_resume_prompt = PathBuf::from("prompts/resume.md");
+        let session = new_session_row();
+        let id = session.id;
+        app.insert_vm(session, Vec::new());
+
+        app.fork_session(id, ProviderId::Claude);
+        assert!(
+            app.sessions[&id].fork_preparing,
+            "off at once, before the read"
+        );
+        assert!(
+            cmds.try_recv().is_err(),
+            "nothing is sent before the file is read"
+        );
+        pump(&mut app);
+        match cmds.try_recv() {
+            Ok(ManagerCmd::Fork {
+                session_id,
+                provider,
+                handoff_prompt,
+                resume_prompt,
+            }) => assert_eq!(
+                (session_id, provider, handoff_prompt.as_str(), resume_prompt),
+                (id, ProviderId::Claude, "my prompt", "my resume".to_string())
+            ),
+            _ => panic!("no Fork sent"),
+        }
+        assert!(app.warning_text().is_none());
+
+        // The manager's events keep it off, then clear it, for the source session.
+        let event = |kind| AppEvent {
+            session_id: Some(id),
+            kind,
+        };
+        app.on_app_event(event(AppEventKind::ForkPreparing { from: id }));
+        assert!(app.sessions[&id].fork_preparing);
+        // An unrelated error for the source does not end the fork.
+        app.on_app_event(event(AppEventKind::Error("nope".into())));
+        assert!(app.sessions[&id].fork_preparing);
+        // A failed fork ends it, and shows its message like any error.
+        assert_eq!(app.errors.pending(), 1, "the unrelated error");
+        app.on_app_event(event(AppEventKind::ForkFailed {
+            from: id,
+            message: "Could not fork the session: x".into(),
+        }));
+        assert!(!app.sessions[&id].fork_preparing);
+        assert_eq!(app.errors.pending(), 2);
+        app.errors.dismiss();
+        let (report, _) = app.errors.current().unwrap();
+        assert!(report.message.contains("Could not fork"));
+        app.on_app_event(event(AppEventKind::ForkPreparing { from: id }));
+        app.on_app_event(AppEvent {
+            session_id: Some(SessionId::new()),
+            kind: AppEventKind::SessionForked {
+                from: id,
+                session_id: SessionId::new(),
+            },
+        });
+        assert!(!app.sessions[&id].fork_preparing);
+
+        // A missing file sends the bundled prompt and warns.
+        while cmds.try_recv().is_ok() {}
+        app.config.fork_handoff_prompt = PathBuf::from("prompts/gone.md");
+        app.config.fork_resume_prompt = PathBuf::from("prompts/gone-resume.md");
+        app.fork_session(id, ProviderId::Claude);
+        pump_until_fork(&mut app, &mut cmds);
+        match cmds.try_recv() {
+            Ok(ManagerCmd::Fork {
+                handoff_prompt,
+                resume_prompt,
+                ..
+            }) => {
+                assert_eq!(handoff_prompt, config::BUNDLED_FORK_PROMPT);
+                assert_eq!(resume_prompt, config::BUNDLED_FORK_RESUME_PROMPT);
+            }
+            _ => panic!("no Fork sent"),
+        }
+        assert!(app
+            .warning_text()
+            .is_some_and(|w| w.contains("gone.md") && w.contains("gone-resume.md")));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn dropped_files_become_mentions_without_a_pointer_position() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (mut app, dir) = test_app(&rt);
@@ -2688,6 +3254,16 @@ mod tests {
             "did not wait for the ack"
         );
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Folds in bridge messages until one sends a `Fork` (other tasks report on the same channel).
+    fn pump_until_fork(app: &mut App, cmds: &mut tokio::sync::mpsc::UnboundedReceiver<ManagerCmd>) {
+        for _ in 0..20 {
+            if !cmds.is_empty() {
+                return;
+            }
+            pump(app);
+        }
     }
 
     /// Waits for the next bridge message and folds it in.
@@ -2929,6 +3505,278 @@ mod tests {
         app.home.scope = Some(ws.id);
         app.home.workspaces = vec![ws];
         assert_eq!(app.target_dir(), dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn two_provider_app(rt: &tokio::runtime::Runtime) -> (App, std::path::PathBuf) {
+        let (mut app, dir) = test_app(rt);
+        app.providers = vec![
+            Arc::new(StubProvider::claude()),
+            Arc::new(StubProvider::antigravity()),
+        ];
+        (app, dir)
+    }
+
+    fn fail(app: &mut App, id: ProviderId, e: ProviderError) {
+        app.home.preflight.insert(id, Err(e));
+    }
+
+    #[test]
+    fn a_not_installed_provider_is_hidden_while_another_is_shown() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        assert_eq!(app.visible_providers(), vec![claude, agy]);
+        assert_eq!(app.selectable_providers(), vec![claude, agy]);
+
+        // Antigravity missing: Claude-only users see today's UI.
+        fail(&mut app, agy, ProviderError::NotInstalled);
+        assert_eq!(app.visible_providers(), vec![claude]);
+        assert_eq!(app.selectable_providers(), vec![claude]);
+        assert!(app.available(claude) && !app.available(agy));
+
+        // Installed but signed out: shown, with its error, but not selectable.
+        fail(&mut app, agy, ProviderError::NotLoggedIn);
+        assert_eq!(app.visible_providers(), vec![claude, agy]);
+        assert_eq!(app.selectable_providers(), vec![claude]);
+        let text = app.unavailable_text(agy).unwrap();
+        assert!(text.starts_with("Antigravity is not available: "), "{text}");
+
+        // Claude missing, Antigravity fine: only Antigravity shows.
+        app.home.preflight.remove(&agy);
+        fail(&mut app, claude, ProviderError::NotInstalled);
+        assert_eq!(app.visible_providers(), vec![agy]);
+        assert_eq!(app.new_provider(), Some(agy));
+
+        // Neither installed: the first provider stays, for today's banner.
+        fail(&mut app, agy, ProviderError::NotInstalled);
+        assert_eq!(app.visible_providers(), vec![claude]);
+        assert!(!app.any_available() && app.new_provider().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_new_session_provider_is_the_pick_then_the_last_then_the_first_available() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        assert_eq!(app.new_provider(), Some(claude));
+        app.on_msg(UiMsg::LastProvider(Some(agy)));
+        assert_eq!(app.new_provider(), Some(agy));
+        app.home.provider_pick = Some(claude);
+        assert_eq!(app.new_provider(), Some(claude));
+        // An unavailable choice is skipped.
+        fail(&mut app, claude, ProviderError::NotLoggedIn);
+        assert_eq!(app.new_provider(), Some(agy));
+        app.home.provider_pick = Some(agy);
+        fail(&mut app, agy, ProviderError::NotLoggedIn);
+        assert_eq!(app.new_provider(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Runs `new_session` and returns the `Create` it sent.
+    fn created(
+        rt: &tokio::runtime::Runtime,
+        app: &mut App,
+    ) -> (ProviderId, String, xade_core::Effort, bool) {
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        app.new_session();
+        let cmd = rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), cmds.recv()).await })
+            .unwrap()
+            .unwrap();
+        let ManagerCmd::Create {
+            provider,
+            model_id,
+            effort,
+            auto_mode,
+            ..
+        } = cmd
+        else {
+            panic!("not a Create");
+        };
+        (provider, model_id, effort, auto_mode)
+    }
+
+    fn stored(
+        app: &App,
+        ws: WorkspaceId,
+        provider: ProviderId,
+        model: &str,
+        effort: xade_core::Effort,
+    ) {
+        let mut row = new_session_row();
+        row.workspace_id = ws;
+        row.provider_id = provider;
+        row.model_id = model.into();
+        row.effort = effort;
+        row.origin = xade_core::SessionOrigin::Xade;
+        app.writer.send(WriteOp::InsertSession(row)).unwrap();
+        app.writer.flush().unwrap();
+    }
+
+    #[test]
+    fn new_session_uses_the_picked_provider_and_only_its_own_last_choice() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        let ws = WorkspaceId::new();
+        app.home.workspaces = vec![Workspace {
+            id: ws,
+            root_path: dir.clone(),
+            display_name: "w".into(),
+            last_opened_at: OffsetDateTime::now_utc(),
+            is_open: true,
+        }];
+        app.home.scope = Some(ws);
+        app.writer
+            .send(WriteOp::UpsertWorkspace(app.home.workspaces[0].clone()))
+            .unwrap();
+        // Only Claude has a stored session, with a Claude-only model and effort.
+        stored(&app, ws, claude, "opus", xade_core::Effort::High);
+
+        app.home.provider_pick = Some(agy);
+        let (p, model, effort, _) = created(&rt, &mut app);
+        assert_eq!(p, agy);
+        assert_eq!(
+            model, "gemini-4-neon",
+            "the provider default, not a Claude id"
+        );
+        assert_eq!(effort, xade_core::Effort::Default);
+
+        app.home.provider_pick = Some(claude);
+        let (p, model, effort, _) = created(&rt, &mut app);
+        assert_eq!(
+            (p, model.as_str(), effort),
+            (claude, "opus", xade_core::Effort::High)
+        );
+
+        // An effort the model does not offer falls back to Default.
+        stored(&app, ws, agy, "gemini-4-neon", xade_core::Effort::Max);
+        app.home.provider_pick = Some(agy);
+        let (p, model, effort, _) = created(&rt, &mut app);
+        assert_eq!((p, model.as_str()), (agy, "gemini-4-neon"));
+        assert_eq!(effort, xade_core::Effort::Default);
+
+        // With the pick unavailable, nothing is created for it.
+        fail(&mut app, agy, ProviderError::NotLoggedIn);
+        fail(&mut app, claude, ProviderError::NotLoggedIn);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        app.new_session();
+        assert!(cmds.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_is_blocked_only_for_the_provider_that_is_unavailable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let mut claude_row = new_session_row();
+        claude_row.provider_id = ProviderId::Claude;
+        let mut agy_row = new_session_row();
+        agy_row.provider_id = ProviderId::Antigravity;
+        let (claude_id, agy_id) = (claude_row.id, agy_row.id);
+        app.insert_vm(claude_row, Vec::new());
+        app.insert_vm(agy_row, Vec::new());
+        // An errored session is not live, so `open_session` sends `Open` for it.
+        for vm in app.sessions.values_mut() {
+            vm.status = SessionStatus::Error("x".into());
+        }
+        fail(
+            &mut app,
+            ProviderId::Antigravity,
+            ProviderError::NotLoggedIn,
+        );
+
+        app.open_session(agy_id);
+        assert!(cmds.try_recv().is_err(), "Antigravity is blocked");
+        let text = app.warning_text().unwrap();
+        assert!(text.starts_with("Antigravity is not available"), "{text}");
+        app.open_session_background(agy_id);
+        assert!(cmds.try_recv().is_err());
+
+        app.open_session(claude_id);
+        assert!(
+            matches!(cmds.try_recv(), Ok(ManagerCmd::Open { session_id }) if session_id == claude_id)
+        );
+        assert!(app.open_windows.contains(&WindowKind::Session(claude_id)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_reruns_one_provider_and_a_recovery_starts_the_import() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let agy = ProviderId::Antigravity;
+        fail(&mut app, agy, ProviderError::NotLoggedIn);
+        app.retry_preflight(agy);
+        let msg = app.events_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let UiMsg::Preflight(id, result) = msg else {
+            panic!("not a Preflight");
+        };
+        assert_eq!(id, agy, "only the retried provider reports");
+        assert!(app.events_rx.try_recv().is_err());
+        app.on_msg(UiMsg::Preflight(id, result));
+        assert!(app.available(agy));
+        assert!(matches!(cmds.try_recv(), Ok(ManagerCmd::Import)));
+        // A provider that was already fine does not re-import.
+        app.on_msg(UiMsg::Preflight(agy, Ok(())));
+        assert!(cmds.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_provider_still_checking_is_neither_offered_nor_an_error_until_it_reports() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        app.home.pending.insert(agy);
+        assert!(app.available(claude) && !app.available(agy));
+        assert_eq!(app.selectable_providers(), vec![claude]);
+        assert_eq!(app.visible_providers(), vec![claude]);
+        assert_eq!(app.preflight_error(agy), None);
+        assert_eq!(app.unavailable_text(agy), None);
+
+        // Its report ends the wait and offers it.
+        app.on_msg(UiMsg::Preflight(agy, Ok(())));
+        assert!(app.home.pending.is_empty());
+        assert_eq!(app.selectable_providers(), vec![claude, agy]);
+        assert_eq!(app.visible_providers(), vec![claude, agy]);
+        assert!(matches!(cmds.try_recv(), Ok(ManagerCmd::Import)));
+
+        // A failure shows as today's error.
+        app.home.pending.insert(agy);
+        app.on_msg(UiMsg::Preflight(agy, Err(ProviderError::NotLoggedIn)));
+        assert_eq!(app.selectable_providers(), vec![claude]);
+        assert!(app.unavailable_text(agy).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_window_restore_waits_for_a_pending_provider_when_none_is_usable_yet() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        fail(&mut app, claude, ProviderError::NotInstalled);
+        app.home.pending.insert(agy);
+        let file = dir.join("windows.json");
+        app.restore_windows(file.clone());
+        assert_eq!(app.deferred_restore, Some(file.clone()));
+        assert!(app.windows_file.is_none());
+        app.on_msg(UiMsg::Preflight(agy, Ok(())));
+        assert!(app.deferred_restore.is_none());
+        assert_eq!(app.windows_file, Some(file));
+        assert!(matches!(cmds.try_recv(), Ok(ManagerCmd::Import)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

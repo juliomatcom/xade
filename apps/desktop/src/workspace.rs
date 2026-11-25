@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use egui::{Id, Order, Rect};
 use tokio::sync::mpsc::UnboundedSender;
-use xade_core::{AgentProvider, SessionId};
+use xade_core::{AgentProvider, ProviderId, SessionId};
 use xade_runtime::ManagerCmd;
 
 use crate::app::{App, SessionVm};
@@ -80,9 +80,13 @@ pub(crate) fn geom_of(app: &mut App, kind: WindowKind) -> Option<Geom<'_>> {
 pub struct Env<'a> {
     pub cmd_tx: &'a UnboundedSender<ManagerCmd>,
     pub providers: &'a [Arc<dyn AgentProvider>],
+    /// Providers a session can be forked to: every available one.
+    pub fork_targets: &'a [ProviderId],
     pub vscode: Option<&'a Path>,
     pub maximized: Option<SessionId>,
     pub send_mode: SendMode,
+    /// The text box breaks long words anywhere (`input_break_all`).
+    pub break_all: bool,
     /// `<ide_opened_file>` tag for the file the user last had open, sent ahead of prompts.
     pub ide_context: Option<&'a str>,
     /// This window is the focused one: its header is highlighted.
@@ -259,6 +263,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let ide_context = app.editors.ide_context();
     let mut closes = Vec::new();
     let mut reloads = Vec::new();
+    let mut forks = Vec::new();
     let mut attaches = Vec::new();
     let mut indexes = Vec::new();
     let mut images = Vec::new();
@@ -273,6 +278,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .pointer_interact_pos()
         .filter(|_| pointer_down)
         .and_then(|p| ctx.layer_id_at(p));
+    let fork_targets = app.selectable_providers();
     for (i, kind) in kinds.iter().enumerate() {
         let taken = match *kind {
             WindowKind::Session(id) => app
@@ -293,9 +299,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let env = Env {
             cmd_tx: &app.cmd_tx,
             providers: &app.providers,
+            fork_targets: &fork_targets,
             vscode: app.vscode.as_deref(),
             maximized: app.maximized.and_then(WindowKind::session),
             send_mode: app.config.send_while_running,
+            break_all: app.config.input_break_all,
             ide_context: ide_context.as_deref(),
             focused,
         };
@@ -379,6 +387,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let (true, WindowKind::Session(id)) = (out.reload, *kind) {
             reloads.push(id);
         }
+        if let (Some(to), WindowKind::Session(id)) = (out.fork, *kind) {
+            forks.push((id, to));
+        }
         if let (true, WindowKind::Session(id)) = (out.attach, *kind) {
             attaches.push(id);
         }
@@ -453,6 +464,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     for id in reloads {
         app.reload_session(id);
+    }
+    for (id, to) in forks {
+        app.fork_session(id, to);
     }
     for path in opens {
         app.open_path(path);
@@ -574,6 +588,7 @@ mod tests {
             tool_payload_json: payload.map(str::to_string),
             is_error: false,
             created_at: OffsetDateTime::now_utc(),
+            provider_id: None,
         }
     }
 
@@ -664,8 +679,10 @@ mod tests {
             sync: Default::default(),
             mention: Default::default(),
             attach_note: None,
+            focus_input: false,
             subagent_msgs: Vec::new(),
             view_subagents: false,
+            fork_preparing: false,
         }
     }
 
@@ -767,9 +784,11 @@ mod tests {
         let env = Env {
             cmd_tx: &tx,
             providers: &[],
+            fork_targets: &[],
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
+            break_all: true,
             ide_context: None,
             focused: false,
         };
@@ -812,9 +831,11 @@ mod tests {
         let env = Env {
             cmd_tx: &tx,
             providers: &[],
+            fork_targets: &[],
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
+            break_all: true,
             ide_context: None,
             focused: false,
         };
@@ -887,5 +908,95 @@ mod tests {
         assert_eq!(app.open_windows.len(), 2);
         assert!(app.tiling.auto);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fork_is_offered_only_when_idle_with_history_and_a_target() {
+        let both = [ProviderId::Claude, ProviderId::Antigravity];
+        let mut v = vm();
+        v.status = SessionStatus::Idle;
+        assert!(!v.messages.is_empty());
+        assert_eq!(session_view::fork_blocker(&v, &both), None);
+        assert!(session_view::fork_blocker(&v, &[]).is_some());
+        for busy in [
+            SessionStatus::Streaming,
+            SessionStatus::NeedsApproval,
+            SessionStatus::Starting,
+            SessionStatus::Error("x".into()),
+        ] {
+            v.status = busy;
+            assert!(session_view::fork_blocker(&v, &both).is_some());
+        }
+        v.status = SessionStatus::Idle;
+        v.messages.clear();
+        assert!(session_view::fork_blocker(&v, &both).is_some());
+    }
+
+    #[test]
+    fn fork_stays_off_while_a_fork_is_preparing() {
+        let both = [ProviderId::Claude, ProviderId::Antigravity];
+        let mut v = vm();
+        v.status = SessionStatus::Idle;
+        assert_eq!(session_view::fork_blocker(&v, &both), None);
+        v.fork_preparing = true;
+        assert!(session_view::fork_blocker(&v, &both)
+            .is_some_and(|why| why.starts_with("Preparing fork")));
+    }
+
+    #[test]
+    fn focused_xade_session_badge_uses_white_text() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let badge_color = |origin: xade_core::SessionOrigin, focused: bool, label: &str| {
+            let mut v = vm();
+            v.session.origin = origin;
+            v.collapsed = true;
+            let env = Env {
+                cmd_tx: &tx,
+                providers: &[],
+                fork_targets: &[],
+                vscode: None,
+                maximized: None,
+                send_mode: SendMode::Queue,
+                break_all: true,
+                ide_context: None,
+                focused,
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 200.0),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                session_view::show(ui, &mut v, &env);
+            });
+            fn find(s: &egui::Shape, label: &str) -> Option<egui::Color32> {
+                match s {
+                    egui::Shape::Text(t) if t.galley.text() == label => {
+                        t.galley.job.sections.first().map(|sec| sec.format.color)
+                    }
+                    egui::Shape::Vec(v) => v.iter().find_map(|c| find(c, label)),
+                    _ => None,
+                }
+            }
+            let color = out.shapes.iter().find_map(|c| find(&c.shape, label));
+            out.drop_without_applying_deltas();
+            color
+        };
+        assert_eq!(
+            badge_color(xade_core::SessionOrigin::Xade, true, "Xade"),
+            Some(theme::text())
+        );
+        assert_eq!(
+            badge_color(xade_core::SessionOrigin::Xade, false, "Xade"),
+            Some(theme::accent())
+        );
+        assert_eq!(
+            badge_color(xade_core::SessionOrigin::ClaudeCode, true, "Claude Code"),
+            Some(theme::claude())
+        );
     }
 }

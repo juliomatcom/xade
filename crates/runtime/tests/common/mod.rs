@@ -18,10 +18,17 @@ pub struct Harness {
     pub writer: WriterHandle,
     pub workspace_id: WorkspaceId,
     pub cwd: PathBuf,
+    /// Where the manager keeps fork hand-off files.
+    pub forks: PathBuf,
 }
 
 /// Temp store with one workspace at `cwd`, and a manager over `provider`.
 pub async fn start(dir: &Path, provider: Arc<dyn AgentProvider>) -> Harness {
+    start_with(dir, vec![provider]).await
+}
+
+/// Like `start`, over several providers.
+pub async fn start_with(dir: &Path, providers: Vec<Arc<dyn AgentProvider>>) -> Harness {
     let cwd = dir.join("project");
     std::fs::create_dir_all(&cwd).expect("cwd");
     let db = dir.join("workspace.db");
@@ -38,7 +45,9 @@ pub async fn start(dir: &Path, provider: Arc<dyn AgentProvider>) -> Harness {
         .expect("upsert");
     xade_runtime::flush(&writer).await;
     let reader = StoreReader::open(&db).expect("reader");
-    let (tx, rx) = SessionManager::start(vec![provider], writer.clone(), reader.clone());
+    let forks = dir.join("forks");
+    let (tx, rx) =
+        SessionManager::start_in(providers, writer.clone(), reader.clone(), forks.clone());
     Harness {
         tx,
         rx,
@@ -46,19 +55,24 @@ pub async fn start(dir: &Path, provider: Arc<dyn AgentProvider>) -> Harness {
         writer,
         workspace_id,
         cwd,
+        forks,
     }
 }
 
 impl Harness {
     pub fn create(&self, model: &str) {
+        self.create_on(ProviderId::Claude, model, Effort::Default, true);
+    }
+
+    pub fn create_on(&self, provider: ProviderId, model: &str, effort: Effort, auto_mode: bool) {
         self.tx
             .send(ManagerCmd::Create {
                 workspace_id: self.workspace_id,
                 cwd: self.cwd.clone(),
-                provider: ProviderId::Claude,
+                provider,
                 model_id: model.into(),
-                effort: Effort::Default,
-                auto_mode: true,
+                effort,
+                auto_mode,
             })
             .expect("create");
     }

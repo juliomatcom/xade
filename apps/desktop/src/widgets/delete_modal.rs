@@ -1,7 +1,7 @@
 //! Confirm modal before deleting a session forever.
 
 use egui::RichText;
-use xade_core::SessionId;
+use xade_core::{ProviderId, SessionId};
 use xade_runtime::ManagerCmd;
 
 use crate::app::App;
@@ -14,6 +14,15 @@ const MIN_WIDTH: f32 = 480.0;
 pub struct PendingDelete {
     pub id: SessionId,
     pub title: String,
+    pub provider: ProviderId,
+}
+
+/// What the CLI keeps of the session, which Delete removes too.
+fn history(provider: ProviderId) -> &'static str {
+    match provider {
+        ProviderId::Claude => "Claude Code transcript",
+        ProviderId::Antigravity => "Antigravity history",
+    }
 }
 
 /// Draws the modal when one is pending; Delete sends the command, Cancel or Esc drops it.
@@ -27,8 +36,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         &p.title
     };
     let body = format!(
-        "\u{201c}{title}\u{201d} will be removed from Xade and its Claude Code transcript will \
-         be deleted. This can't be undone."
+        "\u{201c}{title}\u{201d} will be removed from Xade and its {} will be deleted. This \
+         can't be undone.",
+        history(p.provider)
     );
     let (mut delete, mut cancel) = (false, false);
     let resp =
@@ -79,6 +89,7 @@ mod tests {
         app.pending_delete = Some(PendingDelete {
             id: SessionId::new(),
             title: "Fix the parser".into(),
+            provider: ProviderId::Claude,
         });
         let frame = |app: &mut App, events: Vec<egui::Event>| {
             let input = egui::RawInput {
@@ -117,5 +128,11 @@ mod tests {
         frame(&mut app, vec![esc]);
         assert!(app.pending_delete.is_none() && cmds.try_recv().is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_history_named_follows_the_provider() {
+        assert_eq!(history(ProviderId::Claude), "Claude Code transcript");
+        assert_eq!(history(ProviderId::Antigravity), "Antigravity history");
     }
 }

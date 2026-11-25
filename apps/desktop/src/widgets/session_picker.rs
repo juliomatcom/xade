@@ -211,6 +211,7 @@ mod tests {
             updated_at: now,
             model_id: String::new(),
             provider_session_id: None,
+            provider_id: xade_core::ProviderId::Claude,
         }
     }
 

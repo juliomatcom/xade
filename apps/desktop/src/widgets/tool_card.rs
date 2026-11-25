@@ -374,6 +374,7 @@ mod tests {
             tool_payload_json: Some(input.into()),
             is_error: false,
             created_at: time::OffsetDateTime::now_utc(),
+            provider_id: None,
         }
     }
 

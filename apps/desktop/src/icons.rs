@@ -24,6 +24,9 @@ pub const NEXT: &str = "\u{23F5}";
 pub const AUTO: &str = "\u{1F680}";
 pub const MENU: &str = "\u{2630}";
 pub const ABOUT: &str = "\u{2139}";
+/// A terminal prompt: providers are CLIs.
+pub const PROVIDERS: &str = ">_";
+pub const STATUS: &str = PROVIDERS;
 pub const OPEN_SESSION: &str = "\u{1F4C2}";
 pub const SHORTCUTS: &str = "\u{2328}";
 pub const SETTINGS: &str = "\u{2699}";
@@ -31,6 +34,8 @@ pub const WARNING: &str = "\u{26A0}";
 pub const COPY: &str = "\u{1F4CB}";
 pub const BUG: &str = "\u{1F41B}";
 pub const TRASH: &str = "\u{1F5D1}";
+pub const EXIT: &str = "\u{1F6AA}";
+pub const FORK: &str = "\u{1F500}";
 pub const FOLDER: &str = ADD_DIR;
 pub const FOLDER_OPEN: &str = OPEN_SESSION;
 pub const FILE: &str = "\u{1F4C4}";
@@ -50,6 +55,7 @@ mod tests {
     fn glyphs_exist() {
         let all = [
             NEW_SESSION,
+            PROVIDERS,
             ADD_DIR,
             TILE,
             HOME,
@@ -79,6 +85,8 @@ mod tests {
             COPY,
             BUG,
             TRASH,
+            FORK,
+            EXIT,
             FILE,
             COLLAPSED,
             EXPANDED,

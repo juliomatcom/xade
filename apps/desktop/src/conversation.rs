@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use egui::RichText;
 use egui_commonmark::CommonMarkCache;
-use xade_core::{Delivery, Message, Role, SessionStatus};
+use xade_core::{Delivery, Message, ProviderId, Role, SessionStatus};
 
 use crate::app::SessionVm;
 use crate::theme;
@@ -20,6 +20,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
         ui.ctx(),
         crate::workspace::WindowKind::Session(vm.session.id),
     );
+    let provider = vm.session.provider_id;
     let mut review = None;
     let mut open = None;
     let mut changes_review = None;
@@ -113,9 +114,10 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                                 Role::Assistant => {
                                     let id = m.id;
                                     let text = &m.content_text;
-                                    let clicked = assistant(ui, |ui| {
-                                        path_links.markdown(ui, md_cache, cwd, id, text)
-                                    });
+                                    let clicked =
+                                        assistant(ui, avatar_provider(m, provider), |ui| {
+                                            path_links.markdown(ui, md_cache, cwd, id, text)
+                                        });
                                     open = open.take().or(clicked);
                                 }
                                 Role::ToolCall => {
@@ -217,7 +219,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                         }
                     }
                     if !live_text.is_empty() {
-                        assistant(ui, |ui| {
+                        assistant(ui, provider, |ui| {
                             markdown(ui, md_cache, "live", live_text);
                             None
                         });
@@ -367,14 +369,21 @@ fn user_bubble(
     clicked
 }
 
+/// Whose avatar an assistant message gets: its own provider (copied fork history), else the
+/// session's.
+fn avatar_provider(m: &Message, session: ProviderId) -> ProviderId {
+    m.provider_id.unwrap_or(session)
+}
+
 /// The assistant avatar beside `body`, which draws the text.
 fn assistant(
     ui: &mut egui::Ui,
+    provider: ProviderId,
     body: impl FnOnce(&mut egui::Ui) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
-        if let Some(tex) = claude_symbol(ui.ctx()) {
+        if let Some(tex) = provider_symbol(ui.ctx(), provider) {
             egui::Image::new(&tex).paint_at(ui, rect);
         }
         ui.vertical(body).inner
@@ -385,32 +394,51 @@ fn assistant(
 /// The Claude symbol (`assets/claude-symbol.svg`, CC0, rendered to PNG at 4x the avatar).
 const CLAUDE_SYMBOL: &[u8] = include_bytes!("../../../assets/claude-symbol.png");
 
-/// The symbol as a texture, decoded and uploaded on first use.
-pub(crate) fn claude_symbol(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let id = egui::Id::unique("claude_symbol_texture");
+/// The Google "G" (`assets/google-symbol.svg`, public domain and trademarked per Wikimedia
+/// Commons, file Google_"G"_logo.svg), Antigravity's symbol, rendered like the Claude one.
+const GOOGLE_SYMBOL: &[u8] = include_bytes!("../../../assets/google-symbol.png");
+
+/// The provider's symbol as a texture, decoded and uploaded on first use (one per provider).
+pub(crate) fn provider_symbol(
+    ctx: &egui::Context,
+    provider: ProviderId,
+) -> Option<egui::TextureHandle> {
+    let id = egui::Id::unique(("provider_symbol_texture", provider));
     if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return Some(tex);
     }
-    let icon = eframe::icon_data::from_png_bytes(CLAUDE_SYMBOL)
-        .map_err(|e| tracing::warn!("claude symbol not loaded: {e}"))
+    let (name, png) = match provider {
+        ProviderId::Claude => ("claude_symbol", CLAUDE_SYMBOL),
+        ProviderId::Antigravity => ("google_symbol", GOOGLE_SYMBOL),
+    };
+    let icon = eframe::icon_data::from_png_bytes(png)
+        .map_err(|e| tracing::warn!("{name} not loaded: {e}"))
         .ok()?;
     let image = egui::ColorImage::from_rgba_unmultiplied(
         [icon.width as usize, icon.height as usize],
         &icon.rgba,
     );
-    let tex = ctx.load_texture("claude_symbol", image, egui::TextureOptions::LINEAR);
+    let tex = ctx.load_texture(name, image, egui::TextureOptions::LINEAR);
     ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
     Some(tex)
 }
 
 #[cfg(test)]
 mod symbol_tests {
+    use xade_core::ProviderId;
+
     #[test]
-    fn the_claude_symbol_decodes_into_a_texture() {
+    fn every_provider_symbol_decodes_into_its_own_cached_texture() {
         let ctx = egui::Context::default();
-        let tex = super::claude_symbol(&ctx).expect("symbol");
-        assert_eq!(tex.size(), [80, 80]);
-        assert!(super::claude_symbol(&ctx).is_some(), "cached second call");
+        let mut ids = Vec::new();
+        for p in [ProviderId::Claude, ProviderId::Antigravity] {
+            let tex = super::provider_symbol(&ctx, p).expect("symbol");
+            assert_eq!(tex.size(), [80, 80]);
+            let again = super::provider_symbol(&ctx, p).expect("cached second call");
+            assert_eq!(tex.id(), again.id(), "cached, not reloaded");
+            ids.push(tex.id());
+        }
+        assert_ne!(ids[0], ids[1], "one texture per provider");
     }
 }
 
@@ -497,7 +525,23 @@ mod tests {
             tool_payload_json: payload.map(str::to_string),
             is_error: false,
             created_at: OffsetDateTime::now_utc(),
+            provider_id: None,
         }
+    }
+
+    #[test]
+    fn an_assistant_message_uses_its_own_provider_for_the_avatar() {
+        let mut m = msg(Role::Assistant, "hi", None, None);
+        assert_eq!(
+            avatar_provider(&m, ProviderId::Claude),
+            ProviderId::Claude,
+            "none means the session's"
+        );
+        m.provider_id = Some(ProviderId::Antigravity);
+        assert_eq!(
+            avatar_provider(&m, ProviderId::Claude),
+            ProviderId::Antigravity
+        );
     }
 
     fn nasty(n: usize) -> String {
@@ -554,8 +598,10 @@ mod tests {
             sync: Default::default(),
             mention: Default::default(),
             attach_note: None,
+            focus_input: false,
             subagent_msgs: Vec::new(),
             view_subagents: false,
+            fork_preparing: false,
         }
     }
 

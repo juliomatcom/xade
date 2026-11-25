@@ -24,11 +24,13 @@ mod widgets;
 mod windows_state;
 mod workspace;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use xade_antigravity::AntigravityProvider;
 use xade_claude::ClaudeProvider;
-use xade_core::AgentProvider;
+use xade_core::{AgentProvider, ProviderError, ProviderId};
 use xade_runtime::SessionManager;
 use xade_store::{StoreReader, StoreWriter};
 
@@ -105,6 +107,24 @@ fn respawn(dir: &Path) -> std::io::Result<()> {
     cmd.spawn().map(drop)
 }
 
+/// Claude's preflight, run before the window shows. The other providers report in the
+/// background (see `App::new`) so a slow one never delays startup.
+fn run_preflights(
+    providers: &[Arc<dyn AgentProvider>],
+) -> HashMap<ProviderId, Result<(), ProviderError>> {
+    providers
+        .iter()
+        .filter(|p| p.id() == ProviderId::Claude)
+        .map(|p| {
+            let result = p.preflight();
+            if let Err(e) = &result {
+                tracing::warn!(provider = ?p.id(), error = %e, "provider preflight failed");
+            }
+            (p.id(), result)
+        })
+        .collect()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (path, detached) = match parse_args(std::env::args().skip(1)) {
         Ok(Cli::Help) => {
@@ -150,12 +170,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let provider: Arc<dyn AgentProvider> = Arc::new(ClaudeProvider::new());
-    let preflight = provider.preflight().err().map(|e| e.to_string());
-    if let Some(e) = &preflight {
-        tracing::warn!(error = %e, "provider preflight failed");
-    }
-    let providers = vec![provider];
+    let providers: Vec<Arc<dyn AgentProvider>> = vec![
+        Arc::new(ClaudeProvider::new()),
+        Arc::new(AntigravityProvider::new()),
+    ];
+    let preflight = run_preflights(&providers);
     let (cmd_tx, event_rx) = {
         let _guard = rt.enter();
         SessionManager::start(providers.clone(), writer.clone(), reader.clone())
@@ -237,6 +256,22 @@ mod tests {
     fn unknown_flags_and_extra_paths_are_errors() {
         assert!(parse(&["--nope"]).is_err());
         assert!(parse(&["a", "b"]).is_err());
+    }
+
+    #[test]
+    fn startup_waits_for_claude_only() {
+        use crate::app::StubProvider;
+        use std::time::{Duration, Instant};
+        let slow = Duration::from_secs(30);
+        let providers: Vec<Arc<dyn AgentProvider>> = vec![
+            Arc::new(StubProvider::claude().preflighting(Duration::ZERO, Ok(()))),
+            Arc::new(StubProvider::antigravity().preflighting(slow, Ok(()))),
+        ];
+        let started = Instant::now();
+        let results = run_preflights(&providers);
+        assert!(started.elapsed() < slow, "startup waited for Antigravity");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[&ProviderId::Claude], Ok(()));
     }
 
     #[test]

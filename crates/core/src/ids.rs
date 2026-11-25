@@ -35,4 +35,5 @@ impl Default for SessionId {
 #[serde(rename_all = "lowercase")]
 pub enum ProviderId {
     Claude,
+    Antigravity,
 }
