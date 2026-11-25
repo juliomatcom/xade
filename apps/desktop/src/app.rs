@@ -311,6 +311,7 @@ pub struct App {
     pub sidebar_visible: bool,
     pub keymaps_open: bool,
     pub about_open: bool,
+    pub status_open: bool,
     /// The Cmd+F bar, when open.
     pub find: Option<crate::find::FindState>,
     /// The session picker, when open.
@@ -433,6 +434,7 @@ impl App {
             sidebar_visible: true,
             keymaps_open: false,
             about_open: false,
+            status_open: false,
             find: None,
             picker: None,
             picker_generation: 0,
@@ -521,6 +523,7 @@ impl App {
             sidebar_visible: true,
             keymaps_open: false,
             about_open: false,
+            status_open: false,
             find: None,
             picker: None,
             picker_generation: 0,
@@ -2621,6 +2624,7 @@ impl App {
         crate::widgets::selection_menu::show(self, &ctx);
         self.saving_overlay(&ctx);
         about_modal::show(self, &ctx);
+        crate::widgets::status_modal::show(self, &ctx);
         crate::find::show(self, &ctx);
         self.editor_modal(&ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {

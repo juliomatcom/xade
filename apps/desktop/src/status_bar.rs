@@ -135,26 +135,17 @@ pub fn show(app: &App, ui: &mut egui::Ui) {
         });
 }
 
-/// One dot and name per installed provider: green when its preflight passed, red (error on
-/// hover) when not. A provider whose CLI is not installed is hidden while another is shown.
+/// One green dot and name per available provider; any other (missing, failing, still
+/// checking) is left out here and listed in the Status modal.
 fn providers(app: &App, ui: &mut egui::Ui) {
-    for id in app.visible_providers() {
-        let Some(p) = app.providers.iter().find(|p| p.id() == id) else {
-            continue;
-        };
-        let err = app.preflight_error(id);
-        let color = if err.is_none() {
-            theme::ok()
-        } else {
-            theme::danger()
-        };
+    for p in app.providers.iter().filter(|p| app.available(p.id())) {
         let text = match p.account_label() {
             Some(label) => format!("{} ({label})", p.display_name()),
             None => p.display_name().to_string(),
         };
-        ui.label(RichText::new("\u{25CF}").small().color(color));
+        ui.label(RichText::new("\u{25CF}").small().color(theme::ok()));
         ui.label(RichText::new(text).small().color(theme::text_muted()))
-            .on_hover_text(err.unwrap_or_else(|| "Logged in".into()));
+            .on_hover_text("Logged in");
     }
 }
 
@@ -471,17 +462,16 @@ mod tests {
     }
 
     #[test]
-    fn each_installed_provider_has_a_dot_in_its_own_state_and_a_missing_one_is_hidden() {
+    fn only_available_providers_show_a_green_dot() {
         use xade_core::ProviderError;
         let (names, dots) = provider_bar(None);
         assert_eq!(names, vec!["Claude", "Antigravity"]);
         assert_eq!(dots, vec![theme::ok(), theme::ok()]);
-        let (names, dots) = provider_bar(Some(Err(ProviderError::NotLoggedIn)));
-        assert_eq!(names, vec!["Claude", "Antigravity"]);
-        assert_eq!(dots, vec![theme::ok(), theme::danger()], "its own result");
-        let (names, dots) = provider_bar(Some(Err(ProviderError::NotInstalled)));
-        assert_eq!(names, vec!["Claude"], "Claude-only users see today's bar");
-        assert_eq!(dots, vec![theme::ok()]);
+        for err in [ProviderError::NotLoggedIn, ProviderError::NotInstalled] {
+            let (names, dots) = provider_bar(Some(Err(err)));
+            assert_eq!(names, vec!["Claude"], "only available providers show");
+            assert_eq!(dots, vec![theme::ok()]);
+        }
     }
 
     #[test]

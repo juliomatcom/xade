@@ -468,7 +468,7 @@ fn refresh_button(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// The top-left menu: adding a folder and About.
+/// The top-left menu: adding a folder, Status and About.
 fn app_menu(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button(icons::MENU, |ui| {
         if ui
@@ -479,6 +479,9 @@ fn app_menu(app: &mut App, ui: &mut egui::Ui) {
         }
         if ui.button(icons::with(icons::ABOUT, "About Xade")).clicked() {
             app.about_open = true;
+        }
+        if ui.button(icons::with(icons::STATUS, "Status")).clicked() {
+            app.status_open = true;
         }
         ui.separator();
         if ui.button(icons::with(icons::EXIT, "Exit")).clicked() {
@@ -1322,6 +1325,63 @@ mod tests {
         assert!(!has_picker(&mut app, &ctx));
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn the_menu_status_item_opens_the_status_dialog() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, ctx, dir) = home_app(&rt, false);
+        let run = |app: &mut App, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1400.0, 760.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| app_menu(app, ui));
+            let mut rects = Vec::new();
+            fn walk(s: &egui::Shape, v: &mut Vec<(String, egui::Rect)>) {
+                match s {
+                    egui::Shape::Text(t) => v.push((
+                        t.galley.text().to_string(),
+                        t.galley.rect.translate(t.pos.to_vec2()),
+                    )),
+                    egui::Shape::Vec(l) => l.iter().for_each(|s| walk(s, v)),
+                    _ => {}
+                }
+            }
+            out.shapes.iter().for_each(|c| walk(&c.shape, &mut rects));
+            out.drop_without_applying_deltas();
+            rects
+        };
+        let click = |at: egui::Pos2| {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            vec![egui::Event::PointerMoved(at), button(true), button(false)]
+        };
+        let find = |texts: &[(String, egui::Rect)], needle: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t.contains(needle))
+                .map(|(_, r)| r.center())
+        };
+        let texts = run(&mut app, vec![]);
+        let menu = find(&texts, icons::MENU).unwrap();
+        run(&mut app, click(menu));
+        run(&mut app, vec![]);
+        let texts = run(&mut app, vec![]);
+        let item = find(&texts, "Status").expect("menu item drawn");
+        run(&mut app, click(item));
+        assert!(app.status_open);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
