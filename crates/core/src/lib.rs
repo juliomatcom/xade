@@ -10,8 +10,8 @@ pub use error::{panic_message, ProviderError};
 pub use events::{ProviderEvent, SessionCommand};
 pub use ids::{ProviderId, SessionId, WorkspaceId};
 pub use model::{
-    Delivery, Effort, ImportedMessage, ImportedSession, Message, ModelOption, QuotaKind,
-    QuotaWindow, Role, RunState, RunningSession, Session, SessionOrigin, SessionStatus,
+    Delivery, Effort, ImportedMessage, ImportedSession, Message, ModelOption, QuotaGroup,
+    QuotaKind, QuotaWindow, Role, RunState, RunningSession, Session, SessionOrigin, SessionStatus,
     SpawnConfig, UsageTotals, Workspace,
 };
 pub use provider::{AgentProvider, SessionHandle};

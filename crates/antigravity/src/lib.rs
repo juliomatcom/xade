@@ -6,6 +6,7 @@ pub mod process;
 pub mod provider;
 pub mod rpc;
 pub mod translate;
+pub mod usage;
 
 pub use provider::AntigravityProvider;
 pub use translate::Translator;

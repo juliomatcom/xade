@@ -118,11 +118,16 @@ pub enum Fetch {
     SpawnFailed(String),
 }
 
-/// Runs `agy models` with stdin closed and a deadline. The child leads its own process group so a
-/// timeout kills it along with anything it started.
+/// Runs `agy models` (see [`run_agy`]).
 pub fn run_models(binary: &Path, timeout: Duration) -> Fetch {
+    run_agy(binary, &["models"], timeout)
+}
+
+/// Runs `agy <args>` with stdin closed and a deadline. The child leads its own process group so a
+/// timeout kills it along with anything it started.
+pub fn run_agy(binary: &Path, args: &[&str], timeout: Duration) -> Fetch {
     let mut child = match Command::new(binary)
-        .arg("models")
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

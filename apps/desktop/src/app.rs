@@ -12,8 +12,9 @@ use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use xade_core::{
-    AgentProvider, Delivery, Message, ProviderError, ProviderEvent, ProviderId, QuotaKind,
-    QuotaWindow, Role, RunningSession, Session, SessionId, SessionStatus, Workspace, WorkspaceId,
+    AgentProvider, Delivery, Message, ProviderError, ProviderEvent, ProviderId, QuotaGroup,
+    QuotaKind, QuotaWindow, Role, RunningSession, Session, SessionId, SessionStatus, Workspace,
+    WorkspaceId,
 };
 use xade_runtime::git::{git_status, GitState};
 use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
@@ -41,6 +42,8 @@ use crate::{composer, home, logging, status_bar, theme, workspace};
 /// The only provider that reports quota so far; the runtime's quota event carries no provider.
 /// A second one adds its id to that event and replaces this constant where it is read.
 pub(crate) const QUOTA_PROVIDER: ProviderId = ProviderId::Claude;
+/// How often a provider is asked for its quota; a finished turn asks again sooner.
+const QUOTA_POLL: Duration = Duration::from_secs(300);
 const GIT_REFRESH: Duration = Duration::from_secs(5);
 /// A running-set change re-imports at most this often.
 const RUNNING_IMPORT_GAP: Duration = Duration::from_secs(30);
@@ -78,6 +81,8 @@ pub enum UiMsg {
     },
     /// Quota rows saved by earlier runs.
     SavedQuota(Vec<QuotaWindow>),
+    /// A provider's answer to `AgentProvider::quota`.
+    ProviderQuota(ProviderId, Result<Vec<QuotaGroup>, ProviderError>),
     /// An error from a background task.
     Report(ErrorReport),
     PickerCards {
@@ -289,6 +294,11 @@ pub struct App {
     pub tree: FileTree,
     /// Last quota window per provider and kind, in draw order (session before weekly).
     pub quota: Vec<(ProviderId, QuotaWindow)>,
+    /// Quota providers report on request (`AgentProvider::quota`), by provider.
+    pub provider_quota: HashMap<ProviderId, Vec<QuotaGroup>>,
+    /// When each provider's quota was last asked for, and which asks are still out.
+    quota_checked: HashMap<ProviderId, Instant>,
+    quota_inflight: HashSet<ProviderId>,
     pub cmd_tx: UnboundedSender<ManagerCmd>,
     pub rt: Handle,
     pub git: HashMap<PathBuf, GitState>,
@@ -414,6 +424,9 @@ impl App {
             editors: Editors::default(),
             tree: FileTree::default(),
             quota: Vec::new(),
+            provider_quota: HashMap::new(),
+            quota_checked: HashMap::new(),
+            quota_inflight: HashSet::new(),
             cmd_tx,
             rt,
             git: HashMap::new(),
@@ -507,6 +520,9 @@ impl App {
             editors: Editors::default(),
             tree: FileTree::default(),
             quota: Vec::new(),
+            provider_quota: HashMap::new(),
+            quota_checked: HashMap::new(),
+            quota_inflight: HashSet::new(),
             cmd_tx: tokio::sync::mpsc::unbounded_channel().0,
             rt,
             git: HashMap::new(),
@@ -844,6 +860,26 @@ impl App {
         self.refresh_workspaces();
         self.refresh_cards();
         self.running_checked = None;
+    }
+
+    /// Asks each available provider for its quota every `QUOTA_POLL` and after its turns; one ask
+    /// per provider in flight. Providers that report quota in events answer with nothing.
+    fn poll_provider_quota(&mut self) {
+        for p in self.providers.clone() {
+            let id = p.id();
+            let due = self
+                .quota_checked
+                .get(&id)
+                .is_none_or(|t| t.elapsed() >= QUOTA_POLL);
+            if !due || self.quota_inflight.contains(&id) || !self.available(id) {
+                continue;
+            }
+            self.quota_checked.insert(id, Instant::now());
+            self.quota_inflight.insert(id);
+            let bridge = self.bridge.clone();
+            self.rt
+                .spawn_blocking(move || bridge.send(UiMsg::ProviderQuota(id, p.quota())));
+        }
     }
 
     /// Polls running sessions every `running::POLL`; one poll in flight at a time.
@@ -1850,7 +1886,7 @@ impl App {
 
     // ----- event folding -----
 
-    fn on_msg(&mut self, msg: UiMsg) {
+    pub(crate) fn on_msg(&mut self, msg: UiMsg) {
         match msg {
             UiMsg::App(ev) => self.on_app_event(*ev),
             UiMsg::Cards { generation, page } => {
@@ -1941,6 +1977,16 @@ impl App {
                     if let Some(file) = self.deferred_restore.take() {
                         self.restore_windows(file);
                     }
+                }
+            }
+            UiMsg::ProviderQuota(id, result) => {
+                self.quota_inflight.remove(&id);
+                match result {
+                    Ok(groups) => {
+                        self.provider_quota.insert(id, groups);
+                    }
+                    // Keep what was shown; the next poll tries again.
+                    Err(e) => tracing::warn!(provider = ?id, error = %e, "quota unavailable"),
                 }
             }
             UiMsg::LastProvider(p) => self.home.last_provider = p,
@@ -2268,6 +2314,8 @@ impl App {
         let dir = vm.cwd.clone();
         let mut refresh_git = false;
         let mut refresh_cards = false;
+        let provider = vm.session.provider_id;
+        let mut quota_stale = false;
         match ev {
             ProviderEvent::TextDelta(t) => {
                 vm.thinking_tokens = None;
@@ -2357,6 +2405,7 @@ impl App {
             }
             ProviderEvent::TurnComplete { usage, .. } => {
                 vm.turn_snapshotting = false;
+                quota_stale = true;
                 if let (Some(base), Some(anchor)) =
                     (vm.turn_base.take(), vm.messages.last().map(|m| m.id))
                 {
@@ -2390,6 +2439,10 @@ impl App {
         }
         if refresh_cards {
             self.refresh_cards();
+        }
+        if quota_stale {
+            // The turn used some: ask again at the next frame, unless an ask is out.
+            self.quota_checked.remove(&provider);
         }
     }
 }
@@ -2545,6 +2598,7 @@ impl App {
         self.reload_config(ctx);
         self.check_editors(ctx, false);
         self.poll_running();
+        self.poll_provider_quota();
         self.refresh_tree();
         self.run_due_import();
         ctx.request_repaint_after(running::POLL);

@@ -25,7 +25,7 @@ Verified against `agy` 1.5.16 with fixtures in `crates/antigravity/fixtures/` (r
 - Permission request: agy → Xade request `session/request_permission` with a **string** id (`"1"`), `params.toolCall`, `options:[{optionId:"allow",kind:"allow_once"},{optionId:"deny",kind:"reject_once"}]`; reply `{"outcome":{"outcome":"selected","optionId":…}}` with the original id value. Deny is a failed tool plus a normal `end_turn` (`tool_deny`).
 - Cancel: notification `session/cancel {sessionId}`; the prompt resolves `stopReason:"cancelled"` with that turn's usage and the process stays usable (`interrupt`). With a request pending, answer it `{"outcome":{"outcome":"cancelled"}}` first, then send `session/cancel` (`interrupt_pending_permission`). A request that arrives after Stop (interrupted, prompts outstanding) is answered `cancelled` at once and never shown, even in auto mode.
 - Steer: a second `session/prompt` mid-turn resolves the first at once with `end_turn` while the turn continues; the last response ends it (`steer`). The turn ends when no prompt is outstanding.
-- Not available: quota, cost, auth status, fork, effort `max`.
+- Quota is not in ACP: `AgentProvider::quota` runs `agy -p /usage --output-format json` (stdout: `command.data.groups[]` of `{name, buckets[{window:"5h"|"weekly", remaining_fraction, reset_time}]}`, `crates/antigravity/src/usage.rs`, recorded sample in its tests). Not available: cost, auth status, fork, effort `max`.
 - Any agy request other than `session/request_permission` must be answered `-32601`, or agy blocks.
 
 ## Frame → event (`crates/antigravity/src/translate.rs`)

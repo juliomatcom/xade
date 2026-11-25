@@ -7,8 +7,8 @@ use std::time::{Duration, Instant};
 use egui::{Align, Layout, RichText};
 use time::OffsetDateTime;
 use xade_core::{
-    ProviderError, ProviderId, QuotaKind, QuotaWindow, SessionOrigin, SessionStatus, Workspace,
-    WorkspaceId,
+    ProviderError, ProviderId, QuotaGroup, QuotaKind, QuotaWindow, SessionOrigin, SessionStatus,
+    Workspace, WorkspaceId,
 };
 use xade_runtime::git::GitState;
 use xade_store::SessionCard;
@@ -202,13 +202,8 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 let fit = quota_groups_that_fit(room, toggle, providers.len());
                 // Right to left: the last provider is drawn first, so the first ends up leftmost.
                 for p in providers.iter().take(fit).rev() {
-                    let windows: Vec<&QuotaWindow> = app
-                        .quota
-                        .iter()
-                        .filter(|(q, _)| q == p)
-                        .map(|(_, w)| w)
-                        .collect();
-                    quota_group(ui, *p, app.provider_name(*p), &windows);
+                    let groups = quota_groups(app, *p);
+                    quota_group(ui, *p, app.provider_name(*p), &groups);
                     ui.add_space(8.0);
                 }
                 let right_start = ui.min_rect().left();
@@ -323,10 +318,35 @@ fn quota_groups_that_fit(room: f32, toggle: f32, providers: usize) -> usize {
     }
 }
 
+/// Everything known about one provider's quota: the windows its events reported (one unnamed
+/// group) and the named groups it answered on request.
+fn quota_groups(app: &App, provider: ProviderId) -> Vec<QuotaGroup> {
+    let mut out = Vec::new();
+    let events: Vec<QuotaWindow> = app
+        .quota
+        .iter()
+        .filter(|(p, _)| *p == provider)
+        .map(|(_, w)| w.clone())
+        .collect();
+    if !events.is_empty() {
+        out.push(QuotaGroup {
+            name: String::new(),
+            windows: events,
+        });
+    }
+    out.extend(
+        app.provider_quota
+            .get(&provider)
+            .cloned()
+            .unwrap_or_default(),
+    );
+    out
+}
+
 /// A provider's quota as a glyph: its symbol, a 5 px bar for the session window and a hairline
-/// for the weekly one; the numbers are in the tooltip.
-fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, windows: &[&QuotaWindow]) {
-    let reports_quota = provider == crate::app::QUOTA_PROVIDER;
+/// for the weekly one, each showing the group closest to its limit; the numbers are in the
+/// tooltip.
+fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[QuotaGroup]) {
     let now = OffsetDateTime::now_utc();
     let height = ui.available_height();
     let (rect, resp) = ui.allocate_exact_size(
@@ -350,8 +370,14 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, windows: &[&
     }
     let left = rect.left() + symbol + 8.0;
     let bar = |y: f32, h: f32, kind: QuotaKind| {
-        let q = windows.iter().find(|q| q.kind == kind);
-        let fraction = q.map_or(0.0, |q| (quota_pct(q, now) / 100.0).clamp(0.0, 1.0));
+        let fraction = groups
+            .iter()
+            .flat_map(|g| &g.windows)
+            .filter(|q| q.kind == kind)
+            .map(|q| quota_pct(q, now))
+            .fold(0.0_f32, f32::max)
+            / 100.0;
+        let fraction = fraction.clamp(0.0, 1.0);
         let track = egui::Rect::from_min_size(
             egui::pos2(left, y - h / 2.0),
             egui::vec2(QUOTA_BAR_WIDTH, h),
@@ -365,27 +391,29 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, windows: &[&
     bar(mid + 3.0, 2.0, QuotaKind::SevenDay);
     resp.on_hover_ui(|ui| {
         ui.label(RichText::new(name).strong());
-        if !reports_quota {
-            ui.label(format!("{name} doesn't report usage limits."));
+        if groups.is_empty() {
+            ui.label("No usage data yet.");
         }
-        for kind in [QuotaKind::FiveHour, QuotaKind::SevenDay] {
-            let label = match kind {
-                QuotaKind::FiveHour => "5h session",
-                QuotaKind::SevenDay => "Weekly",
-            };
-            if !reports_quota {
-                break;
+        for g in groups {
+            if !g.name.is_empty() {
+                ui.label(RichText::new(&g.name).color(theme::text_muted()));
             }
-            ui.label(match windows.iter().find(|q| q.kind == kind) {
-                Some(q) => {
-                    let used = format!("{label}: {:.0}% used", quota_pct(q, now));
-                    match reset_text(q, now) {
-                        Some(r) => format!("{used} \u{b7} {}", r.to_lowercase()),
-                        None => used,
+            for kind in [QuotaKind::FiveHour, QuotaKind::SevenDay] {
+                let label = match kind {
+                    QuotaKind::FiveHour => "5h session",
+                    QuotaKind::SevenDay => "Weekly",
+                };
+                ui.label(match g.windows.iter().find(|q| q.kind == kind) {
+                    Some(q) => {
+                        let used = format!("{label}: {:.0}% used", quota_pct(q, now));
+                        match reset_text(q, now) {
+                            Some(r) => format!("{used} \u{b7} {}", r.to_lowercase()),
+                            None => used,
+                        }
                     }
-                }
-                None => format!("{label}: no data yet"),
-            });
+                    None => format!("{label}: no data"),
+                });
+            }
         }
     });
 }
@@ -984,6 +1012,37 @@ mod tests {
         assert_eq!(quota_groups_that_fit(190.0 + 24.0 + 90.0, 190.0, 3), 1);
         assert_eq!(quota_groups_that_fit(2000.0, 190.0, 2), 2);
         assert_eq!(quota_groups_that_fit(2000.0, 190.0, 0), 0);
+    }
+
+    #[test]
+    fn a_providers_quota_joins_its_events_and_its_answered_groups() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-ui-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let now = OffsetDateTime::now_utc();
+        app.quota = vec![(ProviderId::Claude, window(10.0, None, now))];
+        let group = QuotaGroup {
+            name: "Gemini".into(),
+            windows: vec![window(30.0, None, now)],
+        };
+        app.on_msg(crate::app::UiMsg::ProviderQuota(
+            ProviderId::Antigravity,
+            Ok(vec![group.clone()]),
+        ));
+        assert_eq!(quota_groups(&app, ProviderId::Claude).len(), 1);
+        assert_eq!(quota_groups(&app, ProviderId::Claude)[0].name, "");
+        assert_eq!(quota_groups(&app, ProviderId::Antigravity), vec![group]);
+        // A failed ask keeps what was shown.
+        app.on_msg(crate::app::UiMsg::ProviderQuota(
+            ProviderId::Antigravity,
+            Err(xade_core::ProviderError::NotLoggedIn),
+        ));
+        assert_eq!(quota_groups(&app, ProviderId::Antigravity).len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// `(text rects, frame rects)` the top bar draws at window width `width`.

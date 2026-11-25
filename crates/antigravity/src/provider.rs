@@ -6,13 +6,16 @@ use std::sync::{RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use xade_core::{
-    AgentProvider, Effort, ModelOption, ProviderError, ProviderId, SessionHandle, SpawnConfig,
+    AgentProvider, Effort, ModelOption, ProviderError, ProviderId, QuotaGroup, SessionHandle,
+    SpawnConfig,
 };
 
-use crate::models::{mentions_auth, parse_models, run_models, Fetch};
+use crate::models::{mentions_auth, parse_models, run_agy, run_models, Fetch};
 use crate::process::spawn_session;
+use crate::usage::parse_usage;
 
 const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
+const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct AntigravityProvider {
     binary: Option<PathBuf>,
@@ -142,6 +145,26 @@ impl AgentProvider for AntigravityProvider {
                     "agy models listed no models".into(),
                 ))
             }
+        }
+    }
+
+    fn quota(&self) -> Result<Vec<QuotaGroup>, ProviderError> {
+        let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
+        match run_agy(
+            binary,
+            &["-p", "/usage", "--output-format", "json"],
+            USAGE_TIMEOUT,
+        ) {
+            Fetch::SpawnFailed(e) => Err(ProviderError::Spawn(e)),
+            Fetch::TimedOut => Err(ProviderError::Protocol("agy /usage timed out".into())),
+            Fetch::Done {
+                success, stdout, ..
+            } => match success.then(|| parse_usage(&stdout)).flatten() {
+                Some(groups) => Ok(groups),
+                None => Err(ProviderError::Protocol(
+                    "agy /usage gave no quota report".into(),
+                )),
+            },
         }
     }
 
@@ -301,6 +324,22 @@ mod tests {
         let ids: Vec<_> = p.models().into_iter().map(|m| m.id).collect();
         assert_eq!(ids, ["a", "b"]);
         assert_eq!(p.default_model(), "a");
+    }
+
+    #[test]
+    fn quota_runs_agy_usage_as_json_and_parses_the_groups() {
+        let _exec = EXEC.lock().unwrap_or_else(|e| e.into_inner());
+        let root = tempfile::tempdir().unwrap();
+        let json = r#"{"command":{"data":{"groups":[{"name":"G","buckets":[{"window":"5h","remaining_fraction":0.5}]}]}}}"#;
+        let bin = fake_agy(
+            root.path(),
+            &format!("[ \"$1 $2 $3 $4\" = '-p /usage --output-format json' ] && echo '{json}'"),
+        );
+        let groups = AntigravityProvider::with_binary(bin).quota().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].windows[0].utilization_pct, 50.0);
+        let bad = fake_agy(root.path(), "echo nope");
+        assert!(AntigravityProvider::with_binary(bad).quota().is_err());
     }
 
     #[test]

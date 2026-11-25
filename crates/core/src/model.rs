@@ -239,6 +239,13 @@ pub struct QuotaWindow {
     pub resets_at: Option<OffsetDateTime>,
 }
 
+/// Quota windows of one model group; a provider with a single pool uses an empty `name`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuotaGroup {
+    pub name: String,
+    pub windows: Vec<QuotaWindow>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpawnConfig {
     pub cwd: PathBuf,
