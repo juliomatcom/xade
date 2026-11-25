@@ -1,5 +1,7 @@
 # Xade — Antigravity CLI Integration Plan (MVP)
 
+> Status: implemented (2026-11-25).
+
 > Goal: Xade runs sessions on **Claude Code** (`claude`) and **Antigravity** (`agy`) side by side. Any session can be **forked to another provider** and continue there with its history.
 > Written to be executed phase by phase by Sonnet 5.5 sub-agents (`model: sonnet`). Opus reviews each phase's diff before the next one starts. Wiki prose goes to Haiku (`model: haiku`).
 > Rules: `wiki-llm/conventions.md` wins over this plan. If they conflict, stop and ask; do not pick one yourself.
