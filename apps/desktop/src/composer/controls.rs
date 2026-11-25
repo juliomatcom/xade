@@ -148,7 +148,11 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
 }
 
 /// `Default` plus the levels of the model with this exact id; `fallback` when the id is unknown.
-fn effort_choices(models: &[ModelOption], model_id: &str, fallback: &[Effort]) -> Vec<Effort> {
+pub(crate) fn effort_choices(
+    models: &[ModelOption],
+    model_id: &str,
+    fallback: &[Effort],
+) -> Vec<Effort> {
     match models.iter().find(|m| m.id == model_id) {
         Some(m) => std::iter::once(Effort::Default)
             .chain(

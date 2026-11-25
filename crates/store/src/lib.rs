@@ -8,7 +8,7 @@ mod writer;
 
 use thiserror::Error;
 use time::OffsetDateTime;
-use xade_core::{SessionId, SessionOrigin, WorkspaceId};
+use xade_core::{ProviderId, SessionId, SessionOrigin, WorkspaceId};
 
 pub use reader::{ImportRef, StoreReader};
 pub use schema::SCHEMA_VERSION;
@@ -52,6 +52,7 @@ pub struct SessionCard {
     pub excerpt: Option<String>,
     /// Provider-side id; matches running processes.
     pub provider_session_id: Option<String>,
+    pub provider_id: ProviderId,
 }
 
 /// Slices `all` to the requested page; `page_size` of 0 is treated as 1.

@@ -24,11 +24,13 @@ mod widgets;
 mod windows_state;
 mod workspace;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use xade_antigravity::AntigravityProvider;
 use xade_claude::ClaudeProvider;
-use xade_core::AgentProvider;
+use xade_core::{AgentProvider, ProviderError, ProviderId};
 use xade_runtime::SessionManager;
 use xade_store::{StoreReader, StoreWriter};
 
@@ -105,6 +107,31 @@ fn respawn(dir: &Path) -> std::io::Result<()> {
     cmd.spawn().map(drop)
 }
 
+/// Every provider's preflight, run in parallel so startup waits for the slowest one only.
+fn run_preflights(
+    providers: &[Arc<dyn AgentProvider>],
+) -> HashMap<ProviderId, Result<(), ProviderError>> {
+    let threads: Vec<_> = providers
+        .iter()
+        .map(|p| {
+            let p = Arc::clone(p);
+            (p.id(), std::thread::spawn(move || p.preflight()))
+        })
+        .collect();
+    threads
+        .into_iter()
+        .map(|(id, t)| {
+            let result = t
+                .join()
+                .unwrap_or_else(|_| Err(ProviderError::Protocol("preflight panicked".into())));
+            if let Err(e) = &result {
+                tracing::warn!(provider = ?id, error = %e, "provider preflight failed");
+            }
+            (id, result)
+        })
+        .collect()
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (path, detached) = match parse_args(std::env::args().skip(1)) {
         Ok(Cli::Help) => {
@@ -150,12 +177,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()?;
-    let provider: Arc<dyn AgentProvider> = Arc::new(ClaudeProvider::new());
-    let preflight = provider.preflight().err().map(|e| e.to_string());
-    if let Some(e) = &preflight {
-        tracing::warn!(error = %e, "provider preflight failed");
-    }
-    let providers = vec![provider];
+    let providers: Vec<Arc<dyn AgentProvider>> = vec![
+        Arc::new(ClaudeProvider::new()),
+        Arc::new(AntigravityProvider::new()),
+    ];
+    let preflight = run_preflights(&providers);
     let (cmd_tx, event_rx) = {
         let _guard = rt.enter();
         SessionManager::start(providers.clone(), writer.clone(), reader.clone())
@@ -237,6 +263,30 @@ mod tests {
     fn unknown_flags_and_extra_paths_are_errors() {
         assert!(parse(&["--nope"]).is_err());
         assert!(parse(&["a", "b"]).is_err());
+    }
+
+    #[test]
+    fn preflights_run_in_parallel_and_report_each_provider() {
+        use crate::app::StubProvider;
+        use std::time::{Duration, Instant};
+        let delay = Duration::from_millis(400);
+        let providers: Vec<Arc<dyn AgentProvider>> = vec![
+            Arc::new(StubProvider::claude().preflighting(delay, Ok(()))),
+            Arc::new(
+                StubProvider::antigravity().preflighting(delay, Err(ProviderError::NotInstalled)),
+            ),
+        ];
+        let started = Instant::now();
+        let results = run_preflights(&providers);
+        assert!(
+            started.elapsed() < delay * 2,
+            "preflights ran one after the other"
+        );
+        assert_eq!(results[&ProviderId::Claude], Ok(()));
+        assert_eq!(
+            results[&ProviderId::Antigravity],
+            Err(ProviderError::NotInstalled)
+        );
     }
 
     #[test]

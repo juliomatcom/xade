@@ -135,10 +135,14 @@ pub fn show(app: &App, ui: &mut egui::Ui) {
         });
 }
 
-/// One dot and name per provider: green when preflight passed, red (error on hover) when not.
+/// One dot and name per installed provider: green when its preflight passed, red (error on
+/// hover) when not. A provider whose CLI is not installed is hidden while another is shown.
 fn providers(app: &App, ui: &mut egui::Ui) {
-    for p in &app.providers {
-        let err = app.home.preflight_error.as_deref();
+    for id in app.visible_providers() {
+        let Some(p) = app.providers.iter().find(|p| p.id() == id) else {
+            continue;
+        };
+        let err = app.preflight_error(id);
         let color = if err.is_none() {
             theme::ok()
         } else {
@@ -150,7 +154,7 @@ fn providers(app: &App, ui: &mut egui::Ui) {
         };
         ui.label(RichText::new("\u{25CF}").small().color(color));
         ui.label(RichText::new(text).small().color(theme::text_muted()))
-            .on_hover_text(err.unwrap_or("Logged in"));
+            .on_hover_text(err.unwrap_or_else(|| "Logged in".into()));
     }
 }
 
@@ -424,6 +428,60 @@ mod tests {
             .find(|(t, _)| t == "\u{25CF}")
             .expect("provider dot drawn");
         assert!(dot.min.x < 24.0, "{dot:?}");
+    }
+
+    /// The provider names and dot colours the bar draws, with `agy` as Antigravity's preflight.
+    #[allow(clippy::unwrap_used)]
+    fn provider_bar(
+        agy: Option<Result<(), xade_core::ProviderError>>,
+    ) -> (Vec<String>, Vec<egui::Color32>) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-bar-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        app.providers
+            .push(std::sync::Arc::new(crate::app::StubProvider::antigravity()));
+        if let Some(r) = agy {
+            app.home
+                .preflight
+                .insert(xade_core::ProviderId::Antigravity, r);
+        }
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| providers(&app, ui));
+        out.textures_delta.clear();
+        let _ = std::fs::remove_dir_all(&dir);
+        let (mut names, mut dots) = (Vec::new(), Vec::new());
+        fn walk(s: &egui::Shape, n: &mut Vec<String>, d: &mut Vec<egui::Color32>) {
+            match s {
+                egui::Shape::Text(t) if t.galley.text() == "\u{25CF}" => {
+                    d.extend(t.galley.job.sections.first().map(|s| s.format.color))
+                }
+                egui::Shape::Text(t) => n.push(t.galley.text().to_string()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, n, d)),
+                _ => {}
+            }
+        }
+        out.shapes
+            .iter()
+            .for_each(|c| walk(&c.shape, &mut names, &mut dots));
+        (names, dots)
+    }
+
+    #[test]
+    fn each_installed_provider_has_a_dot_in_its_own_state_and_a_missing_one_is_hidden() {
+        use xade_core::ProviderError;
+        let (names, dots) = provider_bar(None);
+        assert_eq!(names, vec!["Claude", "Antigravity"]);
+        assert_eq!(dots, vec![theme::ok(), theme::ok()]);
+        let (names, dots) = provider_bar(Some(Err(ProviderError::NotLoggedIn)));
+        assert_eq!(names, vec!["Claude", "Antigravity"]);
+        assert_eq!(dots, vec![theme::ok(), theme::danger()], "its own result");
+        let (names, dots) = provider_bar(Some(Err(ProviderError::NotInstalled)));
+        assert_eq!(names, vec!["Claude"], "Claude-only users see today's bar");
+        assert_eq!(dots, vec![theme::ok()]);
     }
 
     #[test]

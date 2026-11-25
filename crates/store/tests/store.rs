@@ -468,7 +468,9 @@ fn m_roundtrip(sent: &Message, got: &Message) -> Message {
 fn last_model_choice_carries_model_effort_and_auto() {
     let f = Fixture::new();
     f.writer.flush().unwrap();
-    assert!(block_on(f.reader.last_model_choice()).unwrap().is_none());
+    assert!(block_on(f.reader.last_model_choice(ProviderId::Claude))
+        .unwrap()
+        .is_none());
     let id = f.add_session("Last", 5);
     f.writer
         .send(WriteOp::UpdateSession {
@@ -483,8 +485,68 @@ fn last_model_choice_carries_model_effort_and_auto() {
         })
         .unwrap();
     f.writer.flush().unwrap();
-    let last = block_on(f.reader.last_model_choice()).unwrap();
+    let last = block_on(f.reader.last_model_choice(ProviderId::Claude)).unwrap();
     assert_eq!(last, Some(("opus".to_string(), Effort::High, true)));
+}
+
+/// Inserts an Xade session of `provider` with `model`, `age` seconds old.
+fn add_provider_session(f: &Fixture, provider: ProviderId, model: &str, age: i64) -> SessionId {
+    let mut s = session(f.ws, "p", f.base - Duration::seconds(age));
+    s.provider_id = provider;
+    s.model_id = model.into();
+    s.effort = Effort::Low;
+    let id = s.id;
+    f.writer.send(WriteOp::InsertSession(s)).unwrap();
+    id
+}
+
+#[test]
+fn last_model_choice_and_last_provider_are_per_provider() {
+    let f = Fixture::new();
+    f.writer.flush().unwrap();
+    assert!(block_on(f.reader.last_provider()).unwrap().is_none());
+    add_provider_session(&f, ProviderId::Claude, "opus", 30);
+    add_provider_session(&f, ProviderId::Antigravity, "gemini-4-neon", 10);
+    f.writer.flush().unwrap();
+    let choice = |p| block_on(f.reader.last_model_choice(p)).unwrap();
+    let claude = choice(ProviderId::Claude).unwrap();
+    assert_eq!(claude.0, "opus", "a Gemini model never reaches claude");
+    let agy = choice(ProviderId::Antigravity).unwrap();
+    assert_eq!((agy.0.as_str(), agy.1), ("gemini-4-neon", Effort::Low));
+    assert_eq!(
+        block_on(f.reader.last_provider()).unwrap(),
+        Some(ProviderId::Antigravity),
+        "the newest Xade session decides"
+    );
+    // A provider with no session has no choice; another provider's session never stands in.
+    let g = Fixture::new();
+    add_provider_session(&g, ProviderId::Claude, "opus", 5);
+    g.writer.flush().unwrap();
+    assert!(
+        block_on(g.reader.last_model_choice(ProviderId::Antigravity))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        block_on(g.reader.last_provider()).unwrap(),
+        Some(ProviderId::Claude)
+    );
+}
+
+#[test]
+fn cards_and_search_carry_their_provider() {
+    let f = Fixture::new();
+    add_provider_session(&f, ProviderId::Claude, "opus", 30);
+    add_provider_session(&f, ProviderId::Antigravity, "gemini-4-neon", 10);
+    f.writer.flush().unwrap();
+    let page = block_on(f.reader.list_sessions(None, None, 0, 10)).unwrap();
+    let ids: Vec<_> = page.items.iter().map(|c| c.provider_id).collect();
+    assert_eq!(ids, vec![ProviderId::Antigravity, ProviderId::Claude]);
+    let found = f.search(None, "p");
+    assert!(found
+        .items
+        .iter()
+        .any(|c| c.provider_id == ProviderId::Antigravity));
 }
 
 #[test]

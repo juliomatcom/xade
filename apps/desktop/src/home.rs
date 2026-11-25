@@ -1,11 +1,15 @@
 //! Home view and the shell panels it shares with the workspace view (top bar, sidebar).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use egui::{Align, Layout, RichText};
 use time::OffsetDateTime;
-use xade_core::{QuotaKind, QuotaWindow, SessionOrigin, SessionStatus, Workspace, WorkspaceId};
+use xade_core::{
+    ProviderError, ProviderId, QuotaKind, QuotaWindow, SessionOrigin, SessionStatus, Workspace,
+    WorkspaceId,
+};
 use xade_runtime::git::GitState;
 use xade_store::SessionCard;
 
@@ -38,7 +42,12 @@ pub struct HomeState {
     pub total: u64,
     /// Bumped per query; stale results are dropped.
     pub generation: u64,
-    pub preflight_error: Option<String>,
+    /// Each provider's preflight; a provider with no entry counts as available.
+    pub preflight: HashMap<ProviderId, Result<(), ProviderError>>,
+    /// The provider chosen in the top bar for new sessions; memory only.
+    pub provider_pick: Option<ProviderId>,
+    /// Provider of the latest Xade session, the default for new ones.
+    pub last_provider: Option<ProviderId>,
     /// `None` lists every origin.
     pub origin: Option<SessionOrigin>,
     pub importing: bool,
@@ -128,7 +137,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             if resp.changed() {
                 app.home.search_changed_at = Some(Instant::now());
             }
-            provider_dropdown(ui);
+            provider_dropdown(app, ui);
             let left_end = ui.min_rect().right();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 settings_button(app, ui);
@@ -153,7 +162,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 {
                     app.tiling.retile();
                 }
-                let enabled = app.home.scope.is_some() && app.home.preflight_error.is_none();
+                let enabled = app.home.scope.is_some() && app.new_provider().is_some();
                 let new = ui
                     .add_enabled(
                         enabled,
@@ -257,14 +266,36 @@ fn set_scope(app: &mut App, scope: Option<WorkspaceId>) {
     }
 }
 
-fn provider_dropdown(ui: &mut egui::Ui) {
+/// Picks the provider of new sessions; hidden unless two or more providers are available.
+fn provider_dropdown(app: &mut App, ui: &mut egui::Ui) {
+    let ids = app.selectable_providers();
+    let Some(current) = app.new_provider().filter(|_| ids.len() > 1) else {
+        return;
+    };
+    let mut picked = None;
     egui::ComboBox::from_id_salt("provider")
-        .selected_text("Claude")
+        .selected_text(app.provider_name(current))
         .show_ui(ui, |ui| {
-            let _ = ui.selectable_label(true, "Claude");
-            ui.add_enabled(false, egui::Button::new("Antigravity"))
-                .on_disabled_hover_text("Coming soon");
+            for id in ids {
+                if ui
+                    .selectable_label(id == current, app.provider_name(id))
+                    .clicked()
+                {
+                    picked = Some(id);
+                }
+            }
         });
+    if picked.is_some() {
+        app.home.provider_pick = picked;
+    }
+}
+
+/// Label colour of a provider on cards; Antigravity has no theme colour of its own.
+fn provider_color(id: ProviderId) -> egui::Color32 {
+    match id {
+        ProviderId::Claude => theme::claude(),
+        ProviderId::Antigravity => theme::text_muted(),
+    }
 }
 
 /// Both meters side by side: two 150 px slots and their 8 px gaps.
@@ -502,18 +533,22 @@ fn heading(ui: &mut egui::Ui, text: &str) {
 }
 
 pub fn grid(app: &mut App, ui: &mut egui::Ui) {
-    if let Some(err) = app.home.preflight_error.clone() {
+    // One banner per installed provider that failed its preflight, each with its own Retry.
+    let failing: Vec<_> = app
+        .visible_providers()
+        .into_iter()
+        .filter_map(|id| Some((id, app.unavailable_text(id)?)))
+        .collect();
+    for (id, text) in failing {
         egui::Frame::new()
             .fill(theme::bg_raised())
             .stroke(egui::Stroke::new(1.0, theme::danger()))
             .corner_radius(6)
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
-                ui.label(
-                    RichText::new(format!("Claude is not available: {err}")).color(theme::danger()),
-                );
+                ui.label(RichText::new(text).color(theme::danger()));
                 if ui.button(icons::with(icons::RETRY, "Retry")).clicked() {
-                    app.retry_preflight();
+                    app.retry_preflight(id);
                 }
             });
         ui.add_space(12.0);
@@ -767,7 +802,11 @@ fn card_ui(
     };
     row(ui, badges, &mut |ui| {
         origin_badge(ui, card.origin);
-        ui.label(RichText::new("Claude").small().color(theme::claude()));
+        ui.label(
+            RichText::new(app.provider_name(card.provider_id))
+                .small()
+                .color(provider_color(card.provider_id)),
+        );
         ui.add(
             egui::Label::new(
                 RichText::new(app.workspace_name(card.workspace_id))
@@ -851,6 +890,7 @@ pub fn relative_time(t: OffsetDateTime) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::app::StubProvider;
 
     fn window(pct: f32, resets_in_secs: Option<i64>, now: OffsetDateTime) -> QuotaWindow {
         QuotaWindow {
@@ -876,7 +916,7 @@ mod tests {
     }
 
     /// `(text rects, frame rects)` the top bar draws at window width `width`.
-    fn top_bar_rects(width: f32) -> (Vec<egui::Rect>, Vec<egui::Rect>) {
+    fn top_bar_rects(width: f32, two: bool) -> (Vec<egui::Rect>, Vec<egui::Rect>) {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -885,6 +925,10 @@ mod tests {
         let ctx = egui::Context::default();
         crate::theme::apply(&ctx);
         let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        if two {
+            app.providers
+                .push(std::sync::Arc::new(StubProvider::antigravity()));
+        }
         let now = OffsetDateTime::now_utc();
         app.quota = vec![
             window(80.0, Some(5400), now),
@@ -928,8 +972,8 @@ mod tests {
         (texts, frames)
     }
 
-    fn assert_no_overlaps(width: f32) {
-        let (texts, frames) = top_bar_rects(width);
+    fn assert_no_overlaps(width: f32, two: bool) {
+        let (texts, frames) = top_bar_rects(width, two);
         assert!(texts.len() > 8, "top bar drew {} texts", texts.len());
         for (i, a) in texts.iter().enumerate() {
             assert!(a.max.x <= width, "text {a:?} leaves the window at {width}");
@@ -957,7 +1001,8 @@ mod tests {
     #[test]
     fn top_bar_has_no_overlaps_from_min_window_width_up() {
         for width in [crate::MIN_WINDOW_SIZE[0], 1400.0, 1600.0, 2000.0, 3000.0] {
-            assert_no_overlaps(width);
+            assert_no_overlaps(width, false);
+            assert_no_overlaps(width, true);
         }
     }
 
@@ -972,6 +1017,7 @@ mod tests {
             updated_at: OffsetDateTime::now_utc() - time::Duration::seconds(age_secs),
             model_id: String::new(),
             provider_session_id: provider_session_id.map(Into::into),
+            provider_id: ProviderId::Claude,
         }
     }
 
@@ -1194,6 +1240,152 @@ mod tests {
         cc.origin = SessionOrigin::ClaudeCode;
         let (_, texts) = click_card(&app, &ctx, &cc, None);
         assert!(trash_of(&texts).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Every text a headless frame of `draw` paints, in order.
+    fn painted(
+        app: &mut App,
+        ctx: &egui::Context,
+        mut draw: impl FnMut(&mut App, &mut egui::Ui),
+    ) -> Vec<String> {
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1400.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        // The second pass settles sizes that depend on the first.
+        ctx.run_ui(input(), |ui| draw(app, ui))
+            .textures_delta
+            .clear();
+        let mut out = ctx.run_ui(input(), |ui| draw(app, ui));
+        out.textures_delta.clear();
+        fn walk(s: &egui::Shape, t: &mut Vec<String>) {
+            match s {
+                egui::Shape::Text(x) => t.push(x.galley.text().to_string()),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, t)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        out.shapes.iter().for_each(|c| walk(&c.shape, &mut texts));
+        texts
+    }
+
+    fn home_app(
+        rt: &tokio::runtime::Runtime,
+        two: bool,
+    ) -> (App, egui::Context, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("xade-home-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        if two {
+            app.providers
+                .push(std::sync::Arc::new(StubProvider::antigravity()));
+        }
+        (app, ctx, dir)
+    }
+
+    #[test]
+    fn the_provider_picker_shows_only_with_two_available_providers() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, ctx, dir) = home_app(&rt, false);
+        let has_picker = |app: &mut App, ctx: &egui::Context| {
+            painted(app, ctx, top_bar)
+                .iter()
+                .any(|t| t == "Claude" || t == "Antigravity")
+        };
+        // Claude only: no picker, as before.
+        assert!(!has_picker(&mut app, &ctx));
+        let (mut app, ctx, dir2) = home_app(&rt, true);
+        assert!(has_picker(&mut app, &ctx));
+        app.home.provider_pick = Some(xade_core::ProviderId::Antigravity);
+        let texts = painted(&mut app, &ctx, top_bar);
+        assert!(texts.iter().any(|t| t == "Antigravity"), "{texts:?}");
+        // Antigravity not installed: back to a single provider, no picker.
+        app.home.preflight.insert(
+            xade_core::ProviderId::Antigravity,
+            Err(xade_core::ProviderError::NotInstalled),
+        );
+        assert!(!has_picker(&mut app, &ctx));
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn the_banner_lists_each_installed_failing_provider_and_hides_a_missing_one() {
+        use xade_core::{ProviderError, ProviderId};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, ctx, dir) = home_app(&rt, true);
+        let banners = |app: &mut App, ctx: &egui::Context| -> Vec<String> {
+            painted(app, ctx, grid)
+                .into_iter()
+                .filter(|t| t.contains("is not available"))
+                .collect()
+        };
+        assert!(banners(&mut app, &ctx).is_empty());
+        app.home
+            .preflight
+            .insert(ProviderId::Antigravity, Err(ProviderError::NotLoggedIn));
+        assert_eq!(
+            banners(&mut app, &ctx),
+            vec!["Antigravity is not available: provider CLI is not logged in"]
+        );
+        app.home
+            .preflight
+            .insert(ProviderId::Claude, Err(ProviderError::NotLoggedIn));
+        assert_eq!(banners(&mut app, &ctx).len(), 2);
+        // Not installed hides Antigravity: the Claude banner is exactly today's.
+        app.home
+            .preflight
+            .insert(ProviderId::Antigravity, Err(ProviderError::NotInstalled));
+        assert_eq!(
+            banners(&mut app, &ctx),
+            vec!["Claude is not available: provider CLI is not logged in"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_card_names_its_own_provider() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (app, ctx, dir) = home_app(&rt, true);
+        let mut agy = test_card(None, 60);
+        agy.provider_id = ProviderId::Antigravity;
+        let claude = test_card(None, 60);
+        for card in [&agy, &claude] {
+            render_card(&app, &ctx, card);
+        }
+        let (agy_texts, _) = render_card(&app, &ctx, &agy);
+        let (claude_texts, _) = render_card(&app, &ctx, &claude);
+        assert!(
+            agy_texts.iter().any(|t| t == "Antigravity"),
+            "{agy_texts:?}"
+        );
+        assert!(!agy_texts.iter().any(|t| t == "Claude"));
+        assert!(
+            claude_texts.iter().any(|t| t == "Claude"),
+            "{claude_texts:?}"
+        );
+        assert_ne!(
+            provider_color(ProviderId::Claude),
+            provider_color(ProviderId::Antigravity)
+        );
+        assert_eq!(
+            provider_color(ProviderId::Antigravity),
+            theme::text_muted(),
+            "no theme colour of its own"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

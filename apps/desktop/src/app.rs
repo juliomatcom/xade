@@ -12,8 +12,8 @@ use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use xade_core::{
-    AgentProvider, Delivery, Message, ProviderEvent, QuotaKind, QuotaWindow, Role, RunningSession,
-    Session, SessionId, SessionStatus, Workspace, WorkspaceId,
+    AgentProvider, Delivery, Message, ProviderError, ProviderEvent, ProviderId, QuotaKind,
+    QuotaWindow, Role, RunningSession, Session, SessionId, SessionStatus, Workspace, WorkspaceId,
 };
 use xade_runtime::git::{git_status, GitState};
 use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
@@ -61,7 +61,10 @@ pub enum UiMsg {
     Workspaces(Vec<Workspace>),
     /// Sent after `Workspaces` for a folder given on the command line.
     OpenWorkspace(WorkspaceId),
-    Preflight(Option<String>),
+    /// One provider's preflight (startup, or its Retry).
+    Preflight(ProviderId, Result<(), ProviderError>),
+    /// Provider of the latest Xade session, the default for a new one.
+    LastProvider(Option<ProviderId>),
     /// Quota rows saved by earlier runs.
     SavedQuota(Vec<QuotaWindow>),
     /// An error from a background task.
@@ -338,7 +341,7 @@ impl App {
         providers: Vec<Arc<dyn AgentProvider>>,
         writer: WriterHandle,
         reader: StoreReader,
-        preflight_error: Option<String>,
+        preflight: HashMap<ProviderId, Result<(), ProviderError>>,
         config_path: PathBuf,
         log_dir: PathBuf,
         initial_workspace: Option<PathBuf>,
@@ -359,7 +362,7 @@ impl App {
         let mut app = App {
             view: View::Home,
             home: HomeState {
-                preflight_error,
+                preflight,
                 ..HomeState::default()
             },
             sessions: HashMap::new(),
@@ -426,12 +429,13 @@ impl App {
         app.refresh_workspaces();
         app.refresh_cards();
         app.load_saved_quota();
+        app.load_last_provider();
         if let Some(root) = initial_workspace {
             app.open_folder(root);
         } else {
             app.restore_windows(crate::windows_state::path(&config_path));
         }
-        if app.home.preflight_error.is_none() {
+        if app.any_available() {
             app.start_import();
         }
         app
@@ -461,7 +465,7 @@ impl App {
             errors: ErrorQueue::default(),
             warning: None,
             log_dir: None,
-            providers: Vec::new(),
+            providers: vec![Arc::new(StubProvider::claude())],
             writer,
             reader,
             tiling: Tiling::default(),
@@ -920,6 +924,7 @@ impl App {
         self.pending_delete = Some(PendingDelete {
             id: card.id,
             title: card.title.clone(),
+            provider: card.provider_id,
         });
     }
 
@@ -931,12 +936,120 @@ impl App {
         }
     }
 
-    pub fn retry_preflight(&self) {
-        let (provider, bridge) = (self.providers.first().cloned(), self.bridge.clone());
+    /// Re-runs only `id`'s preflight, off the UI thread.
+    pub fn retry_preflight(&self, id: ProviderId) {
+        let (provider, bridge) = (self.provider(id).cloned(), self.bridge.clone());
         self.rt.spawn_blocking(move || {
-            let err = provider.and_then(|p| p.preflight().err().map(|e| e.to_string()));
-            bridge.send(UiMsg::Preflight(err));
+            if let Some(p) = provider {
+                bridge.send(UiMsg::Preflight(id, p.preflight()));
+            }
         });
+    }
+
+    fn provider(&self, id: ProviderId) -> Option<&Arc<dyn AgentProvider>> {
+        self.providers.iter().find(|p| p.id() == id)
+    }
+
+    /// The provider's name for messages; the id has no name of its own.
+    pub fn provider_name(&self, id: ProviderId) -> &'static str {
+        self.provider(id).map_or("Provider", |p| p.display_name())
+    }
+
+    /// Whether `id` passed its preflight (no result yet counts as available).
+    pub fn available(&self, id: ProviderId) -> bool {
+        matches!(self.home.preflight.get(&id), None | Some(Ok(())))
+    }
+
+    pub fn any_available(&self) -> bool {
+        self.providers.iter().any(|p| self.available(p.id()))
+    }
+
+    /// Why `id` failed its preflight, or `None` when it did not.
+    pub fn preflight_error(&self, id: ProviderId) -> Option<String> {
+        self.home
+            .preflight
+            .get(&id)?
+            .as_ref()
+            .err()
+            .map(|e| e.to_string())
+    }
+
+    /// `preflight_error` naming the provider, or `None` when it is available.
+    pub fn unavailable_text(&self, id: ProviderId) -> Option<String> {
+        let err = self.preflight_error(id)?;
+        Some(format!(
+            "{} is not available: {err}",
+            self.provider_name(id)
+        ))
+    }
+
+    /// Providers the UI shows (status bar, banner): every one whose CLI is installed. When
+    /// none is, only the first stays, so a machine without any CLI sees today's Claude banner.
+    pub fn visible_providers(&self) -> Vec<ProviderId> {
+        let installed = |p: &&Arc<dyn AgentProvider>| {
+            !matches!(
+                self.home.preflight.get(&p.id()),
+                Some(Err(ProviderError::NotInstalled))
+            )
+        };
+        let shown: Vec<_> = self.providers.iter().filter(installed).collect();
+        match shown.is_empty() {
+            true => self.providers.iter().take(1).map(|p| p.id()).collect(),
+            false => shown.iter().map(|p| p.id()).collect(),
+        }
+    }
+
+    /// The providers a new session can use, in the app's provider order.
+    pub fn selectable_providers(&self) -> Vec<ProviderId> {
+        let mut ids: Vec<_> = self.providers.iter().map(|p| p.id()).collect();
+        ids.retain(|p| self.available(*p));
+        ids
+    }
+
+    /// The provider the next new session uses: the user's pick, else the latest Xade
+    /// session's, else the first available one. `None` when none is available.
+    pub fn new_provider(&self) -> Option<ProviderId> {
+        let ids = self.selectable_providers();
+        let usable = |p: &ProviderId| ids.contains(p);
+        self.home
+            .provider_pick
+            .filter(usable)
+            .or(self.home.last_provider.filter(usable))
+            .or_else(|| ids.first().copied())
+    }
+
+    fn load_last_provider(&self) {
+        let (reader, bridge) = (self.reader.clone(), self.bridge.clone());
+        self.rt.spawn(async move {
+            match reader.last_provider().await {
+                Ok(p) => bridge.send(UiMsg::LastProvider(p)),
+                Err(e) => read_failed(&bridge, "last provider", &e),
+            }
+        });
+    }
+
+    /// The provider of a session the UI already knows (open, or on the current Home page).
+    fn provider_of(&self, id: SessionId) -> Option<ProviderId> {
+        self.sessions
+            .get(&id)
+            .map(|vm| vm.session.provider_id)
+            .or_else(|| {
+                self.home
+                    .cards
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map(|c| c.provider_id)
+            })
+    }
+
+    /// Warns and returns true when session `id`'s provider is known and unavailable. A session
+    /// whose provider is not known yet (a restored window) opens dormant and fails on Send.
+    fn blocked_by_provider(&mut self, id: SessionId) -> bool {
+        let Some(text) = self.provider_of(id).and_then(|p| self.unavailable_text(p)) else {
+            return false;
+        };
+        self.warn(text);
+        true
     }
 
     pub fn add_directory(&self) {
@@ -1011,27 +1124,36 @@ impl App {
     // ----- actions -----
 
     pub fn new_session(&mut self) {
-        let (Some(ws_id), Some(provider)) = (self.home.scope, self.providers.first()) else {
+        let (Some(ws_id), Some(provider_id)) = (self.home.scope, self.new_provider()) else {
+            return;
+        };
+        let Some(provider) = self.provider(provider_id) else {
             return;
         };
         let Some(ws) = self.home.workspaces.iter().find(|w| w.id == ws_id) else {
             return;
         };
-        // New sessions start with the model, effort and Auto mode of the last one, across
-        // restarts.
+        // New sessions start with the model, effort and Auto mode of the last one of the same
+        // provider, across restarts.
         let (cmd_tx, reader) = (self.cmd_tx.clone(), self.reader.clone());
-        let (cwd, provider_id, default_model) = (
-            ws.root_path.clone(),
-            provider.id(),
-            provider.default_model(),
-        );
+        let (cwd, default_model) = (ws.root_path.clone(), provider.default_model());
+        let (models, levels) = (provider.models(), provider.effort_levels());
         self.rt.spawn(async move {
-            let last = reader.last_model_choice().await.unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "could not read the last model choice");
-                None
-            });
+            let last = reader
+                .last_model_choice(provider_id)
+                .await
+                .unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "could not read the last model choice");
+                    None
+                });
             let (model_id, effort, auto_mode) =
                 last.unwrap_or((default_model, xade_core::Effort::Default, false));
+            let supported = composer::effort_choices(&models, &model_id, &levels);
+            let effort = if supported.contains(&effort) {
+                effort
+            } else {
+                xade_core::Effort::Default
+            };
             let _ = cmd_tx.send(ManagerCmd::Create {
                 workspace_id: ws_id,
                 cwd,
@@ -1045,7 +1167,7 @@ impl App {
 
     /// Opens a stored session (spawning it when not live) and shows it.
     pub fn open_session(&mut self, id: SessionId) {
-        if self.home.preflight_error.is_some() {
+        if self.blocked_by_provider(id) {
             return;
         }
         self.background.remove(&id);
@@ -1057,7 +1179,7 @@ impl App {
 
     /// Opens a stored session as a window without leaving the current view (Cmd+click on Home).
     pub fn open_session_background(&mut self, id: SessionId) {
-        if self.home.preflight_error.is_some() {
+        if self.blocked_by_provider(id) {
             return;
         }
         if self.is_live(id) {
@@ -1093,7 +1215,7 @@ impl App {
     /// With no working provider nothing reopens and nothing is saved, so the list survives;
     /// with `restore_windows` off nothing reopens and the saved list is emptied on the next change.
     fn restore_windows(&mut self, file: PathBuf) {
-        if self.home.preflight_error.is_some() {
+        if !self.any_available() {
             return;
         }
         let saved = crate::windows_state::load(&file);
@@ -1747,17 +1869,16 @@ impl App {
                 self.home.scope = Some(id);
                 self.home.page = 0;
                 self.refresh_cards();
-                if self.home.preflight_error.is_none() {
-                    self.new_session();
-                }
+                self.new_session();
             }
-            UiMsg::Preflight(err) => {
-                let recovered = err.is_none() && self.home.preflight_error.is_some();
-                self.home.preflight_error = err;
+            UiMsg::Preflight(id, result) => {
+                let recovered = result.is_ok() && !self.available(id);
+                self.home.preflight.insert(id, result);
                 if recovered {
                     self.start_import();
                 }
             }
+            UiMsg::LastProvider(p) => self.home.last_provider = p,
             UiMsg::Report(report) => self.report(report),
             UiMsg::SavedQuota(saved) => {
                 // A live report may have arrived first; it wins.
@@ -2325,6 +2446,84 @@ impl App {
         if self.keymaps_open && keymaps_modal::show(&ctx) {
             self.keymaps_open = false;
         }
+    }
+}
+
+/// A provider with fixed models and a preflight that always passes, for tests.
+#[cfg(test)]
+pub(crate) struct StubProvider {
+    id: ProviderId,
+    name: &'static str,
+    models: Vec<xade_core::ModelOption>,
+    /// How long `preflight` takes and what it returns.
+    preflight: (Duration, Result<(), ProviderError>),
+}
+
+#[cfg(test)]
+impl StubProvider {
+    /// A preflight that takes `delay` and returns `result`.
+    pub(crate) fn preflighting(
+        mut self,
+        delay: Duration,
+        result: Result<(), ProviderError>,
+    ) -> Self {
+        self.preflight = (delay, result);
+        self
+    }
+
+    pub(crate) fn claude() -> Self {
+        Self::new(ProviderId::Claude, "Claude", &["opus"])
+    }
+
+    pub(crate) fn antigravity() -> Self {
+        Self::new(ProviderId::Antigravity, "Antigravity", &["gemini-4-neon"])
+    }
+
+    fn new(id: ProviderId, name: &'static str, models: &[&str]) -> Self {
+        let models = models
+            .iter()
+            .map(|m| xade_core::ModelOption {
+                id: (*m).into(),
+                label: (*m).into(),
+                description: String::new(),
+                effort_levels: vec![xade_core::Effort::Low, xade_core::Effort::High],
+            })
+            .collect();
+        Self {
+            id,
+            name,
+            models,
+            preflight: (Duration::ZERO, Ok(())),
+        }
+    }
+}
+
+#[cfg(test)]
+impl AgentProvider for StubProvider {
+    fn id(&self) -> ProviderId {
+        self.id
+    }
+    fn display_name(&self) -> &'static str {
+        self.name
+    }
+    fn models(&self) -> Vec<xade_core::ModelOption> {
+        self.models.clone()
+    }
+    fn default_model(&self) -> String {
+        self.models[0].id.clone()
+    }
+    fn effort_levels(&self) -> Vec<xade_core::Effort> {
+        vec![xade_core::Effort::Low, xade_core::Effort::High]
+    }
+    fn preflight(&self) -> Result<(), ProviderError> {
+        std::thread::sleep(self.preflight.0);
+        self.preflight.1.clone()
+    }
+    fn spawn(
+        &self,
+        _cfg: xade_core::SpawnConfig,
+    ) -> Result<xade_core::SessionHandle, ProviderError> {
+        Err(ProviderError::NotInstalled)
     }
 }
 
@@ -2929,6 +3128,229 @@ mod tests {
         app.home.scope = Some(ws.id);
         app.home.workspaces = vec![ws];
         assert_eq!(app.target_dir(), dir);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn two_provider_app(rt: &tokio::runtime::Runtime) -> (App, std::path::PathBuf) {
+        let (mut app, dir) = test_app(rt);
+        app.providers = vec![
+            Arc::new(StubProvider::claude()),
+            Arc::new(StubProvider::antigravity()),
+        ];
+        (app, dir)
+    }
+
+    fn fail(app: &mut App, id: ProviderId, e: ProviderError) {
+        app.home.preflight.insert(id, Err(e));
+    }
+
+    #[test]
+    fn a_not_installed_provider_is_hidden_while_another_is_shown() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        assert_eq!(app.visible_providers(), vec![claude, agy]);
+        assert_eq!(app.selectable_providers(), vec![claude, agy]);
+
+        // Antigravity missing: Claude-only users see today's UI.
+        fail(&mut app, agy, ProviderError::NotInstalled);
+        assert_eq!(app.visible_providers(), vec![claude]);
+        assert_eq!(app.selectable_providers(), vec![claude]);
+        assert!(app.available(claude) && !app.available(agy));
+
+        // Installed but signed out: shown, with its error, but not selectable.
+        fail(&mut app, agy, ProviderError::NotLoggedIn);
+        assert_eq!(app.visible_providers(), vec![claude, agy]);
+        assert_eq!(app.selectable_providers(), vec![claude]);
+        let text = app.unavailable_text(agy).unwrap();
+        assert!(text.starts_with("Antigravity is not available: "), "{text}");
+
+        // Claude missing, Antigravity fine: only Antigravity shows.
+        app.home.preflight.remove(&agy);
+        fail(&mut app, claude, ProviderError::NotInstalled);
+        assert_eq!(app.visible_providers(), vec![agy]);
+        assert_eq!(app.new_provider(), Some(agy));
+
+        // Neither installed: the first provider stays, for today's banner.
+        fail(&mut app, agy, ProviderError::NotInstalled);
+        assert_eq!(app.visible_providers(), vec![claude]);
+        assert!(!app.any_available() && app.new_provider().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_new_session_provider_is_the_pick_then_the_last_then_the_first_available() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        assert_eq!(app.new_provider(), Some(claude));
+        app.on_msg(UiMsg::LastProvider(Some(agy)));
+        assert_eq!(app.new_provider(), Some(agy));
+        app.home.provider_pick = Some(claude);
+        assert_eq!(app.new_provider(), Some(claude));
+        // An unavailable choice is skipped.
+        fail(&mut app, claude, ProviderError::NotLoggedIn);
+        assert_eq!(app.new_provider(), Some(agy));
+        app.home.provider_pick = Some(agy);
+        fail(&mut app, agy, ProviderError::NotLoggedIn);
+        assert_eq!(app.new_provider(), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Runs `new_session` and returns the `Create` it sent.
+    fn created(
+        rt: &tokio::runtime::Runtime,
+        app: &mut App,
+    ) -> (ProviderId, String, xade_core::Effort, bool) {
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        app.new_session();
+        let cmd = rt
+            .block_on(async { tokio::time::timeout(Duration::from_secs(5), cmds.recv()).await })
+            .unwrap()
+            .unwrap();
+        let ManagerCmd::Create {
+            provider,
+            model_id,
+            effort,
+            auto_mode,
+            ..
+        } = cmd
+        else {
+            panic!("not a Create");
+        };
+        (provider, model_id, effort, auto_mode)
+    }
+
+    fn stored(
+        app: &App,
+        ws: WorkspaceId,
+        provider: ProviderId,
+        model: &str,
+        effort: xade_core::Effort,
+    ) {
+        let mut row = new_session_row();
+        row.workspace_id = ws;
+        row.provider_id = provider;
+        row.model_id = model.into();
+        row.effort = effort;
+        row.origin = xade_core::SessionOrigin::Xade;
+        app.writer.send(WriteOp::InsertSession(row)).unwrap();
+        app.writer.flush().unwrap();
+    }
+
+    #[test]
+    fn new_session_uses_the_picked_provider_and_only_its_own_last_choice() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        let ws = WorkspaceId::new();
+        app.home.workspaces = vec![Workspace {
+            id: ws,
+            root_path: dir.clone(),
+            display_name: "w".into(),
+            last_opened_at: OffsetDateTime::now_utc(),
+            is_open: true,
+        }];
+        app.home.scope = Some(ws);
+        app.writer
+            .send(WriteOp::UpsertWorkspace(app.home.workspaces[0].clone()))
+            .unwrap();
+        // Only Claude has a stored session, with a Claude-only model and effort.
+        stored(&app, ws, claude, "opus", xade_core::Effort::High);
+
+        app.home.provider_pick = Some(agy);
+        let (p, model, effort, _) = created(&rt, &mut app);
+        assert_eq!(p, agy);
+        assert_eq!(
+            model, "gemini-4-neon",
+            "the provider default, not a Claude id"
+        );
+        assert_eq!(effort, xade_core::Effort::Default);
+
+        app.home.provider_pick = Some(claude);
+        let (p, model, effort, _) = created(&rt, &mut app);
+        assert_eq!(
+            (p, model.as_str(), effort),
+            (claude, "opus", xade_core::Effort::High)
+        );
+
+        // An effort the model does not offer falls back to Default.
+        stored(&app, ws, agy, "gemini-4-neon", xade_core::Effort::Max);
+        app.home.provider_pick = Some(agy);
+        let (p, model, effort, _) = created(&rt, &mut app);
+        assert_eq!((p, model.as_str()), (agy, "gemini-4-neon"));
+        assert_eq!(effort, xade_core::Effort::Default);
+
+        // With the pick unavailable, nothing is created for it.
+        fail(&mut app, agy, ProviderError::NotLoggedIn);
+        fail(&mut app, claude, ProviderError::NotLoggedIn);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        app.new_session();
+        assert!(cmds.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_is_blocked_only_for_the_provider_that_is_unavailable() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let mut claude_row = new_session_row();
+        claude_row.provider_id = ProviderId::Claude;
+        let mut agy_row = new_session_row();
+        agy_row.provider_id = ProviderId::Antigravity;
+        let (claude_id, agy_id) = (claude_row.id, agy_row.id);
+        app.insert_vm(claude_row, Vec::new());
+        app.insert_vm(agy_row, Vec::new());
+        // An errored session is not live, so `open_session` sends `Open` for it.
+        for vm in app.sessions.values_mut() {
+            vm.status = SessionStatus::Error("x".into());
+        }
+        fail(
+            &mut app,
+            ProviderId::Antigravity,
+            ProviderError::NotLoggedIn,
+        );
+
+        app.open_session(agy_id);
+        assert!(cmds.try_recv().is_err(), "Antigravity is blocked");
+        let text = app.warning_text().unwrap();
+        assert!(text.starts_with("Antigravity is not available"), "{text}");
+        app.open_session_background(agy_id);
+        assert!(cmds.try_recv().is_err());
+
+        app.open_session(claude_id);
+        assert!(
+            matches!(cmds.try_recv(), Ok(ManagerCmd::Open { session_id }) if session_id == claude_id)
+        );
+        assert!(app.open_windows.contains(&WindowKind::Session(claude_id)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn retry_reruns_one_provider_and_a_recovery_starts_the_import() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let agy = ProviderId::Antigravity;
+        fail(&mut app, agy, ProviderError::NotLoggedIn);
+        app.retry_preflight(agy);
+        let msg = app.events_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let UiMsg::Preflight(id, result) = msg else {
+            panic!("not a Preflight");
+        };
+        assert_eq!(id, agy, "only the retried provider reports");
+        assert!(app.events_rx.try_recv().is_err());
+        app.on_msg(UiMsg::Preflight(id, result));
+        assert!(app.available(agy));
+        assert!(matches!(cmds.try_recv(), Ok(ManagerCmd::Import)));
+        // A provider that was already fine does not re-import.
+        app.on_msg(UiMsg::Preflight(agy, Ok(())));
+        assert!(cmds.try_recv().is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

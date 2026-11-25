@@ -8,6 +8,7 @@ mod paste;
 #[cfg(test)]
 pub(super) mod test_support;
 
+pub(crate) use controls::effort_choices;
 pub use mention_popup::insert_mentions;
 pub use notes::set_attach_note;
 

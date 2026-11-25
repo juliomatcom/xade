@@ -7,6 +7,7 @@ repository.workspace = true
 publish = false
 
 [dependencies]
+xade-antigravity = { path = "../../crates/antigravity" }
 xade-claude = { path = "../../crates/claude" }
 xade-core = { path = "../../crates/core" }
 xade-runtime = { path = "../../crates/runtime" }

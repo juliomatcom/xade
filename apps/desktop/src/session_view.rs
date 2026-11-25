@@ -96,7 +96,7 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
                 ui.label(RichText::new(cwd).small().color(theme::text_muted()))
                     .on_hover_text(vm.cwd.display().to_string());
             }
-            if let Some(tex) = conversation::claude_symbol(ui.ctx()) {
+            if let Some(tex) = conversation::provider_symbol(ui.ctx(), vm.session.provider_id) {
                 ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)));
             }
             ui.add(
