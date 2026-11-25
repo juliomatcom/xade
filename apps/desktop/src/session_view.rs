@@ -1,7 +1,7 @@
 //! One session window's content: header, conversation, permission banner and composer.
 
 use egui::RichText;
-use xade_core::{ProviderId, SessionStatus};
+use xade_core::{ProviderId, SessionOrigin, SessionStatus};
 use xade_runtime::ManagerCmd;
 
 use crate::app::SessionVm;
@@ -81,7 +81,13 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let maximized = env.maximized == Some(vm.session.id);
-    let badge = |ui: &mut egui::Ui| home::origin_badge(ui, vm.session.origin);
+    let badge = |ui: &mut egui::Ui| {
+        if env.focused && vm.session.origin == SessionOrigin::Xade {
+            chrome::badge(ui, "Xade", theme::text());
+        } else {
+            home::origin_badge(ui, vm.session.origin);
+        }
+    };
     let mut fork = None;
     chrome::header(
         ui,

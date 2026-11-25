@@ -57,9 +57,9 @@ pub struct HomeState {
     pub md_cache: std::cell::RefCell<egui_commonmark::CommonMarkCache>,
 }
 
-/// Room the provider dropdown and the right-hand cluster (buttons, quota meters) take; the
-/// top-bar test fails if they outgrow it.
-const TOP_BAR_RESERVED: f32 = 108.0 + 474.0 + 90.0;
+/// Room the session controls container, view toggle and right-hand cluster (buttons, quota
+/// meters) take; the top-bar test fails if they outgrow it.
+const TOP_BAR_RESERVED: f32 = 290.0 + 214.0 + 180.0;
 
 /// The search field shrinks with the space left of `TOP_BAR_RESERVED`.
 fn search_width(available: f32) -> f32 {
@@ -139,7 +139,7 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
             if resp.changed() {
                 app.home.search_changed_at = Some(Instant::now());
             }
-            provider_dropdown(app, ui);
+            session_controls(app, ui);
             let left_end = ui.min_rect().right();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 settings_button(app, ui);
@@ -164,46 +164,25 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                 {
                     app.tiling.retile();
                 }
-                let enabled = app.home.scope.is_some() && app.new_provider().is_some();
-                let new = ui
-                    .add_enabled(
-                        enabled,
-                        egui::Button::new(
-                            RichText::new(icons::with(icons::NEW_SESSION, "New Session"))
-                                .color(theme::text()),
-                        )
-                        .fill(theme::accent()),
-                    )
-                    .on_disabled_hover_text("Select a workspace in the sidebar first");
-                let new = new.on_hover_text(format!(
-                    "New session ({})",
-                    keymap::shortcut_text(Action::NewSession)
-                ));
-                if new.clicked() {
-                    app.new_session();
-                }
-                if ui
-                    .button(icons::OPEN_SESSION)
-                    .on_hover_text(format!(
-                        "Open session ({})",
-                        keymap::shortcut_text(Action::OpenPicker)
-                    ))
-                    .clicked()
-                {
-                    app.run_action(Action::OpenPicker);
-                }
                 // The meters give way when the centered toggle would not fit beside them.
                 let toggle = ui
                     .data(|d| d.get_temp::<f32>(egui::Id::unique("view_toggle_width")))
                     .unwrap_or(190.0);
                 let room = ui.min_rect().left() - left_end;
                 // Every available provider gets a group, even one that reports no quota.
-                let providers = app.selectable_providers();
-                let fit = quota_groups_that_fit(room, toggle, providers.len());
+                let shown: Vec<(ProviderId, Vec<QuotaGroup>)> = app
+                    .selectable_providers()
+                    .into_iter()
+                    .map(|p| (p, quota_groups(app, p)))
+                    .collect();
+                let widths: Vec<f32> = shown
+                    .iter()
+                    .map(|(_, g)| quota_slot_width(g.len()))
+                    .collect();
+                let fit = quota_groups_that_fit(room, toggle, &widths);
                 // Right to left: the last provider is drawn first, so the first ends up leftmost.
-                for p in providers.iter().take(fit).rev() {
-                    let groups = quota_groups(app, *p);
-                    quota_group(ui, *p, app.provider_name(*p), &groups);
+                for (p, groups) in shown.iter().take(fit).rev() {
+                    quota_group(ui, *p, app.provider_name(*p), groups);
                     ui.add_space(8.0);
                 }
                 let right_start = ui.min_rect().left();
@@ -272,6 +251,48 @@ fn set_scope(app: &mut App, scope: Option<WorkspaceId>) {
     }
 }
 
+/// Open session, New Session and (when 2+ providers are available) the provider picker, grouped
+/// in one container on the left of the top bar.
+fn session_controls(app: &mut App, ui: &mut egui::Ui) {
+    egui::Frame::new()
+        .stroke(egui::Stroke::new(1.0, theme::border_strong()))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(4, 2))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if ui
+                    .button(icons::OPEN_SESSION)
+                    .on_hover_text(format!(
+                        "Open session ({})",
+                        keymap::shortcut_text(Action::OpenPicker)
+                    ))
+                    .clicked()
+                {
+                    app.run_action(Action::OpenPicker);
+                }
+                let enabled = app.home.scope.is_some() && app.new_provider().is_some();
+                let new = ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(
+                            RichText::new(icons::with(icons::NEW_SESSION, "New Session"))
+                                .color(theme::text()),
+                        )
+                        .fill(theme::accent()),
+                    )
+                    .on_disabled_hover_text("Select a workspace in the sidebar first")
+                    .on_hover_text(format!(
+                        "New session ({})",
+                        keymap::shortcut_text(Action::NewSession)
+                    ));
+                if new.clicked() {
+                    app.new_session();
+                }
+                provider_dropdown(app, ui);
+            });
+        });
+}
+
 /// Picks the provider of new sessions; hidden unless two or more providers are available.
 fn provider_dropdown(app: &mut App, ui: &mut egui::Ui) {
     let ids = app.selectable_providers();
@@ -304,18 +325,43 @@ fn provider_color(id: ProviderId) -> egui::Color32 {
     }
 }
 
-/// One provider's group: its symbol and the two bars, plus the gap after it.
-const QUOTA_GROUP_WIDTH: f32 = 82.0;
-const QUOTA_BAR_WIDTH: f32 = 48.0;
+/// A provider's glyph is its symbol and one pair of bars per model group; with several groups the
+/// pairs are narrower so the glyph stays small. Gaps: symbol to bars, between pairs, after it.
+const QUOTA_SYMBOL: f32 = 16.0;
+const QUOTA_PAIR_GAP: f32 = 4.0;
+const QUOTA_SLOT_GAP: f32 = 8.0;
 
-/// How many provider groups fit in `room`, once the centered toggle has its space.
-fn quota_groups_that_fit(room: f32, toggle: f32, providers: usize) -> usize {
-    let free = room - toggle - 24.0;
-    if free < QUOTA_GROUP_WIDTH {
-        0
+fn quota_pair_width(pairs: usize) -> f32 {
+    if pairs <= 1 {
+        48.0
     } else {
-        ((free / QUOTA_GROUP_WIDTH) as usize).min(providers)
+        28.0
     }
+}
+
+/// The glyph's own width for `groups` model groups (an empty one still draws a pair).
+fn quota_glyph_width(groups: usize) -> f32 {
+    let n = groups.max(1);
+    QUOTA_SYMBOL + 8.0 + n as f32 * quota_pair_width(n) + (n - 1) as f32 * QUOTA_PAIR_GAP
+}
+
+/// The glyph plus the gap after it.
+fn quota_slot_width(groups: usize) -> f32 {
+    quota_glyph_width(groups) + QUOTA_SLOT_GAP
+}
+
+/// How many glyphs, in order, fit in `room` once the centered toggle has its space.
+fn quota_groups_that_fit(room: f32, toggle: f32, widths: &[f32]) -> usize {
+    let mut free = room - toggle - 24.0;
+    let mut n = 0;
+    for w in widths {
+        if free < *w {
+            break;
+        }
+        free -= w;
+        n += 1;
+    }
+    n
 }
 
 /// Everything known about one provider's quota: the windows its events reported (one unnamed
@@ -343,23 +389,21 @@ fn quota_groups(app: &App, provider: ProviderId) -> Vec<QuotaGroup> {
     out
 }
 
-/// A provider's quota as a glyph: its symbol, a 5 px bar for the session window and a hairline
-/// for the weekly one, each showing the group closest to its limit; the numbers are in the
-/// tooltip.
+/// A provider's quota as a glyph: its symbol, then per model group a 5 px bar for the session
+/// window over a hairline for the weekly one; the numbers are in the tooltip, in the same order.
 fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[QuotaGroup]) {
     let now = OffsetDateTime::now_utc();
     let height = ui.available_height();
     let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(QUOTA_GROUP_WIDTH - 8.0, height),
+        egui::vec2(quota_glyph_width(groups.len()), height),
         egui::Sense::hover(),
     );
     let painter = ui.painter();
-    let symbol = 16.0;
     let mid = rect.center().y;
     if let Some(tex) = crate::conversation::provider_symbol(ui.ctx(), provider) {
         let r = egui::Rect::from_center_size(
-            egui::pos2(rect.left() + symbol / 2.0, mid),
-            egui::vec2(symbol, symbol),
+            egui::pos2(rect.left() + QUOTA_SYMBOL / 2.0, mid),
+            egui::vec2(QUOTA_SYMBOL, QUOTA_SYMBOL),
         );
         painter.image(
             tex.id(),
@@ -368,27 +412,25 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[Qu
             egui::Color32::WHITE,
         );
     }
-    let left = rect.left() + symbol + 8.0;
-    let bar = |y: f32, h: f32, kind: QuotaKind| {
-        let fraction = groups
-            .iter()
-            .flat_map(|g| &g.windows)
-            .filter(|q| q.kind == kind)
-            .map(|q| quota_pct(q, now))
-            .fold(0.0_f32, f32::max)
-            / 100.0;
-        let fraction = fraction.clamp(0.0, 1.0);
-        let track = egui::Rect::from_min_size(
-            egui::pos2(left, y - h / 2.0),
-            egui::vec2(QUOTA_BAR_WIDTH, h),
-        );
-        painter.rect_filled(track, h / 2.0, theme::border());
-        let mut fill = track;
-        fill.set_width(track.width() * fraction);
-        painter.rect_filled(fill, h / 2.0, theme::usage_color(fraction));
-    };
-    bar(mid - 4.0, 5.0, QuotaKind::FiveHour);
-    bar(mid + 3.0, 2.0, QuotaKind::SevenDay);
+    let pairs = groups.len().max(1);
+    let width = quota_pair_width(pairs);
+    for i in 0..pairs {
+        let left = rect.left() + QUOTA_SYMBOL + 8.0 + i as f32 * (width + QUOTA_PAIR_GAP);
+        let bar = |y: f32, h: f32, kind: QuotaKind| {
+            let fraction = groups
+                .get(i)
+                .and_then(|g| g.windows.iter().find(|q| q.kind == kind))
+                .map_or(0.0, |q| (quota_pct(q, now) / 100.0).clamp(0.0, 1.0));
+            let track =
+                egui::Rect::from_min_size(egui::pos2(left, y - h / 2.0), egui::vec2(width, h));
+            painter.rect_filled(track, h / 2.0, theme::border());
+            let mut fill = track;
+            fill.set_width(track.width() * fraction);
+            painter.rect_filled(fill, h / 2.0, theme::usage_color(fraction));
+        };
+        bar(mid - 4.0, 5.0, QuotaKind::FiveHour);
+        bar(mid + 3.0, 2.0, QuotaKind::SevenDay);
+    }
     resp.on_hover_ui(|ui| {
         ui.label(RichText::new(name).strong());
         if groups.is_empty() {
@@ -587,13 +629,7 @@ pub fn origin_badge(ui: &mut egui::Ui, origin: SessionOrigin) {
         SessionOrigin::Xade => theme::accent(),
         SessionOrigin::ClaudeCode => theme::claude(),
     };
-    egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0, color))
-        .corner_radius(8)
-        .inner_margin(egui::Margin::symmetric(6, 0))
-        .show(ui, |ui| {
-            ui.label(RichText::new(origin_label(origin)).small().color(color));
-        });
+    crate::chrome::badge(ui, origin_label(origin), color);
 }
 
 fn origin_filter(app: &mut App, ui: &mut egui::Ui) {
@@ -1008,10 +1044,21 @@ mod tests {
 
     #[test]
     fn quota_groups_give_way_to_the_toggle_and_cap_at_the_providers() {
-        assert_eq!(quota_groups_that_fit(200.0, 190.0, 2), 0);
-        assert_eq!(quota_groups_that_fit(190.0 + 24.0 + 90.0, 190.0, 3), 1);
-        assert_eq!(quota_groups_that_fit(2000.0, 190.0, 2), 2);
-        assert_eq!(quota_groups_that_fit(2000.0, 190.0, 0), 0);
+        let one = quota_slot_width(1);
+        assert_eq!(quota_groups_that_fit(200.0, 190.0, &[one, one]), 0);
+        assert_eq!(
+            quota_groups_that_fit(190.0 + 24.0 + one, 190.0, &[one, one]),
+            1
+        );
+        assert_eq!(quota_groups_that_fit(2000.0, 190.0, &[one, one]), 2);
+        assert_eq!(quota_groups_that_fit(2000.0, 190.0, &[]), 0);
+        // Wider glyphs (several model groups) take their own room.
+        let two = quota_slot_width(2);
+        assert!(two > one && two < 2.0 * one);
+        assert_eq!(
+            quota_groups_that_fit(190.0 + 24.0 + two, 190.0, &[two, one]),
+            1
+        );
     }
 
     #[test]
@@ -1070,6 +1117,17 @@ mod tests {
                 },
             ),
         ];
+        if two {
+            // Two model groups: the widest glyph the top bar draws.
+            let group = |name: &str| QuotaGroup {
+                name: name.into(),
+                windows: vec![window(30.0, Some(5400), now)],
+            };
+            app.provider_quota.insert(
+                ProviderId::Antigravity,
+                vec![group("Gemini Models"), group("Claude and GPT models")],
+            );
+        }
         let input = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -1137,6 +1195,62 @@ mod tests {
             assert_no_overlaps(width, false);
             assert_no_overlaps(width, true);
         }
+    }
+
+    #[test]
+    fn session_controls_group_open_new_and_provider_on_the_left() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, ctx, dir) = home_app(&rt, true);
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 760.0),
+            )),
+            ..Default::default()
+        };
+        ctx.run_ui(input(), |ui| top_bar(&mut app, ui))
+            .textures_delta
+            .clear();
+        let mut out = ctx.run_ui(input(), |ui| top_bar(&mut app, ui));
+        out.textures_delta.clear();
+        let (mut texts, mut frames) = (Vec::new(), Vec::new());
+        fn walk(shape: &egui::Shape, t: &mut Vec<(String, egui::Rect)>, f: &mut Vec<egui::Rect>) {
+            match shape {
+                egui::Shape::Text(s) => t.push((
+                    s.galley.text().to_string(),
+                    s.galley.rect.translate(s.pos.to_vec2()),
+                )),
+                egui::Shape::Rect(r) if r.rect.width() < 1600.0 * 0.9 => f.push(r.rect),
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, t, f)),
+                _ => {}
+            }
+        }
+        out.shapes
+            .iter()
+            .for_each(|c| walk(&c.shape, &mut texts, &mut frames));
+        let find = |needle: &str| {
+            texts
+                .iter()
+                .find(|(t, _)| t.contains(needle))
+                .map(|(_, r)| *r)
+                .unwrap_or_else(|| panic!("missing {needle:?} in {texts:?}"))
+        };
+        let open = find(icons::OPEN_SESSION);
+        let new = find("New Session");
+        let provider = find("Claude");
+        let home = find("Home");
+        assert!(open.right() < new.left(), "{open:?} vs {new:?}");
+        assert!(new.right() < provider.left(), "{new:?} vs {provider:?}");
+        assert!(provider.right() < home.left(), "{provider:?} vs {home:?}");
+        assert!(
+            frames.iter().any(|f| f.contains_rect(open)
+                && f.contains_rect(new)
+                && f.contains_rect(provider)),
+            "no single container encloses Open, New Session and Provider: {frames:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn test_card(provider_session_id: Option<&str>, age_secs: i64) -> SessionCard {

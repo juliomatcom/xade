@@ -942,4 +942,61 @@ mod tests {
         assert!(session_view::fork_blocker(&v, &both)
             .is_some_and(|why| why.starts_with("Preparing fork")));
     }
+
+    #[test]
+    fn focused_xade_session_badge_uses_white_text() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let badge_color = |origin: xade_core::SessionOrigin, focused: bool, label: &str| {
+            let mut v = vm();
+            v.session.origin = origin;
+            v.collapsed = true;
+            let env = Env {
+                cmd_tx: &tx,
+                providers: &[],
+                fork_targets: &[],
+                vscode: None,
+                maximized: None,
+                send_mode: SendMode::Queue,
+                break_all: true,
+                ide_context: None,
+                focused,
+            };
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600.0, 200.0),
+                )),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                session_view::show(ui, &mut v, &env);
+            });
+            fn find(s: &egui::Shape, label: &str) -> Option<egui::Color32> {
+                match s {
+                    egui::Shape::Text(t) if t.galley.text() == label => {
+                        t.galley.job.sections.first().map(|sec| sec.format.color)
+                    }
+                    egui::Shape::Vec(v) => v.iter().find_map(|c| find(c, label)),
+                    _ => None,
+                }
+            }
+            let color = out.shapes.iter().find_map(|c| find(&c.shape, label));
+            out.drop_without_applying_deltas();
+            color
+        };
+        assert_eq!(
+            badge_color(xade_core::SessionOrigin::Xade, true, "Xade"),
+            Some(theme::text())
+        );
+        assert_eq!(
+            badge_color(xade_core::SessionOrigin::Xade, false, "Xade"),
+            Some(theme::accent())
+        );
+        assert_eq!(
+            badge_color(xade_core::SessionOrigin::ClaudeCode, true, "Claude Code"),
+            Some(theme::claude())
+        );
+    }
 }
