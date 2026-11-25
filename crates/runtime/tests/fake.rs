@@ -525,12 +525,24 @@ fn transcript_line(h: &Harness, id: SessionId) -> String {
     format!("@{}", transcript_file(h, id).display())
 }
 
-/// Forks `id` and returns the new session id.
+/// Forks `id` (no resume preamble) and returns the new session id.
 async fn fork(h: &mut Harness, id: SessionId, to: ProviderId) -> SessionId {
+    fork_with_resume(h, id, to, "").await
+}
+
+const RESUME: &str = "Carry on, do not mention the file.";
+
+async fn fork_with_resume(
+    h: &mut Harness,
+    id: SessionId,
+    to: ProviderId,
+    resume: &str,
+) -> SessionId {
     h.tx.send(ManagerCmd::Fork {
         session_id: id,
         provider: to,
         handoff_prompt: PROMPT.into(),
+        resume_prompt: resume.into(),
     })
     .unwrap();
     let ev = h
@@ -653,6 +665,112 @@ async fn the_first_send_to_a_fork_carries_its_snapshot_once() {
     open(&mut h, new).await;
     send(&mut h, new, "third").await;
     assert_eq!(agy.prompts()[2], "third");
+}
+
+fn resume_file(h: &Harness, id: SessionId) -> PathBuf {
+    h.forks.join(format!("{}.resume.md", id.0))
+}
+
+#[tokio::test]
+async fn the_first_send_to_a_fork_adds_the_resume_preamble_after_the_file_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _claude, agy) = both(dir.path()).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    let new = fork_with_resume(&mut h, src, ProviderId::Antigravity, RESUME).await;
+    assert_eq!(
+        std::fs::read_to_string(resume_file(&h, new)).unwrap(),
+        RESUME
+    );
+
+    open(&mut h, new).await;
+    send(&mut h, new, "what word was it?").await;
+    assert_eq!(
+        agy.prompts(),
+        vec![format!(
+            "{}\n{RESUME}\nwhat word was it?",
+            snapshot_line(&h, new)
+        )]
+    );
+    // The stored message is the user's text alone, and later sends carry nothing.
+    xade_runtime::flush(&h.writer).await;
+    let (_, msgs) = h.reader.load_session(new).await.unwrap();
+    let last_user = msgs.iter().rfind(|m| m.role == Role::User).unwrap();
+    assert_eq!(last_user.content_text, "what word was it?");
+    assert!(msgs.iter().all(|m| !m.content_text.contains(RESUME)));
+    send(&mut h, new, "again").await;
+    assert_eq!(agy.prompts()[1], "again");
+}
+
+#[tokio::test]
+async fn a_missing_resume_file_means_no_preamble() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _claude, agy) = both(dir.path()).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    let new = fork_with_resume(&mut h, src, ProviderId::Antigravity, RESUME).await;
+    std::fs::remove_file(resume_file(&h, new)).unwrap();
+    open(&mut h, new).await;
+    send(&mut h, new, "go on").await;
+    assert_eq!(
+        agy.prompts(),
+        vec![format!("{}\ngo on", snapshot_line(&h, new))]
+    );
+    // An empty prompt writes no file at all.
+    let other = fork(&mut h, src, ProviderId::Antigravity).await;
+    assert!(!resume_file(&h, other).exists());
+}
+
+#[tokio::test]
+async fn deleting_a_fork_removes_its_resume_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _claude, _agy) = both(dir.path()).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    let new = fork_with_resume(&mut h, src, ProviderId::Antigravity, RESUME).await;
+    assert!(resume_file(&h, new).exists());
+    h.tx.send(ManagerCmd::DeleteSession { session_id: new })
+        .unwrap();
+    h.until(5, |e| matches!(e.kind, AppEventKind::SessionDeleted { .. }))
+        .await;
+    assert!(!resume_file(&h, new).exists());
+}
+
+#[tokio::test]
+async fn forked_messages_keep_the_provider_that_wrote_them_through_a_fork_of_a_fork() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _claude, _agy) = both(dir.path()).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    xade_runtime::flush(&h.writer).await;
+    let (_, own) = h.reader.load_session(src).await.unwrap();
+    assert!(
+        own.iter().all(|m| m.provider_id.is_none()),
+        "a session's own messages"
+    );
+
+    let one = fork(&mut h, src, ProviderId::Antigravity).await;
+    let (_, copied) = h.reader.load_session(one).await.unwrap();
+    assert_eq!(copied.len(), 4);
+    assert!(copied
+        .iter()
+        .all(|m| m.provider_id == Some(ProviderId::Claude)));
+
+    // Antigravity adds its own turn, then the fork goes back to Claude.
+    open(&mut h, one).await;
+    send(&mut h, one, "and then?").await;
+    close(&mut h, one).await;
+    let two = fork(&mut h, one, ProviderId::Claude).await;
+    let (_, msgs) = h.reader.load_session(two).await.unwrap();
+    assert_eq!(msgs.len(), 8);
+    let who: Vec<_> = msgs.iter().map(|m| m.provider_id).collect();
+    let claude = Some(ProviderId::Claude);
+    let agy = Some(ProviderId::Antigravity);
+    assert_eq!(who, [claude, claude, claude, claude, agy, agy, agy, agy]);
 }
 
 #[tokio::test]
@@ -792,6 +910,7 @@ async fn start_fork(h: &mut Harness, src: SessionId) {
         session_id: src,
         provider: ProviderId::Antigravity,
         handoff_prompt: PROMPT.into(),
+        resume_prompt: String::new(),
     })
     .unwrap();
     h.until(5, |e| matches!(e.kind, AppEventKind::ForkPreparing { .. }))
@@ -1199,6 +1318,7 @@ async fn forking_to_a_missing_provider_fails_and_writes_nothing() {
         session_id: src,
         provider: ProviderId::Antigravity,
         handoff_prompt: PROMPT.into(),
+        resume_prompt: String::new(),
     })
     .unwrap();
     let ev = h
@@ -1236,6 +1356,7 @@ async fn a_session_without_messages_cannot_be_forked() {
         session_id: src,
         provider: ProviderId::Antigravity,
         handoff_prompt: PROMPT.into(),
+        resume_prompt: String::new(),
     })
     .unwrap();
     h.until(5, |e| matches!(e.kind, AppEventKind::ForkFailed { .. }))
@@ -1325,6 +1446,7 @@ async fn an_imported_session_forks_into_an_xade_session() {
         tool_payload_json: None,
         is_error: false,
         created_at: now,
+        provider_id: None,
     };
     h.writer
         .send(xade_store::WriteOp::ImportSession {

@@ -18,7 +18,8 @@ use xade_core::{
 use xade_store::{StoreReader, WriteOp, WriterHandle};
 
 use crate::handoff::{
-    mention, remove_all, remove_marker, snapshot_path, transcript_path, write_marker, write_private,
+    mention, remove_all, remove_marker, resume_path, snapshot_path, transcript_path, write_marker,
+    write_private,
 };
 use crate::transcript::transcript;
 use crate::{flush, AppEvent, AppEventKind};
@@ -135,13 +136,17 @@ impl ForkJob {
         source: SessionId,
         target: ProviderId,
         handoff_prompt: String,
+        resume_prompt: String,
     ) {
         let mut end = EndGuard {
             from: source,
             events: self.events.clone(),
             done: false,
         };
-        match self.run(source, target, handoff_prompt).await {
+        match self
+            .run(source, target, handoff_prompt, resume_prompt)
+            .await
+        {
             Ok(id) => end.send(
                 id,
                 AppEventKind::SessionForked {
@@ -167,6 +172,7 @@ impl ForkJob {
         source: SessionId,
         target: ProviderId,
         handoff_prompt: String,
+        resume_prompt: String,
     ) -> Result<SessionId, String> {
         let provider = self
             .provider(target)
@@ -203,6 +209,7 @@ impl ForkJob {
             t => t,
         };
         let id = SessionId::new();
+        self.write_resume(id, resume_prompt).await;
         self.prepare_handoff(&src, &history, id, handoff_prompt)
             .await;
         if *self.cancel.borrow() {
@@ -236,6 +243,8 @@ impl ForkJob {
                 session_id: id,
                 seq,
                 thinking_text: None,
+                // Keeps the avatar of whoever wrote it, also through a fork of a fork.
+                provider_id: m.provider_id.or(Some(src.provider_id)),
                 ..m
             })
             .collect();
@@ -263,6 +272,23 @@ impl ForkJob {
             Ok(n) if n == count => Ok(()),
             Ok(_) => Err("the copy was not saved".into()),
             Err(e) => Err(e.to_string()),
+        }
+    }
+
+    /// Stores the resume preamble next to the hand-off files: the first send reads it back, also
+    /// after a restart. Best effort: without it the fork just has no preamble.
+    async fn write_resume(&self, id: SessionId, text: String) {
+        let Some(dir) = self.dir.clone() else {
+            return;
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        let path = resume_path(&dir, id);
+        match tokio::task::spawn_blocking(move || write_private(&path, &text)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => tracing::warn!(error = %e, "could not write the fork resume file"),
+            Err(e) => tracing::warn!(error = %e, "fork resume task failed"),
         }
     }
 

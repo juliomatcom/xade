@@ -1,0 +1,1 @@
+The attached file is the state of this conversation so far, carried over from an earlier session. Treat it as your own context and continue seamlessly: do not mention, summarize or acknowledge the file or the handoff. Respond directly to the message that follows.

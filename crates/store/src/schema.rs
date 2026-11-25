@@ -13,7 +13,7 @@ use xade_core::{Effort, ProviderId, QuotaKind, Role, SessionId, SessionOrigin, W
 use crate::StoreError;
 
 /// Migrations in order; `PRAGMA user_version` is the count already applied.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
 
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
@@ -30,6 +30,11 @@ const V4: &str = "
 ALTER TABLE sessions ADD COLUMN sent_model_id TEXT NOT NULL DEFAULT '';
 ALTER TABLE sessions ADD COLUMN sent_effort TEXT NOT NULL DEFAULT 'default';
 UPDATE sessions SET sent_model_id = model_id, sent_effort = effort;
+";
+
+/// The provider that wrote a message when it is not its session's (a fork's copied history).
+const V5: &str = "
+ALTER TABLE messages ADD COLUMN provider_id TEXT;
 ";
 
 const V1: &str = "

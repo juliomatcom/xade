@@ -216,7 +216,8 @@ impl SessionManager {
                     session_id,
                     provider,
                     handoff_prompt,
-                } => self.fork(session_id, provider, handoff_prompt),
+                    resume_prompt,
+                } => self.fork(session_id, provider, handoff_prompt, resume_prompt),
                 ManagerCmd::Import => self.start_import(),
                 ManagerCmd::ShutdownAll(done) => {
                     let _ = self.fork_cancel.send(true);
@@ -555,7 +556,13 @@ impl SessionManager {
 
     /// Replies `ForkPreparing` at once, then `SessionForked` or `ForkFailed` (nothing written),
     /// from a task of its own: the snapshot turn can take minutes.
-    fn fork(&mut self, source: SessionId, target: ProviderId, handoff_prompt: String) {
+    fn fork(
+        &mut self,
+        source: SessionId,
+        target: ProviderId,
+        handoff_prompt: String,
+        resume_prompt: String,
+    ) {
         self.emit(Some(source), AppEventKind::ForkPreparing { from: source });
         let job = ForkJob {
             providers: self.providers.clone(),
@@ -566,7 +573,7 @@ impl SessionManager {
             throwaways: self.throwaways.clone(),
             cancel: self.fork_cancel.subscribe(),
         };
-        let task = tokio::spawn(job.run_and_report(source, target, handoff_prompt));
+        let task = tokio::spawn(job.run_and_report(source, target, handoff_prompt, resume_prompt));
         self.tasks.retain(|t| !t.is_finished());
         self.tasks.push(tokio::spawn(supervise(
             task,
@@ -739,6 +746,7 @@ fn imported_rows(
             tool_payload_json: m.tool_payload_json,
             is_error: m.is_error,
             created_at: m.created_at,
+            provider_id: None,
         })
         .collect();
     let session = Session {

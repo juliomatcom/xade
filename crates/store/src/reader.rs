@@ -297,7 +297,7 @@ fn load_session(conn: &Connection, id: SessionId) -> Result<(Session, Vec<Messag
 
     let mut stmt = conn.prepare(
         "SELECT id, session_id, seq, role, content_text, thinking_text, tool_name, tool_use_id,
-            tool_payload_json, is_error, created_at
+            tool_payload_json, is_error, created_at, provider_id
          FROM messages WHERE session_id = ?1 ORDER BY seq",
     )?;
     let messages = stmt
@@ -314,6 +314,10 @@ fn load_session(conn: &Connection, id: SessionId) -> Result<(Session, Vec<Messag
                 tool_payload_json: r.get(8)?,
                 is_error: r.get(9)?,
                 created_at: schema::parse_ts(10, &r.get::<_, String>(10)?)?,
+                provider_id: r
+                    .get::<_, Option<String>>(11)?
+                    .map(|p| schema::parse_provider(11, &p))
+                    .transpose()?,
             })
         })?
         .collect::<Result<_, _>>()?;

@@ -65,11 +65,12 @@ pub enum UiMsg {
     Preflight(ProviderId, Result<(), ProviderError>),
     /// Provider of the latest Xade session, the default for a new one.
     LastProvider(Option<ProviderId>),
-    /// The fork prompt, read off the UI thread; `warning` says why the bundled one is used.
+    /// The fork prompts, read off the UI thread; `warning` says why a bundled one is used.
     ForkPrompt {
         session: SessionId,
         provider: ProviderId,
         prompt: String,
+        resume: String,
         warning: Option<String>,
     },
     /// Quota rows saved by earlier runs.
@@ -1941,6 +1942,7 @@ impl App {
                 session,
                 provider,
                 prompt,
+                resume,
                 warning,
             } => {
                 if let Some(w) = warning {
@@ -1950,6 +1952,7 @@ impl App {
                     session_id: session,
                     provider,
                     handoff_prompt: prompt,
+                    resume_prompt: resume,
                 });
                 if sent.is_err() {
                     if let Some(vm) = self.sessions.get_mut(&session) {
@@ -2162,18 +2165,29 @@ impl App {
     /// `ManagerCmd::Fork`. The session's fork button is off from now until the fork ends.
     pub fn fork_session(&mut self, id: SessionId, provider: ProviderId) {
         self.set_fork_preparing(id, true);
-        let path = self.config_watch.as_ref().and_then(|w| {
-            w.path()
-                .parent()
-                .map(|dir| dir.join(&self.config.fork_handoff_prompt))
-        });
+        let dir = self
+            .config_watch
+            .as_ref()
+            .and_then(|w| w.path().parent().map(Path::to_path_buf));
+        let path = dir
+            .as_ref()
+            .map(|dir| dir.join(&self.config.fork_handoff_prompt));
+        let resume_path = dir
+            .as_ref()
+            .map(|dir| dir.join(&self.config.fork_resume_prompt));
         let bridge = self.bridge.clone();
         self.rt.spawn_blocking(move || {
             let (prompt, warning) = config::read_fork_prompt(path.as_deref());
+            let (resume, resume_warning) = config::read_fork_resume_prompt(resume_path.as_deref());
+            let warning = match (warning, resume_warning) {
+                (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+                (a, b) => a.or(b),
+            };
             bridge.send(UiMsg::ForkPrompt {
                 session: id,
                 provider,
                 prompt,
+                resume,
                 warning,
             });
         });
@@ -2438,6 +2452,7 @@ pub(crate) fn new_message(
         tool_payload_json: None,
         is_error: false,
         created_at: OffsetDateTime::now_utc(),
+        provider_id: None,
     }
 }
 
@@ -3009,6 +3024,8 @@ mod tests {
         std::fs::create_dir_all(dir.join("prompts")).unwrap();
         std::fs::write(dir.join("prompts/mine.md"), "my prompt").unwrap();
         app.config.fork_handoff_prompt = PathBuf::from("prompts/mine.md");
+        std::fs::write(dir.join("prompts/resume.md"), "my resume").unwrap();
+        app.config.fork_resume_prompt = PathBuf::from("prompts/resume.md");
         let session = new_session_row();
         let id = session.id;
         app.insert_vm(session, Vec::new());
@@ -3028,9 +3045,10 @@ mod tests {
                 session_id,
                 provider,
                 handoff_prompt,
+                resume_prompt,
             }) => assert_eq!(
-                (session_id, provider, handoff_prompt.as_str()),
-                (id, ProviderId::Claude, "my prompt")
+                (session_id, provider, handoff_prompt.as_str(), resume_prompt),
+                (id, ProviderId::Claude, "my prompt", "my resume".to_string())
             ),
             _ => panic!("no Fork sent"),
         }
@@ -3070,15 +3088,23 @@ mod tests {
         // A missing file sends the bundled prompt and warns.
         while cmds.try_recv().is_ok() {}
         app.config.fork_handoff_prompt = PathBuf::from("prompts/gone.md");
+        app.config.fork_resume_prompt = PathBuf::from("prompts/gone-resume.md");
         app.fork_session(id, ProviderId::Claude);
         pump_until_fork(&mut app, &mut cmds);
         match cmds.try_recv() {
-            Ok(ManagerCmd::Fork { handoff_prompt, .. }) => {
-                assert_eq!(handoff_prompt, config::BUNDLED_FORK_PROMPT)
+            Ok(ManagerCmd::Fork {
+                handoff_prompt,
+                resume_prompt,
+                ..
+            }) => {
+                assert_eq!(handoff_prompt, config::BUNDLED_FORK_PROMPT);
+                assert_eq!(resume_prompt, config::BUNDLED_FORK_RESUME_PROMPT);
             }
             _ => panic!("no Fork sent"),
         }
-        assert!(app.warning_text().is_some_and(|w| w.contains("gone.md")));
+        assert!(app
+            .warning_text()
+            .is_some_and(|w| w.contains("gone.md") && w.contains("gone-resume.md")));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -128,6 +128,7 @@ fn message(session: SessionId, seq: i64, role: Role, text: &str) -> Message {
         tool_payload_json: None,
         is_error: false,
         created_at: OffsetDateTime::now_utc(),
+        provider_id: None,
     }
 }
 
@@ -153,6 +154,52 @@ fn migrations_are_idempotent_across_reopen() {
     }
     let after = block_on(f.reader.list_sessions(None, None, 0, 24)).unwrap();
     assert_eq!(before, after);
+}
+
+#[test]
+fn a_database_from_before_message_providers_opens_unchanged_and_gains_the_column() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("workspace.db");
+    let (ws, id) = (WorkspaceId::new(), SessionId::new());
+    {
+        let writer = StoreWriter::spawn(&path).unwrap();
+        writer
+            .send(WriteOp::UpsertWorkspace(workspace(ws, "/tmp/project")))
+            .unwrap();
+        let mut s = session(ws, "Old", OffsetDateTime::now_utc());
+        s.id = id;
+        writer.send(WriteOp::InsertSession(s)).unwrap();
+        writer
+            .send(WriteOp::InsertMessage(message(
+                id,
+                1,
+                Role::User,
+                "old text",
+            )))
+            .unwrap();
+        writer.flush().unwrap();
+    }
+    // Back to the previous schema: no column, version 4.
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch("ALTER TABLE messages DROP COLUMN provider_id; PRAGMA user_version = 4;")
+        .unwrap();
+    drop(conn);
+
+    let writer = StoreWriter::spawn(&path).unwrap();
+    let reader = StoreReader::open(&path).unwrap();
+    assert_eq!(user_version(&path), SCHEMA_VERSION);
+    let (_, msgs) = block_on(reader.load_session(id)).unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(
+        (msgs[0].content_text.as_str(), msgs[0].provider_id),
+        ("old text", None)
+    );
+    let mut m = message(id, 2, Role::Assistant, "new text");
+    m.provider_id = Some(ProviderId::Claude);
+    writer.send(WriteOp::InsertMessage(m)).unwrap();
+    writer.flush().unwrap();
+    let (_, msgs) = block_on(reader.load_session(id)).unwrap();
+    assert_eq!(msgs[1].provider_id, Some(ProviderId::Claude));
 }
 
 #[test]
@@ -497,6 +544,7 @@ fn load_session_roundtrip_and_max_seq() {
     m.tool_payload_json = Some("{\"a\":1}".into());
     m.thinking_text = Some("hmm".into());
     m.is_error = true;
+    m.provider_id = Some(ProviderId::Antigravity);
     f.writer.send(WriteOp::InsertMessage(m.clone())).unwrap();
     f.add_message(id, 2, Role::User, "second");
     f.writer.flush().unwrap();
@@ -507,6 +555,7 @@ fn load_session_roundtrip_and_max_seq() {
     assert_eq!(msgs.len(), 2);
     assert_eq!(msgs[0], m_roundtrip(&m, &msgs[0]));
     assert_eq!(msgs[1].seq, 2);
+    assert_eq!(msgs[1].provider_id, None);
     assert_eq!(block_on(f.reader.max_seq(id)).unwrap(), 2);
 
     let missing = block_on(f.reader.load_session(SessionId::new()));

@@ -28,6 +28,7 @@ const WAIT: u64 = 180;
 const REMEMBER: &str = "Remember the word kiwi. Reply with just: ok";
 /// The prompt the app ships for the snapshot turn.
 const HANDOFF_PROMPT: &str = include_str!("../../../assets/prompts/fork-handoff.md");
+const RESUME_PROMPT: &str = include_str!("../../../assets/prompts/fork-resume.md");
 const RECALL: &str = "What word did I ask you to remember? Reply with one word.";
 
 fn enabled() -> bool {
@@ -216,6 +217,7 @@ impl Ctx {
                 session_id: id,
                 provider: to,
                 handoff_prompt: HANDOFF_PROMPT.into(),
+                resume_prompt: RESUME_PROMPT.into(),
             })
             .unwrap();
         let evs = self

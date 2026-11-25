@@ -74,13 +74,16 @@ pub enum ManagerCmd {
     },
     /// Copies the session's history into a new Xade session for `provider`, which continues
     /// there with a one-time hand-off: a state snapshot the source provider writes from
-    /// `handoff_prompt`, else the history transcript. Replies `ForkPreparing`, then
+    /// `handoff_prompt`, else the history transcript, followed by `resume_prompt`. Replies `ForkPreparing`, then
     /// `SessionForked`, or `ForkFailed` (nothing written) on any failure.
     Fork {
         session_id: SessionId,
         provider: ProviderId,
         /// What the source provider is asked about the transcript to produce the snapshot.
         handoff_prompt: String,
+        /// Tells the new provider to continue the conversation, not discuss the hand-off; stored
+        /// beside the hand-off files and added after the `@` line of the first send. Empty: none.
+        resume_prompt: String,
     },
     /// Reads every provider's own history and imports what is new or newer (idempotent).
     /// Replies with `AppEventKind::ImportDone`.

@@ -180,6 +180,9 @@ pub struct Message {
     pub tool_payload_json: Option<String>,
     pub is_error: bool,
     pub created_at: OffsetDateTime,
+    /// The provider that wrote it when that is not the session's (history copied by a fork);
+    /// `None` means the session's own.
+    pub provider_id: Option<ProviderId>,
 }
 
 /// A message read from a provider's own history; the runtime assigns ids and `seq`.

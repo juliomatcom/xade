@@ -14,6 +14,7 @@ Xade reads `settings.json` from its data folder (`<data dir>/xade/`, or `XADE_DA
 | `input_break_all` | `true` | The session text box breaks long words anywhere (like CSS `word-break: break-all`), saving space; `false` wraps only at word boundaries. |
 | `restore_windows` | `true` | Reopen the session and file windows left open when Xade starts without a path. |
 | `fork_handoff_prompt` | `"prompts/fork-handoff.md"` | File with the prompt a fork asks the source provider to write its state hand-off with. A relative path is relative to the data folder; absolute paths work too. Xade creates the default file on first run and never overwrites it, so edit it freely. A missing, empty or unreadable file shows a status-bar warning and the bundled prompt is used. |
+| `fork_resume_prompt` | `"prompts/fork-resume.md"` | File with the short instruction placed after the hand-off file in a fork's first prompt, so the new provider continues the conversation instead of talking about the file. Same path rules, first-run file and fallback as `fork_handoff_prompt`. |
 | `shortcuts` | see below | Keyboard shortcuts by action name. |
 | `theme` | see below | Colors by key. |
 

@@ -114,9 +114,10 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                                 Role::Assistant => {
                                     let id = m.id;
                                     let text = &m.content_text;
-                                    let clicked = assistant(ui, provider, |ui| {
-                                        path_links.markdown(ui, md_cache, cwd, id, text)
-                                    });
+                                    let clicked =
+                                        assistant(ui, avatar_provider(m, provider), |ui| {
+                                            path_links.markdown(ui, md_cache, cwd, id, text)
+                                        });
                                     open = open.take().or(clicked);
                                 }
                                 Role::ToolCall => {
@@ -368,6 +369,12 @@ fn user_bubble(
     clicked
 }
 
+/// Whose avatar an assistant message gets: its own provider (copied fork history), else the
+/// session's.
+fn avatar_provider(m: &Message, session: ProviderId) -> ProviderId {
+    m.provider_id.unwrap_or(session)
+}
+
 /// The assistant avatar beside `body`, which draws the text.
 fn assistant(
     ui: &mut egui::Ui,
@@ -518,7 +525,23 @@ mod tests {
             tool_payload_json: payload.map(str::to_string),
             is_error: false,
             created_at: OffsetDateTime::now_utc(),
+            provider_id: None,
         }
+    }
+
+    #[test]
+    fn an_assistant_message_uses_its_own_provider_for_the_avatar() {
+        let mut m = msg(Role::Assistant, "hi", None, None);
+        assert_eq!(
+            avatar_provider(&m, ProviderId::Claude),
+            ProviderId::Claude,
+            "none means the session's"
+        );
+        m.provider_id = Some(ProviderId::Antigravity);
+        assert_eq!(
+            avatar_provider(&m, ProviderId::Claude),
+            ProviderId::Antigravity
+        );
     }
 
     fn nasty(n: usize) -> String {

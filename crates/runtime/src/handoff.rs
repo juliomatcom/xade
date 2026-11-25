@@ -1,6 +1,7 @@
-//! The files a fork hands to its provider: `<fork id>.transcript.md` (the history) and
-//! `<fork id>.snapshot.md` (a state summary the source provider wrote), in one private
-//! temp folder. Never pruned except when the session is deleted. `<fork id>.throwaway` marks
+//! The files a fork hands to its provider: `<fork id>.transcript.md` (the history),
+//! `<fork id>.snapshot.md` (a state summary the source provider wrote) and `<fork id>.resume.md`
+//! (the preamble that tells the new provider to continue, not discuss the hand-off), in one
+//! private temp folder. Never pruned except when the session is deleted. `<fork id>.throwaway` marks
 //! the snapshot turn's conversation until it is deleted, and outlives its session's files.
 
 use std::io::Write;
@@ -60,6 +61,10 @@ pub(crate) fn transcript_path(dir: &Path, id: SessionId) -> PathBuf {
 
 pub(crate) fn snapshot_path(dir: &Path, id: SessionId) -> PathBuf {
     dir.join(format!("{}.snapshot.md", id.0))
+}
+
+pub(crate) fn resume_path(dir: &Path, id: SessionId) -> PathBuf {
+    dir.join(format!("{}.resume.md", id.0))
 }
 
 /// Creates (or replaces) `path`, and its folder when missing; private to the user on unix.
@@ -186,26 +191,41 @@ pub(crate) fn remove_all(dir: &Path, id: SessionId) {
 }
 
 /// The first-send hand-off of a session with no provider id yet whose history is `text` (a
-/// `transcript`): the snapshot when one exists, else the transcript file, refreshed. If it
-/// cannot be written (or there is no folder) the text itself, so a fork never starts empty.
-/// Blocking.
+/// `transcript`): the snapshot when one exists, else the transcript file, refreshed, each
+/// followed by the fork's resume preamble (when its file exists). If the transcript cannot be
+/// written (or there is no folder) the text itself, after the preamble, so a fork never starts
+/// empty. Blocking.
 pub(crate) fn first_prompt(dir: Option<&Path>, id: SessionId, text: String) -> Option<String> {
     let Some(dir) = dir else {
         return (!text.is_empty()).then_some(text);
     };
+    let resume = std::fs::read_to_string(resume_path(dir, id))
+        .map(|r| r.trim().to_string())
+        .unwrap_or_default();
+    let with_resume = |first: String| {
+        if resume.is_empty() {
+            first
+        } else {
+            format!("{first}\n{resume}")
+        }
+    };
     let snapshot = snapshot_path(dir, id);
     if snapshot.is_file() {
-        return Some(mention(&snapshot));
+        return Some(with_resume(mention(&snapshot)));
     }
     if text.is_empty() {
         return None;
     }
     let path = transcript_path(dir, id);
     match write_private(&path, &text) {
-        Ok(()) => Some(mention(&path)),
+        Ok(()) => Some(with_resume(mention(&path))),
         Err(e) => {
             tracing::warn!(error = %e, "could not write the fork transcript; sending it inline");
-            Some(text)
+            Some(if resume.is_empty() {
+                text
+            } else {
+                format!("{resume}\n\n{text}")
+            })
         }
     }
 }
@@ -263,6 +283,25 @@ mod tests {
         assert_eq!(found[0].psid, "s 1");
         remove_marker(tmp.path(), id);
         assert!(read_markers(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn the_resume_preamble_follows_the_mention_when_its_file_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        let line = mention(&transcript_path(tmp.path(), id));
+        let first = |text: &str| first_prompt(Some(tmp.path()), id, text.into());
+        assert_eq!(first("hist"), Some(line.clone()), "no file, no preamble");
+        write_private(&resume_path(tmp.path(), id), "Carry on.\n").unwrap();
+        assert_eq!(first("hist"), Some(format!("{line}\nCarry on.")));
+        write_private(&snapshot_path(tmp.path(), id), "x").unwrap();
+        let snap = mention(&snapshot_path(tmp.path(), id));
+        assert_eq!(first(""), Some(format!("{snap}\nCarry on.")));
+        // The transcript cannot be written: the text goes inline, after the preamble.
+        std::fs::remove_file(snapshot_path(tmp.path(), id)).unwrap();
+        std::fs::remove_file(transcript_path(tmp.path(), id)).unwrap();
+        std::fs::create_dir(transcript_path(tmp.path(), id)).unwrap();
+        assert_eq!(first("hist"), Some("Carry on.\n\nhist".to_string()));
     }
 
     #[test]

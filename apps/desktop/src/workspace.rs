@@ -588,6 +588,7 @@ mod tests {
             tool_payload_json: payload.map(str::to_string),
             is_error: false,
             created_at: OffsetDateTime::now_utc(),
+            provider_id: None,
         }
     }
 

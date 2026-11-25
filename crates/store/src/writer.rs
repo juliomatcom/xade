@@ -287,8 +287,8 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
         WriteOp::InsertMessage(m) => {
             tx.execute(
                 "INSERT INTO messages (id, session_id, seq, role, content_text, thinking_text,
-                    tool_name, tool_use_id, tool_payload_json, is_error, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                    tool_name, tool_use_id, tool_payload_json, is_error, created_at, provider_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
                 params![
                     m.id.to_string(),
                     m.session_id.0.to_string(),
@@ -301,6 +301,7 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
                     m.tool_payload_json,
                     m.is_error,
                     fmt_ts(m.created_at),
+                    m.provider_id.map(schema::provider_str),
                 ],
             )?;
             let preview = matches!(m.role, Role::User | Role::Assistant)
@@ -416,8 +417,8 @@ fn insert_messages(
 ) -> rusqlite::Result<()> {
     let mut insert = tx.prepare(
         "INSERT INTO messages (id, session_id, seq, role, content_text, thinking_text,
-            tool_name, tool_use_id, tool_payload_json, is_error, created_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+            tool_name, tool_use_id, tool_payload_json, is_error, created_at, provider_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
     )?;
     for m in messages {
         insert.execute(params![
@@ -432,6 +433,7 @@ fn insert_messages(
             m.tool_payload_json,
             m.is_error,
             fmt_ts(m.created_at),
+            m.provider_id.map(schema::provider_str),
         ])?;
     }
     Ok(())
