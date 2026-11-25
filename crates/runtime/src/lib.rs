@@ -75,7 +75,7 @@ pub enum ManagerCmd {
     /// Copies the session's history into a new Xade session for `provider`, which continues
     /// there with a one-time hand-off: a state snapshot the source provider writes from
     /// `handoff_prompt`, else the history transcript. Replies `ForkPreparing`, then
-    /// `SessionForked`, or `Error` (nothing written) on any failure.
+    /// `SessionForked`, or `ForkFailed` (nothing written) on any failure.
     Fork {
         session_id: SessionId,
         provider: ProviderId,
@@ -121,9 +121,22 @@ pub enum AppEventKind {
     SessionDeleted {
         session_id: SessionId,
     },
-    /// A `Fork` started (the session id is the source); it ends with `SessionForked` or `Error`.
+    /// A `Fork` started (the session id is the source); it always ends with `SessionForked` or
+    /// `ForkFailed` for that source.
     ForkPreparing {
         from: SessionId,
+    },
+    /// A `Fork` of `from` ended with nothing written; `message` is ready to show.
+    ForkFailed {
+        from: SessionId,
+        message: String,
+    },
+    /// A fork's snapshot turn runs a throwaway conversation on a provider (`active`) until it
+    /// is deleted (not active). Global event; its id must not count as a change in the sessions
+    /// running elsewhere.
+    Throwaway {
+        provider_session_id: String,
+        active: bool,
     },
     /// Reply to `Fork`: the stored copy, not yet opened.
     SessionForked {

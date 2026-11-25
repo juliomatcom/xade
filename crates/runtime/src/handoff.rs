@@ -1,15 +1,57 @@
 //! The files a fork hands to its provider: `<fork id>.transcript.md` (the history) and
 //! `<fork id>.snapshot.md` (a state summary the source provider wrote), in one private
-//! temp folder. Never pruned except when the session is deleted.
+//! temp folder. Never pruned except when the session is deleted. `<fork id>.throwaway` marks
+//! the snapshot turn's conversation until it is deleted, and outlives its session's files.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use xade_core::SessionId;
+use xade_core::{ProviderId, SessionId};
 
-/// `<temp dir>/xade-forks`.
-pub(crate) fn default_dir() -> PathBuf {
-    std::env::temp_dir().join("xade-forks")
+/// The per-user folder, `<temp dir>/xade-forks-<uid>` (0700) on unix. `None` when it exists but
+/// is a link or belongs to someone else: a fork then hands its history over inline.
+pub(crate) fn default_dir() -> Option<PathBuf> {
+    #[cfg(unix)]
+    {
+        // SAFETY: getuid has no preconditions and cannot fail.
+        let uid = unsafe { libc::getuid() };
+        let dir = std::env::temp_dir().join(format!("xade-forks-{uid}"));
+        private_dir(&dir, uid).then_some(dir)
+    }
+    #[cfg(not(unix))]
+    Some(std::env::temp_dir().join("xade-forks"))
+}
+
+/// Creates `dir` (0700) or accepts an existing real folder owned by `uid`, tightening its mode.
+#[cfg(unix)]
+fn private_dir(dir: &Path, uid: u32) -> bool {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    match std::fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "fork folder not created; hand-offs go inline");
+            return false;
+        }
+    }
+    let meta = match std::fs::symlink_metadata(dir) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "fork folder not readable; hand-offs go inline");
+            return false;
+        }
+    };
+    if !meta.is_dir() || meta.uid() != uid {
+        tracing::warn!("fork folder is a link or not ours; hand-offs go inline");
+        return false;
+    }
+    if meta.mode() & 0o077 != 0 {
+        if let Err(e) = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)) {
+            tracing::warn!(error = %e, "fork folder not private; hand-offs go inline");
+            return false;
+        }
+    }
+    true
 }
 
 pub(crate) fn transcript_path(dir: &Path, id: SessionId) -> PathBuf {
@@ -46,14 +88,96 @@ pub(crate) fn mention(path: &Path) -> String {
     }
 }
 
-/// Removes every file of session `id`; a missing folder or file is fine.
+const MARKER_EXT: &str = ".throwaway";
+
+fn marker_path(dir: &Path, id: SessionId) -> PathBuf {
+    dir.join(format!("{}{MARKER_EXT}", id.0))
+}
+
+fn provider_name(p: ProviderId) -> &'static str {
+    match p {
+        ProviderId::Claude => "claude",
+        ProviderId::Antigravity => "antigravity",
+    }
+}
+
+fn parse_provider(s: &str) -> Option<ProviderId> {
+    [ProviderId::Claude, ProviderId::Antigravity]
+        .into_iter()
+        .find(|p| provider_name(*p) == s)
+}
+
+/// Records a snapshot turn's conversation (`<provider id> <provider session id>`) so a later
+/// start can delete it if this run never does.
+pub(crate) fn write_marker(
+    dir: &Path,
+    id: SessionId,
+    provider: ProviderId,
+    psid: &str,
+) -> std::io::Result<()> {
+    write_private(
+        &marker_path(dir, id),
+        &format!("{} {psid}", provider_name(provider)),
+    )
+}
+
+/// Removes a marker once its conversation is deleted; a missing one is fine.
+pub(crate) fn remove_marker(dir: &Path, id: SessionId) {
+    if let Err(e) = std::fs::remove_file(marker_path(dir, id)) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!(error = %e, "could not remove a throwaway marker");
+        }
+    }
+}
+
+/// A leftover snapshot conversation: its marker file, provider and provider session id.
+pub(crate) struct Leftover {
+    pub marker: PathBuf,
+    pub provider: Option<ProviderId>,
+    pub psid: String,
+}
+
+/// Every marker in `dir`; one that cannot be parsed is skipped.
+pub(crate) fn read_markers(dir: &Path) -> Vec<Leftover> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for e in entries.flatten() {
+        if !e.file_name().to_string_lossy().ends_with(MARKER_EXT) {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(e.path()) else {
+            continue;
+        };
+        if let Some((provider, psid)) = text.trim().split_once(' ') {
+            found.push(Leftover {
+                marker: e.path(),
+                provider: parse_provider(provider),
+                psid: psid.to_string(),
+            });
+        }
+    }
+    found
+}
+
+/// Whether `text` opens with an `@` mention of a file in `dir`: how a snapshot turn's own
+/// conversation shows in the provider's history.
+pub(crate) fn mentions_dir(dir: &Path, text: &str) -> bool {
+    let (text, dir) = (text.trim_start(), dir.display());
+    text.starts_with(&format!("@{dir}/")) || text.starts_with(&format!("@\"{dir}/"))
+}
+
+/// Removes every file of session `id` except its throwaway marker (which belongs to a
+/// provider conversation that may still exist); a missing folder or file is fine.
 pub(crate) fn remove_all(dir: &Path, id: SessionId) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     let prefix = format!("{}.", id.0);
     for e in entries.flatten() {
-        if e.file_name().to_string_lossy().starts_with(&prefix) {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) && !name.ends_with(MARKER_EXT) {
             if let Err(err) = std::fs::remove_file(e.path()) {
                 tracing::warn!(error = %err, "could not remove a fork hand-off file");
             }
@@ -63,8 +187,12 @@ pub(crate) fn remove_all(dir: &Path, id: SessionId) {
 
 /// The first-send hand-off of a session with no provider id yet whose history is `text` (a
 /// `transcript`): the snapshot when one exists, else the transcript file, refreshed. If it
-/// cannot be written the text itself, so a fork never starts empty. Blocking.
-pub(crate) fn first_prompt(dir: &Path, id: SessionId, text: String) -> Option<String> {
+/// cannot be written (or there is no folder) the text itself, so a fork never starts empty.
+/// Blocking.
+pub(crate) fn first_prompt(dir: Option<&Path>, id: SessionId, text: String) -> Option<String> {
+    let Some(dir) = dir else {
+        return (!text.is_empty()).then_some(text);
+    };
     let snapshot = snapshot_path(dir, id);
     if snapshot.is_file() {
         return Some(mention(&snapshot));
@@ -79,5 +207,68 @@ pub(crate) fn first_prompt(dir: &Path, id: SessionId, text: String) -> Option<St
             tracing::warn!(error = %e, "could not write the fork transcript; sending it inline");
             Some(text)
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn the_folder_is_private_and_ours_or_none() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: getuid has no preconditions.
+        let uid = unsafe { libc::getuid() };
+        let dir = tmp.path().join("forks");
+        assert!(private_dir(&dir, uid));
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir), 0o700);
+        // An existing folder of ours is accepted and tightened.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(private_dir(&dir, uid));
+        assert_eq!(mode(&dir), 0o700);
+        // Another owner's folder, or a link (even to a folder of ours), is refused.
+        assert!(!private_dir(&dir, uid + 1));
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(!private_dir(&link, uid));
+    }
+
+    #[test]
+    fn mentions_of_the_folder_are_found_quoted_or_not() {
+        let dir = Path::new("/tmp/xade-forks-1");
+        assert!(mentions_dir(
+            dir,
+            "@/tmp/xade-forks-1/a.transcript.md\n\nWrite"
+        ));
+        assert!(mentions_dir(dir, "\n@\"/tmp/xade-forks-1/a.md\" go"));
+        assert!(!mentions_dir(dir, "@/tmp/xade-forks-12/a.md"));
+        assert!(!mentions_dir(dir, "look at @/tmp/xade-forks-1/a.md"));
+    }
+
+    #[test]
+    fn markers_round_trip_and_survive_remove_all() {
+        let tmp = tempfile::tempdir().unwrap();
+        let id = SessionId::new();
+        write_marker(tmp.path(), id, ProviderId::Antigravity, "s 1").unwrap();
+        write_private(&snapshot_path(tmp.path(), id), "x").unwrap();
+        remove_all(tmp.path(), id);
+        assert!(!snapshot_path(tmp.path(), id).exists());
+        let found = read_markers(tmp.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].provider, Some(ProviderId::Antigravity));
+        assert_eq!(found[0].psid, "s 1");
+        remove_marker(tmp.path(), id);
+        assert!(read_markers(tmp.path()).is_empty());
+    }
+
+    #[test]
+    fn without_a_folder_the_history_goes_inline() {
+        let id = SessionId::new();
+        assert_eq!(first_prompt(None, id, "hi".into()).as_deref(), Some("hi"));
+        assert_eq!(first_prompt(None, id, String::new()), None);
     }
 }

@@ -222,7 +222,7 @@ impl Ctx {
             .until(|e| {
                 matches!(
                     e.kind,
-                    AppEventKind::SessionForked { .. } | AppEventKind::Error(_)
+                    AppEventKind::SessionForked { .. } | AppEventKind::ForkFailed { .. }
                 )
             })
             .await;

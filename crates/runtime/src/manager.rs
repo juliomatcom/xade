@@ -1,7 +1,8 @@
 //! Routes `ManagerCmd`s to session actors; owns the map of live sessions.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
 use time::OffsetDateTime;
@@ -11,12 +12,12 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
 use xade_core::{
-    panic_message, AgentProvider, Effort, ImportedSession, Message, ProviderId, Session, SessionId,
-    SessionOrigin, SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
+    panic_message, AgentProvider, Effort, ImportedSession, Message, ProviderId, Role, Session,
+    SessionId, SessionOrigin, SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
 };
 use xade_store::{throwaway, StoreReader, WriteOp, WriterHandle};
 
-use crate::fork::ForkJob;
+use crate::fork::{ForkJob, Throwaways};
 use crate::handoff;
 use crate::session_actor::{Actor, ActorCmd};
 use crate::transcript::transcript;
@@ -33,8 +34,10 @@ pub struct SessionManager {
     tasks: Vec<JoinHandle<()>>,
     /// Parsed histories coming back from the blocking import tasks.
     import_tx: UnboundedSender<Vec<(ProviderId, Vec<ImportedSession>)>>,
-    /// Where fork hand-off files live.
-    forks_dir: std::path::PathBuf,
+    /// Where fork hand-off files live; `None` when no safe folder exists (hand-offs go inline).
+    forks_dir: Option<PathBuf>,
+    /// Snapshot turns' provider conversations that may still exist; imports skip them.
+    throwaways: Throwaways,
     /// Set to true on shutdown so a running fork snapshot stops and cleans up.
     fork_cancel: watch::Sender<bool>,
 }
@@ -58,7 +61,7 @@ impl SessionManager {
         writer: WriterHandle,
         reader: StoreReader,
     ) -> (UnboundedSender<ManagerCmd>, UnboundedReceiver<AppEvent>) {
-        Self::start_in(providers, writer, reader, handoff::default_dir())
+        Self::start_with(providers, writer, reader, handoff::default_dir())
     }
 
     /// Like `start`, with fork hand-off files in `forks_dir` instead of the temp folder.
@@ -66,12 +69,33 @@ impl SessionManager {
         providers: Vec<Arc<dyn AgentProvider>>,
         writer: WriterHandle,
         reader: StoreReader,
-        forks_dir: std::path::PathBuf,
+        forks_dir: PathBuf,
+    ) -> (UnboundedSender<ManagerCmd>, UnboundedReceiver<AppEvent>) {
+        Self::start_with(providers, writer, reader, Some(forks_dir))
+    }
+
+    fn start_with(
+        providers: Vec<Arc<dyn AgentProvider>>,
+        writer: WriterHandle,
+        reader: StoreReader,
+        forks_dir: Option<PathBuf>,
     ) -> (UnboundedSender<ManagerCmd>, UnboundedReceiver<AppEvent>) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (events, event_rx) = mpsc::unbounded_channel();
         let (import_tx, import_rx) = mpsc::unbounded_channel();
         let supervisor_events = events.clone();
+        // Snapshot conversations an earlier run left: hidden from imports until deleted.
+        let leftovers = forks_dir.as_deref().map(handoff::read_markers);
+        let throwaways = Throwaways::default();
+        if let Some(found) = &leftovers {
+            let mut set = throwaways.lock().unwrap_or_else(PoisonError::into_inner);
+            set.extend(found.iter().map(|l| l.psid.clone()));
+        }
+        tokio::spawn(sweep(
+            providers.clone(),
+            leftovers.unwrap_or_default(),
+            throwaways.clone(),
+        ));
         let manager = SessionManager {
             providers,
             writer,
@@ -82,6 +106,7 @@ impl SessionManager {
             tasks: Vec::new(),
             import_tx,
             forks_dir,
+            throwaways,
             fork_cancel: watch::channel(false).0,
         };
         let task = tokio::spawn(manager.run(cmd_rx, import_rx));
@@ -382,7 +407,7 @@ impl SessionManager {
             let default_model = provider.default_model();
             for mut imp in sessions {
                 imp.updated_at = store_precision(imp.updated_at);
-                if throwaway::is_throwaway_dir(&imp.cwd) {
+                if throwaway::is_throwaway_dir(&imp.cwd) || self.is_snapshot_turn(&imp) {
                     skipped += 1;
                     continue;
                 }
@@ -418,6 +443,23 @@ impl SessionManager {
             "import applied"
         );
         self.emit(None, AppEventKind::ImportDone { imported, updated });
+    }
+
+    /// A fork's snapshot turn: a conversation in flight (or left behind), or one whose first
+    /// prompt mentions a file of the forks folder.
+    fn is_snapshot_turn(&self, imp: &ImportedSession) -> bool {
+        let known = self
+            .throwaways
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&imp.provider_session_id);
+        known
+            || self.forks_dir.as_deref().is_some_and(|dir| {
+                imp.messages
+                    .iter()
+                    .find(|m| m.role == Role::User)
+                    .is_some_and(|m| handoff::mentions_dir(dir, &m.content_text))
+            })
     }
 
     async fn create(&mut self, session: Session, cwd: std::path::PathBuf) {
@@ -502,14 +544,16 @@ impl SessionManager {
             return fail(self, format!("Could not delete the session: {e}"));
         }
         flush(&self.writer).await;
-        let dir = self.forks_dir.clone();
-        if let Err(e) = tokio::task::spawn_blocking(move || handoff::remove_all(&dir, id)).await {
-            tracing::warn!(error = %e, "fork file cleanup failed");
+        if let Some(dir) = self.forks_dir.clone() {
+            if let Err(e) = tokio::task::spawn_blocking(move || handoff::remove_all(&dir, id)).await
+            {
+                tracing::warn!(error = %e, "fork file cleanup failed");
+            }
         }
         self.emit(Some(id), AppEventKind::SessionDeleted { session_id: id });
     }
 
-    /// Replies `ForkPreparing` at once, then `SessionForked` or an `Error` with nothing written,
+    /// Replies `ForkPreparing` at once, then `SessionForked` or `ForkFailed` (nothing written),
     /// from a task of its own: the snapshot turn can take minutes.
     fn fork(&mut self, source: SessionId, target: ProviderId, handoff_prompt: String) {
         self.emit(Some(source), AppEventKind::ForkPreparing { from: source });
@@ -518,34 +562,18 @@ impl SessionManager {
             writer: self.writer.clone(),
             reader: self.reader.clone(),
             dir: self.forks_dir.clone(),
+            events: self.events.clone(),
+            throwaways: self.throwaways.clone(),
             cancel: self.fork_cancel.subscribe(),
         };
-        let events = self.events.clone();
-        let task = tokio::spawn({
-            let events = events.clone();
-            async move {
-                let (session_id, kind) = match job.run(source, target, handoff_prompt).await {
-                    Ok(id) => (
-                        id,
-                        AppEventKind::SessionForked {
-                            from: source,
-                            session_id: id,
-                        },
-                    ),
-                    Err(msg) => (
-                        source,
-                        AppEventKind::Error(format!("Could not fork the session: {msg}")),
-                    ),
-                };
-                let _ = events.send(AppEvent {
-                    session_id: Some(session_id),
-                    kind,
-                });
-            }
-        });
+        let task = tokio::spawn(job.run_and_report(source, target, handoff_prompt));
         self.tasks.retain(|t| !t.is_finished());
-        self.tasks
-            .push(tokio::spawn(supervise(task, "A fork", None, events)));
+        self.tasks.push(tokio::spawn(supervise(
+            task,
+            "A fork",
+            None,
+            self.events.clone(),
+        )));
     }
 
     async fn open(&mut self, id: SessionId) {
@@ -576,7 +604,7 @@ impl SessionManager {
         };
         let handoff = if session.provider_session_id.is_none() {
             let (dir, text) = (self.forks_dir.clone(), transcript(&messages));
-            tokio::task::spawn_blocking(move || handoff::first_prompt(&dir, id, text))
+            tokio::task::spawn_blocking(move || handoff::first_prompt(dir.as_deref(), id, text))
                 .await
                 .unwrap_or_else(|e| {
                     tracing::warn!(error = %e, "fork hand-off task failed");
@@ -617,6 +645,38 @@ impl SessionManager {
                 Some(id),
                 AppEventKind::Status(SessionStatus::Error("unknown provider".into())),
             ),
+        }
+    }
+}
+
+/// Deletes the provider conversations earlier runs' snapshot turns left, then their markers. A
+/// marker stays when its provider is missing or the delete fails.
+async fn sweep(
+    providers: Vec<Arc<dyn AgentProvider>>,
+    leftovers: Vec<handoff::Leftover>,
+    throwaways: Throwaways,
+) {
+    for l in leftovers {
+        let Some(provider) = l
+            .provider
+            .and_then(|id| providers.iter().find(|p| p.id() == id).cloned())
+        else {
+            tracing::warn!("a leftover snapshot chat has no provider; kept for later");
+            continue;
+        };
+        let psid = l.psid.clone();
+        match tokio::task::spawn_blocking(move || provider.delete_session(&psid)).await {
+            Ok(Ok(())) => {
+                if let Err(e) = std::fs::remove_file(&l.marker) {
+                    tracing::warn!(error = %e, "could not remove a throwaway marker");
+                }
+                throwaways
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(&l.psid);
+            }
+            Ok(Err(e)) => tracing::warn!(error = %e, "could not delete a leftover snapshot chat"),
+            Err(e) => tracing::warn!(error = %e, "leftover snapshot chat task failed"),
         }
     }
 }

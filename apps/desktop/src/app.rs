@@ -327,6 +327,9 @@ pub struct App {
     running_checked: Option<Instant>,
     tree_checked: Option<Instant>,
     running_inflight: bool,
+    /// Provider session ids of fork snapshot turns running now; Xade's own, so they never count
+    /// as sessions running elsewhere.
+    throwaways: HashSet<String>,
     running_polled: bool,
     running_import_due: bool,
     running_import_at: Option<Instant>,
@@ -433,6 +436,7 @@ impl App {
             running_checked: None,
             tree_checked: None,
             running_inflight: false,
+            throwaways: HashSet::new(),
             running_polled: false,
             running_import_due: false,
             running_import_at: None,
@@ -518,6 +522,7 @@ impl App {
             running_checked: None,
             tree_checked: None,
             running_inflight: false,
+            throwaways: HashSet::new(),
             running_polled: false,
             running_import_due: false,
             running_import_at: None,
@@ -860,11 +865,13 @@ impl App {
         });
     }
 
+    /// Provider session ids Xade runs itself: its live sessions and its fork snapshot turns.
     fn live_provider_ids(&self) -> HashSet<String> {
         self.sessions
             .values()
             .filter(|vm| live_status(&vm.status))
             .filter_map(|vm| vm.session.provider_session_id.clone())
+            .chain(self.throwaways.iter().cloned())
             .collect()
     }
 
@@ -2013,13 +2020,31 @@ impl App {
 
     fn on_app_event(&mut self, ev: AppEvent) {
         let AppEvent { session_id, kind } = ev;
-        match (session_id, &kind) {
-            (Some(id), AppEventKind::Error(_)) => self.set_fork_preparing(id, false),
-            (_, AppEventKind::ForkPreparing { from }) => self.set_fork_preparing(*from, true),
-            (_, AppEventKind::SessionForked { from, .. }) => self.set_fork_preparing(*from, false),
+        // A fork ends with one of these two for its source; unrelated errors leave it alone.
+        match &kind {
+            AppEventKind::ForkPreparing { from } => self.set_fork_preparing(*from, true),
+            AppEventKind::SessionForked { from, .. } | AppEventKind::ForkFailed { from, .. } => {
+                self.set_fork_preparing(*from, false)
+            }
             _ => {}
         }
         match (session_id, kind) {
+            (
+                _,
+                AppEventKind::Throwaway {
+                    provider_session_id,
+                    active,
+                },
+            ) => {
+                if active {
+                    self.throwaways.insert(provider_session_id);
+                } else {
+                    self.throwaways.remove(&provider_session_id);
+                }
+            }
+            (_, AppEventKind::ForkFailed { message, .. }) => {
+                self.report(ErrorReport::new("Something went wrong", message))
+            }
             (_, AppEventKind::Quota(q)) => {
                 self.quota.retain(|x| x.kind != q.kind);
                 self.quota.push(q);
@@ -2903,6 +2928,35 @@ mod tests {
     }
 
     #[test]
+    fn a_snapshot_turn_is_xades_own_until_it_is_deleted() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let throwaway = |active| AppEvent {
+            session_id: None,
+            kind: AppEventKind::Throwaway {
+                provider_session_id: "psid-1".into(),
+                active,
+            },
+        };
+        assert!(!app.live_provider_ids().contains("psid-1"));
+        app.on_app_event(throwaway(true));
+        assert!(app.live_provider_ids().contains("psid-1"));
+        // A poll that lists it (a child of Xade) is no change in what runs elsewhere.
+        let entry = RunningSession {
+            provider_session_id: "psid-1".into(),
+            state: xade_core::RunState::Busy,
+            location: "SDK".into(),
+            pid: 1,
+        };
+        app.on_running(Vec::new(), Vec::new());
+        app.on_running(vec![entry], Vec::new());
+        assert!(app.running.is_empty() && !app.running_import_due);
+        app.on_app_event(throwaway(false));
+        assert!(!app.live_provider_ids().contains("psid-1"));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn a_fork_reads_the_prompt_file_off_thread_and_stays_off_until_it_ends() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (mut app, dir) = test_app(&rt);
@@ -2946,8 +3000,20 @@ mod tests {
         };
         app.on_app_event(event(AppEventKind::ForkPreparing { from: id }));
         assert!(app.sessions[&id].fork_preparing);
+        // An unrelated error for the source does not end the fork.
         app.on_app_event(event(AppEventKind::Error("nope".into())));
+        assert!(app.sessions[&id].fork_preparing);
+        // A failed fork ends it, and shows its message like any error.
+        assert_eq!(app.errors.pending(), 1, "the unrelated error");
+        app.on_app_event(event(AppEventKind::ForkFailed {
+            from: id,
+            message: "Could not fork the session: x".into(),
+        }));
         assert!(!app.sessions[&id].fork_preparing);
+        assert_eq!(app.errors.pending(), 2);
+        app.errors.dismiss();
+        let (report, _) = app.errors.current().unwrap();
+        assert!(report.message.contains("Could not fork"));
         app.on_app_event(event(AppEventKind::ForkPreparing { from: id }));
         app.on_app_event(AppEvent {
             session_id: Some(SessionId::new()),
