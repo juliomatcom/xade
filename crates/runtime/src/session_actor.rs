@@ -45,8 +45,8 @@ pub(crate) struct Actor {
     last_error: Option<String>,
     /// Transcript of a forked history, prepended to the first prompt only.
     handoff: Option<String>,
-    /// The hand-off of the turn in flight, put back if the turn ends before the provider
-    /// reported a session (e.g. stopped during its handshake), so it is not lost.
+    /// The hand-off sent and not yet seen processed (no assistant output since). Put back when
+    /// the turn ends first (stopped during the handshake, errored), so it is not lost.
     handoff_sent: Option<String>,
 }
 
@@ -204,7 +204,9 @@ impl Actor {
                     self.set_status(SessionStatus::Streaming);
                 }
                 let handoff = self.handoff.take();
-                self.handoff_sent.clone_from(&handoff);
+                if handoff.is_some() {
+                    self.handoff_sent.clone_from(&handoff);
+                }
                 let prompt = match (handoff, context) {
                     (None, None) => text,
                     (handoff, context) => [handoff, context, Some(text)]
@@ -284,6 +286,16 @@ impl Actor {
         {
             self.set_status(SessionStatus::Streaming);
         }
+        // The provider answering means it processed the prompt, hand-off included.
+        if matches!(
+            ev,
+            ProviderEvent::TextDelta(_)
+                | ProviderEvent::ThinkingProgress { .. }
+                | ProviderEvent::AssistantText { .. }
+                | ProviderEvent::ToolUse { .. }
+        ) {
+            self.handoff_sent = None;
+        }
         match &ev {
             ProviderEvent::Quota(q) => {
                 self.write(WriteOp::UpsertQuota(q.clone()));
@@ -297,7 +309,6 @@ impl Actor {
                 provider_session_id,
                 ..
             } => {
-                self.handoff_sent = None;
                 if self.session.provider_session_id.as_deref() != Some(provider_session_id) {
                     self.session.provider_session_id = Some(provider_session_id.clone());
                     let mut op = self.update();
@@ -345,10 +356,8 @@ impl Actor {
             }
             ProviderEvent::TurnComplete { usage, .. } => {
                 if let Some(h) = self.handoff_sent.take() {
-                    // The provider never started a session, so it never saw the history.
-                    if self.session.provider_session_id.is_none() {
-                        self.handoff = Some(h);
-                    }
+                    // The turn ended without any output: the provider may never have seen it.
+                    self.handoff = Some(h);
                 }
                 self.write(WriteOp::ApplyTurnUsage {
                     session_id: self.session.id,

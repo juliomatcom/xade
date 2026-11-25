@@ -476,7 +476,9 @@ impl Agent {
     async fn on_permission(&mut self, id: Value, params: &Value) {
         let options = parse_options(params);
         let ours = params.get("sessionId").and_then(Value::as_str) == self.session_id.as_deref();
-        if !ours {
+        if !ours || (self.interrupted && !self.outstanding.is_empty()) {
+            // Not ours, or raised after Stop (the cancel is already on its way): never shown, and
+            // never auto-allowed.
             self.write(rpc::response_ok(&id, cancelled())).await;
         } else if self.auto {
             self.write(permission_reply(&id, &options, true)).await;
@@ -650,6 +652,9 @@ async fn run(mut agent: Agent, mut p: Process) {
     };
     agent.stdin = None;
     agent.phase = Phase::Closing;
+    // The child is reaped, however it ended: whatever it started in its group must not outlive
+    // the session.
+    killpg(p.pid, libc::SIGKILL);
 
     // Let the readers drain what the child wrote before we report the exit.
     while let Ok(Some(line)) = timeout(SIGTERM_WAIT, p.line_rx.recv()).await {
@@ -696,6 +701,7 @@ async fn shutdown(
     child.wait().await.ok()
 }
 
+/// Signals the child's process group; an empty group (ESRCH) is fine and ignored.
 fn killpg(pid: Option<u32>, signal: libc::c_int) {
     if let Some(pid) = pid {
         // SAFETY: plain syscall; the child leads its own group (process_group(0)).

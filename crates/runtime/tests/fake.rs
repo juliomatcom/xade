@@ -20,8 +20,28 @@ struct FakeProvider {
     spawns: Mutex<Vec<SpawnConfig>>,
     prompts: Arc<Mutex<Vec<String>>>,
     started: AtomicUsize,
-    /// The next prompt ends as stopped before any session was started (no `Started`).
-    stop_before_start: Arc<std::sync::atomic::AtomicBool>,
+    /// How the next prompt goes instead of the scripted turn.
+    next_turn: Arc<Mutex<Option<Turn>>>,
+}
+
+#[derive(Clone, Copy)]
+enum Turn {
+    /// Stopped before any session was started (no `Started`).
+    StopBeforeStart,
+    /// `Started`, then stopped with no output.
+    StartedThenStop,
+    /// Ends in error with no output.
+    ErrorNoOutput,
+    /// No reply until an interrupt, which ends the turn stopped.
+    Hold,
+}
+
+fn turn_complete(is_error: bool, interrupted: bool) -> ProviderEvent {
+    ProviderEvent::TurnComplete {
+        usage: UsageTotals::default(),
+        is_error,
+        interrupted,
+    }
 }
 
 impl Default for FakeProvider {
@@ -38,7 +58,7 @@ impl FakeProvider {
             spawns: Mutex::default(),
             prompts: Arc::default(),
             started: AtomicUsize::new(0),
-            stop_before_start: Arc::default(),
+            next_turn: Arc::default(),
         }
     }
 
@@ -74,22 +94,42 @@ impl AgentProvider for FakeProvider {
             n => format!("fake-session-{n}"),
         });
         let prompts = self.prompts.clone();
-        let stop_before_start = self.stop_before_start.clone();
+        let next_turn = self.next_turn.clone();
         self.spawns.lock().unwrap().push(cfg);
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         let (ev_tx, events) = mpsc::unbounded_channel();
         tokio::spawn(async move {
+            let mut holding = false;
             while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     SessionCommand::SendPrompt(text) => {
                         prompts.lock().unwrap().push(text);
-                        if stop_before_start.swap(false, Ordering::SeqCst) {
-                            let _ = ev_tx.send(ProviderEvent::TurnComplete {
-                                usage: UsageTotals::default(),
-                                is_error: false,
-                                interrupted: true,
-                            });
+                        if holding {
                             continue;
+                        }
+                        let turn = next_turn.lock().unwrap().take();
+                        match turn {
+                            Some(Turn::StopBeforeStart) => {
+                                let _ = ev_tx.send(turn_complete(false, true));
+                                continue;
+                            }
+                            Some(Turn::StartedThenStop) => {
+                                let _ = ev_tx.send(ProviderEvent::Started {
+                                    provider_session_id: psid.clone(),
+                                    model_id: model_id.clone(),
+                                });
+                                let _ = ev_tx.send(turn_complete(false, true));
+                                continue;
+                            }
+                            Some(Turn::ErrorNoOutput) => {
+                                let _ = ev_tx.send(turn_complete(true, false));
+                                continue;
+                            }
+                            Some(Turn::Hold) => {
+                                holding = true;
+                                continue;
+                            }
+                            None => {}
                         }
                         let script = [
                             ProviderEvent::Started {
@@ -133,6 +173,10 @@ impl AgentProvider for FakeProvider {
                         for ev in script {
                             let _ = ev_tx.send(ev);
                         }
+                    }
+                    SessionCommand::Interrupt if holding => {
+                        holding = false;
+                        let _ = ev_tx.send(turn_complete(false, true));
                     }
                     SessionCommand::Shutdown => {
                         let _ = ev_tx.send(ProviderEvent::Exited { code: Some(0) });
@@ -483,13 +527,83 @@ async fn a_first_turn_stopped_before_the_provider_started_keeps_the_handoff() {
     close(&mut h, src).await;
     let new = fork(&mut h, src, ProviderId::Antigravity).await;
     open(&mut h, new).await;
-    agy.stop_before_start.store(true, Ordering::SeqCst);
+    *agy.next_turn.lock().unwrap() = Some(Turn::StopBeforeStart);
     send(&mut h, new, "first try").await;
     send(&mut h, new, "second try").await;
     let prompts = agy.prompts();
     assert_eq!(prompts.len(), 2);
     assert!(prompts[0].starts_with(HANDOFF_TAG));
     assert!(prompts[1].starts_with(HANDOFF_TAG), "{}", prompts[1]);
+    send(&mut h, new, "third").await;
+    assert_eq!(agy.prompts()[2], "third");
+}
+
+/// Forks a Claude session into a fresh open agy session, the first send still to come.
+async fn fresh_fork(dir: &std::path::Path) -> (Harness, Arc<FakeProvider>, SessionId) {
+    let (mut h, _claude, agy) = both(dir).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    let new = fork(&mut h, src, ProviderId::Antigravity).await;
+    open(&mut h, new).await;
+    (h, agy, new)
+}
+
+#[tokio::test]
+async fn a_steer_before_the_provider_answers_does_not_drop_the_handoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, agy, new) = fresh_fork(dir.path()).await;
+    *agy.next_turn.lock().unwrap() = Some(Turn::Hold);
+    h.tx.send(ManagerCmd::Send {
+        session_id: new,
+        text: "first".into(),
+        delivery: None,
+        context: None,
+    })
+    .unwrap();
+    h.until_status(5, SessionStatus::Streaming).await;
+    // The steer carries no hand-off, and must not erase the one in flight.
+    h.tx.send(ManagerCmd::Send {
+        session_id: new,
+        text: "steer".into(),
+        delivery: None,
+        context: None,
+    })
+    .unwrap();
+    h.tx.send(ManagerCmd::Interrupt { session_id: new })
+        .unwrap();
+    h.until_status(5, SessionStatus::Idle).await;
+    send(&mut h, new, "again").await;
+    let prompts = agy.prompts();
+    assert!(prompts[0].starts_with(HANDOFF_TAG));
+    assert_eq!(prompts[1], "steer");
+    assert!(prompts[2].starts_with(HANDOFF_TAG), "{}", prompts[2]);
+    send(&mut h, new, "last").await;
+    assert_eq!(agy.prompts()[3], "last");
+}
+
+#[tokio::test]
+async fn a_turn_started_then_stopped_without_output_keeps_the_handoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, agy, new) = fresh_fork(dir.path()).await;
+    *agy.next_turn.lock().unwrap() = Some(Turn::StartedThenStop);
+    send(&mut h, new, "first try").await;
+    send(&mut h, new, "second try").await;
+    let prompts = agy.prompts();
+    assert!(prompts[0].starts_with(HANDOFF_TAG));
+    assert!(prompts[1].starts_with(HANDOFF_TAG), "{}", prompts[1]);
+    send(&mut h, new, "third").await;
+    assert_eq!(agy.prompts()[2], "third");
+}
+
+#[tokio::test]
+async fn an_errored_first_turn_without_output_keeps_the_handoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, agy, new) = fresh_fork(dir.path()).await;
+    *agy.next_turn.lock().unwrap() = Some(Turn::ErrorNoOutput);
+    send(&mut h, new, "first try").await;
+    send(&mut h, new, "second try").await;
+    assert!(agy.prompts()[1].starts_with(HANDOFF_TAG));
     send(&mut h, new, "third").await;
     assert_eq!(agy.prompts()[2], "third");
 }

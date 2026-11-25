@@ -1,0 +1,9 @@
+{"dir":"in","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":1}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":2,"method":"session/new","params":{}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":2,"result":{"sessionId":"s1","configOptions":[]}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","method":"session/cancel","params":{}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":"p1","method":"session/request_permission","params":{"sessionId":"s1","toolCall":{"toolCallId":"c1","name":"run_command","kind":"execute","status":"pending"},"options":[{"optionId":"allow","name":"Allow","kind":"allow_once"},{"optionId":"deny","name":"Deny","kind":"reject_once"}]}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":"p1","result":{}}}
+{"dir":"out","frame":{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}}

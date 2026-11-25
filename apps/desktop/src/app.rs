@@ -267,6 +267,8 @@ pub struct App {
     windows_saved: Vec<crate::windows_state::Saved>,
     /// Restored windows still opening; one that fails is dropped quietly instead of reported.
     restoring: HashSet<Saved>,
+    /// The windows file whose restore waits for a provider still running its preflight.
+    deferred_restore: Option<PathBuf>,
     pub focused: Option<WindowKind>,
     pub editors: Editors,
     pub tree: FileTree,
@@ -359,10 +361,18 @@ impl App {
                 fwd.send(UiMsg::App(Box::new(ev)));
             }
         });
+        // A provider with no startup result is checked in the background: not offered, and not
+        // an error, until it reports.
+        let pending: HashSet<_> = providers
+            .iter()
+            .map(|p| p.id())
+            .filter(|id| !preflight.contains_key(id))
+            .collect();
         let mut app = App {
             view: View::Home,
             home: HomeState {
                 preflight,
+                pending: pending.clone(),
                 ..HomeState::default()
             },
             sessions: HashMap::new(),
@@ -370,6 +380,7 @@ impl App {
             windows_file: None,
             windows_saved: Vec::new(),
             restoring: HashSet::new(),
+            deferred_restore: None,
             focused: None,
             editors: Editors::default(),
             tree: FileTree::default(),
@@ -426,6 +437,9 @@ impl App {
             app.warn(e);
         }
         app.apply_config(&cc.egui_ctx, config);
+        for id in pending {
+            app.retry_preflight(id);
+        }
         app.refresh_workspaces();
         app.refresh_cards();
         app.load_saved_quota();
@@ -455,6 +469,7 @@ impl App {
             windows_file: None,
             windows_saved: Vec::new(),
             restoring: HashSet::new(),
+            deferred_restore: None,
             focused: None,
             editors: Editors::default(),
             tree: FileTree::default(),
@@ -955,9 +970,10 @@ impl App {
         self.provider(id).map_or("Provider", |p| p.display_name())
     }
 
-    /// Whether `id` passed its preflight (no result yet counts as available).
+    /// Whether `id` passed its preflight (not one still running in the background).
     pub fn available(&self, id: ProviderId) -> bool {
-        matches!(self.home.preflight.get(&id), None | Some(Ok(())))
+        !self.home.pending.contains(&id)
+            && matches!(self.home.preflight.get(&id), None | Some(Ok(())))
     }
 
     pub fn any_available(&self) -> bool {
@@ -983,14 +999,16 @@ impl App {
         ))
     }
 
-    /// Providers the UI shows (status bar, banner): every one whose CLI is installed. When
-    /// none is, only the first stays, so a machine without any CLI sees today's Claude banner.
+    /// Providers the UI shows (status bar, banner): every one whose CLI is installed and whose
+    /// preflight is done. When none is, only the first stays, so a machine without any CLI sees
+    /// today's Claude banner.
     pub fn visible_providers(&self) -> Vec<ProviderId> {
         let installed = |p: &&Arc<dyn AgentProvider>| {
-            !matches!(
-                self.home.preflight.get(&p.id()),
-                Some(Err(ProviderError::NotInstalled))
-            )
+            !self.home.pending.contains(&p.id())
+                && !matches!(
+                    self.home.preflight.get(&p.id()),
+                    Some(Err(ProviderError::NotInstalled))
+                )
         };
         let shown: Vec<_> = self.providers.iter().filter(installed).collect();
         match shown.is_empty() {
@@ -1216,6 +1234,10 @@ impl App {
     /// with `restore_windows` off nothing reopens and the saved list is emptied on the next change.
     fn restore_windows(&mut self, file: PathBuf) {
         if !self.any_available() {
+            // A provider still checking may make it possible once it reports.
+            if !self.home.pending.is_empty() {
+                self.deferred_restore = Some(file);
+            }
             return;
         }
         let saved = crate::windows_state::load(&file);
@@ -1873,9 +1895,13 @@ impl App {
             }
             UiMsg::Preflight(id, result) => {
                 let recovered = result.is_ok() && !self.available(id);
+                self.home.pending.remove(&id);
                 self.home.preflight.insert(id, result);
                 if recovered {
                     self.start_import();
+                    if let Some(file) = self.deferred_restore.take() {
+                        self.restore_windows(file);
+                    }
                 }
             }
             UiMsg::LastProvider(p) => self.home.last_provider = p,
@@ -3356,6 +3382,55 @@ mod tests {
         // A provider that was already fine does not re-import.
         app.on_msg(UiMsg::Preflight(agy, Ok(())));
         assert!(cmds.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_provider_still_checking_is_neither_offered_nor_an_error_until_it_reports() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        app.home.pending.insert(agy);
+        assert!(app.available(claude) && !app.available(agy));
+        assert_eq!(app.selectable_providers(), vec![claude]);
+        assert_eq!(app.visible_providers(), vec![claude]);
+        assert_eq!(app.preflight_error(agy), None);
+        assert_eq!(app.unavailable_text(agy), None);
+
+        // Its report ends the wait and offers it.
+        app.on_msg(UiMsg::Preflight(agy, Ok(())));
+        assert!(app.home.pending.is_empty());
+        assert_eq!(app.selectable_providers(), vec![claude, agy]);
+        assert_eq!(app.visible_providers(), vec![claude, agy]);
+        assert!(matches!(cmds.try_recv(), Ok(ManagerCmd::Import)));
+
+        // A failure shows as today's error.
+        app.home.pending.insert(agy);
+        app.on_msg(UiMsg::Preflight(agy, Err(ProviderError::NotLoggedIn)));
+        assert_eq!(app.selectable_providers(), vec![claude]);
+        assert!(app.unavailable_text(agy).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_window_restore_waits_for_a_pending_provider_when_none_is_usable_yet() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        fail(&mut app, claude, ProviderError::NotInstalled);
+        app.home.pending.insert(agy);
+        let file = dir.join("windows.json");
+        app.restore_windows(file.clone());
+        assert_eq!(app.deferred_restore, Some(file.clone()));
+        assert!(app.windows_file.is_none());
+        app.on_msg(UiMsg::Preflight(agy, Ok(())));
+        assert!(app.deferred_restore.is_none());
+        assert_eq!(app.windows_file, Some(file));
+        assert!(matches!(cmds.try_recv(), Ok(ManagerCmd::Import)));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

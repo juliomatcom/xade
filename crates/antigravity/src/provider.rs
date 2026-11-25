@@ -71,6 +71,18 @@ fn candidate_dirs(path_var: Option<OsString>, home: Option<PathBuf>) -> Vec<Path
     dirs
 }
 
+/// A short reason for a failed `agy models`: the first non-empty output line, bounded.
+fn failure_reason(stderr: &str, stdout: &str) -> String {
+    let line = [stderr, stdout]
+        .iter()
+        .flat_map(|t| t.lines())
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("no output");
+    let short: String = line.chars().take(120).collect();
+    format!("agy models failed: {short}")
+}
+
 fn first_binary(dirs: &[PathBuf]) -> Option<PathBuf> {
     dirs.iter().map(|d| d.join("agy")).find(|p| p.is_file())
 }
@@ -118,9 +130,13 @@ impl AgentProvider for AntigravityProvider {
                     *self.catalog.write().unwrap_or_else(|e| e.into_inner()) = models;
                     return Ok(());
                 }
-                if !success || mentions_auth(&stdout) || mentions_auth(&stderr) {
+                if mentions_auth(&stdout) || mentions_auth(&stderr) {
                     tracing::debug!(success, "agy models gave no model list");
                     return Err(ProviderError::NotLoggedIn);
+                }
+                if !success {
+                    // Not a login problem (e.g. offline): say what agy said, not "not signed in".
+                    return Err(ProviderError::Protocol(failure_reason(&stderr, &stdout)));
                 }
                 Err(ProviderError::Protocol(
                     "agy models listed no models".into(),
@@ -295,7 +311,18 @@ mod tests {
             let dir = tempfile::tempdir_in(root.path()).unwrap();
             AntigravityProvider::with_binary(fake_agy(dir.path(), body)).preflight()
         };
-        assert_eq!(run("exit 1"), Err(ProviderError::NotLoggedIn));
+        // A failure that does not mention login (offline) is not "not signed in".
+        assert_eq!(
+            run("echo 'dial tcp: network is unreachable' >&2; exit 1"),
+            Err(ProviderError::Protocol(
+                "agy models failed: dial tcp: network is unreachable".into()
+            ))
+        );
+        assert!(matches!(run("exit 1"), Err(ProviderError::Protocol(_))));
+        assert_eq!(
+            run("echo 'please log in first' >&2; exit 1"),
+            Err(ProviderError::NotLoggedIn)
+        );
         assert_eq!(
             run("echo 'Please sign in' >&2"),
             Err(ProviderError::NotLoggedIn)

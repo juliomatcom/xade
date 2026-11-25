@@ -571,3 +571,88 @@ async fn dropping_the_handle_shuts_the_child_down() {
         Some(ProviderEvent::Exited { code: Some(0) })
     ));
 }
+
+/// Whether `pid` is gone (a zombie awaiting its reaper counts as gone).
+fn process_gone(pid: u32) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps");
+    let stat = String::from_utf8_lossy(&out.stdout);
+    stat.trim().is_empty() || stat.trim().starts_with('Z')
+}
+
+/// The pid the fake wrote to `bg.pid` for the `sleep` it started in its group.
+async fn background_pid(f: &Fake) -> u32 {
+    let path = f.log.with_file_name("bg.pid");
+    let start = Instant::now();
+    loop {
+        if let Some(pid) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+        {
+            return pid;
+        }
+        assert!(start.elapsed() < WAIT, "the fake never started its sleep");
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+/// Fails the test (and cleans up) if `pid` outlives the session.
+async fn assert_reaped_soon(pid: u32) {
+    let start = Instant::now();
+    while !process_gone(pid) {
+        if start.elapsed() > Duration::from_secs(5) {
+            // SAFETY: plain syscall on a pid the fake started.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+            panic!("process {pid} outlived the session");
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_clean_shutdown_kills_what_the_child_left_in_its_group() {
+    let f = fake("fake/orphan_clean");
+    let mut h = f.spawn("", Effort::Default, false, None);
+    let pid = background_pid(&f).await;
+    assert!(!process_gone(pid));
+    shutdown(&mut h).await;
+    assert_reaped_soon(pid).await;
+}
+
+#[tokio::test]
+async fn an_unexpected_exit_kills_what_the_child_left_in_its_group() {
+    let f = fake("fake/orphan_crash");
+    let mut h = f.spawn("", Effort::Default, false, None);
+    let pid = background_pid(&f).await;
+    until(&mut h, is_exit).await;
+    assert_reaped_soon(pid).await;
+}
+
+#[tokio::test]
+async fn a_permission_request_after_stop_is_cancelled_and_never_shown() {
+    let f = fake("fake/late_permission");
+    let mut h = f.spawn("", Effort::Default, false, None);
+    prompt(&h, "run it");
+    wait_for_log(&f, "session/prompt").await;
+    send(&h, SessionCommand::Interrupt);
+    let evs = until(&mut h, is_turn).await;
+    assert_eq!(turns(&evs), [(false, true)]);
+    assert!(
+        !evs.iter().any(|e| matches!(
+            e,
+            ProviderEvent::PermissionRequest { .. } | ProviderEvent::ToolUse { .. }
+        )),
+        "{evs:?}"
+    );
+    shutdown(&mut h).await;
+    let reply = f
+        .sent()
+        .into_iter()
+        .find(|f| f["id"] == "p1")
+        .expect("reply");
+    assert_eq!(reply["result"]["outcome"]["outcome"], "cancelled");
+}

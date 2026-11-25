@@ -42,8 +42,10 @@ pub struct HomeState {
     pub total: u64,
     /// Bumped per query; stale results are dropped.
     pub generation: u64,
-    /// Each provider's preflight; a provider with no entry counts as available.
+    /// Each provider's preflight; a provider with no entry (and not pending) counts as available.
     pub preflight: HashMap<ProviderId, Result<(), ProviderError>>,
+    /// Providers whose startup preflight still runs in the background.
+    pub pending: std::collections::HashSet<ProviderId>,
     /// The provider chosen in the top bar for new sessions; memory only.
     pub provider_pick: Option<ProviderId>,
     /// Provider of the latest Xade session, the default for new ones.

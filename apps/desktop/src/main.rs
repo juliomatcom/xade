@@ -107,27 +107,20 @@ fn respawn(dir: &Path) -> std::io::Result<()> {
     cmd.spawn().map(drop)
 }
 
-/// Every provider's preflight, run in parallel so startup waits for the slowest one only.
+/// Claude's preflight, run before the window shows. The other providers report in the
+/// background (see `App::new`) so a slow one never delays startup.
 fn run_preflights(
     providers: &[Arc<dyn AgentProvider>],
 ) -> HashMap<ProviderId, Result<(), ProviderError>> {
-    let threads: Vec<_> = providers
+    providers
         .iter()
+        .filter(|p| p.id() == ProviderId::Claude)
         .map(|p| {
-            let p = Arc::clone(p);
-            (p.id(), std::thread::spawn(move || p.preflight()))
-        })
-        .collect();
-    threads
-        .into_iter()
-        .map(|(id, t)| {
-            let result = t
-                .join()
-                .unwrap_or_else(|_| Err(ProviderError::Protocol("preflight panicked".into())));
+            let result = p.preflight();
             if let Err(e) = &result {
-                tracing::warn!(provider = ?id, error = %e, "provider preflight failed");
+                tracing::warn!(provider = ?p.id(), error = %e, "provider preflight failed");
             }
-            (id, result)
+            (p.id(), result)
         })
         .collect()
 }
@@ -266,27 +259,19 @@ mod tests {
     }
 
     #[test]
-    fn preflights_run_in_parallel_and_report_each_provider() {
+    fn startup_waits_for_claude_only() {
         use crate::app::StubProvider;
         use std::time::{Duration, Instant};
-        let delay = Duration::from_millis(400);
+        let slow = Duration::from_secs(30);
         let providers: Vec<Arc<dyn AgentProvider>> = vec![
-            Arc::new(StubProvider::claude().preflighting(delay, Ok(()))),
-            Arc::new(
-                StubProvider::antigravity().preflighting(delay, Err(ProviderError::NotInstalled)),
-            ),
+            Arc::new(StubProvider::claude().preflighting(Duration::ZERO, Ok(()))),
+            Arc::new(StubProvider::antigravity().preflighting(slow, Ok(()))),
         ];
         let started = Instant::now();
         let results = run_preflights(&providers);
-        assert!(
-            started.elapsed() < delay * 2,
-            "preflights ran one after the other"
-        );
+        assert!(started.elapsed() < slow, "startup waited for Antigravity");
+        assert_eq!(results.len(), 1);
         assert_eq!(results[&ProviderId::Claude], Ok(()));
-        assert_eq!(
-            results[&ProviderId::Antigravity],
-            Err(ProviderError::NotInstalled)
-        );
     }
 
     #[test]
