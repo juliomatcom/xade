@@ -59,7 +59,7 @@ pub struct HomeState {
 
 /// Room the provider dropdown and the right-hand cluster (buttons, quota meters) take; the
 /// top-bar test fails if they outgrow it.
-const TOP_BAR_RESERVED: f32 = 108.0 + 704.0 + 90.0;
+const TOP_BAR_RESERVED: f32 = 108.0 + 474.0 + 90.0;
 
 /// The search field shrinks with the space left of `TOP_BAR_RESERVED`.
 fn search_width(available: f32) -> f32 {
@@ -197,10 +197,18 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                     .data(|d| d.get_temp::<f32>(egui::Id::unique("view_toggle_width")))
                     .unwrap_or(190.0);
                 let room = ui.min_rect().left() - left_end;
-                if room >= QUOTA_METERS_WIDTH + toggle + 24.0 {
-                    for kind in [QuotaKind::SevenDay, QuotaKind::FiveHour] {
-                        quota_meter(ui, kind, app.quota.iter().find(|q| q.kind == kind));
-                    }
+                let providers = quota_providers(&app.quota);
+                let fit = quota_groups_that_fit(room, toggle, providers.len());
+                // Right to left: the last provider is drawn first, so the first ends up leftmost.
+                for p in providers.iter().take(fit).rev() {
+                    let windows: Vec<&QuotaWindow> = app
+                        .quota
+                        .iter()
+                        .filter(|(q, _)| q == p)
+                        .map(|(_, w)| w)
+                        .collect();
+                    quota_group(ui, *p, app.provider_name(*p), &windows);
+                    ui.add_space(8.0);
                 }
                 let right_start = ui.min_rect().left();
                 ui.data_mut(|d| {
@@ -300,40 +308,89 @@ fn provider_color(id: ProviderId) -> egui::Color32 {
     }
 }
 
-/// Both meters side by side: two 150 px slots and their 8 px gaps.
-const QUOTA_METERS_WIDTH: f32 = 316.0;
+/// One provider's group: its symbol and the two bars, plus the gap after it.
+const QUOTA_GROUP_WIDTH: f32 = 82.0;
+const QUOTA_BAR_WIDTH: f32 = 48.0;
 
-/// Drawn whenever the bar has room; `q` is `None` until the first quota report arrives.
-fn quota_meter(ui: &mut egui::Ui, kind: QuotaKind, q: Option<&QuotaWindow>) {
-    let label = match kind {
-        QuotaKind::FiveHour => "5h Session Use",
-        QuotaKind::SevenDay => "Weekly Quota",
-    };
-    // A fixed-size slot: inside the right-to-left top bar, an unsized `vertical`
-    // lets both meters land on the same rect.
-    let size = egui::vec2(150.0, ui.available_height());
+/// The providers with quota data, in a stable order.
+fn quota_providers(quota: &[(ProviderId, QuotaWindow)]) -> Vec<ProviderId> {
+    let mut out: Vec<ProviderId> = Vec::new();
+    for (p, _) in quota {
+        if !out.contains(p) {
+            out.push(*p);
+        }
+    }
+    out
+}
+
+/// How many provider groups fit in `room`, once the centered toggle has its space.
+fn quota_groups_that_fit(room: f32, toggle: f32, providers: usize) -> usize {
+    let free = room - toggle - 24.0;
+    if free < QUOTA_GROUP_WIDTH {
+        0
+    } else {
+        ((free / QUOTA_GROUP_WIDTH) as usize).min(providers)
+    }
+}
+
+/// A provider's quota as a glyph: its symbol, a 5 px bar for the session window and a hairline
+/// for the weekly one; the numbers are in the tooltip.
+fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, windows: &[&QuotaWindow]) {
     let now = OffsetDateTime::now_utc();
-    ui.allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
-        ui.spacing_mut().item_spacing.y = 2.0;
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(label).small().color(theme::text_muted()));
-            let used = q.map_or("\u{2014}".to_string(), |q| {
-                format!("{:.0}% Used", quota_pct(q, now))
-            });
-            ui.label(RichText::new(used).small().color(theme::text_muted()));
-        });
-        let fraction = q.map_or(0.0, |q| (quota_pct(q, now) / 100.0).clamp(0.0, 1.0));
-        ui.add(
-            egui::ProgressBar::new(fraction)
-                .desired_width(140.0)
-                .desired_height(4.0)
-                .fill(theme::usage_color(fraction)),
+    let height = ui.available_height();
+    let (rect, resp) = ui.allocate_exact_size(
+        egui::vec2(QUOTA_GROUP_WIDTH - 8.0, height),
+        egui::Sense::hover(),
+    );
+    let painter = ui.painter();
+    let symbol = 16.0;
+    let mid = rect.center().y;
+    if let Some(tex) = crate::conversation::provider_symbol(ui.ctx(), provider) {
+        let r = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + symbol / 2.0, mid),
+            egui::vec2(symbol, symbol),
         );
-        if let Some(text) = q.and_then(|q| reset_text(q, now)) {
-            ui.label(RichText::new(text).small().color(theme::text_muted()));
+        painter.image(
+            tex.id(),
+            r,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    }
+    let left = rect.left() + symbol + 8.0;
+    let bar = |y: f32, h: f32, kind: QuotaKind| {
+        let q = windows.iter().find(|q| q.kind == kind);
+        let fraction = q.map_or(0.0, |q| (quota_pct(q, now) / 100.0).clamp(0.0, 1.0));
+        let track = egui::Rect::from_min_size(
+            egui::pos2(left, y - h / 2.0),
+            egui::vec2(QUOTA_BAR_WIDTH, h),
+        );
+        painter.rect_filled(track, h / 2.0, theme::border());
+        let mut fill = track;
+        fill.set_width(track.width() * fraction);
+        painter.rect_filled(fill, h / 2.0, theme::usage_color(fraction));
+    };
+    bar(mid - 4.0, 5.0, QuotaKind::FiveHour);
+    bar(mid + 3.0, 2.0, QuotaKind::SevenDay);
+    resp.on_hover_ui(|ui| {
+        ui.label(RichText::new(name).strong());
+        for kind in [QuotaKind::FiveHour, QuotaKind::SevenDay] {
+            let label = match kind {
+                QuotaKind::FiveHour => "5h session",
+                QuotaKind::SevenDay => "Weekly",
+            };
+            ui.label(match windows.iter().find(|q| q.kind == kind) {
+                Some(q) => {
+                    let used = format!("{label}: {:.0}% used", quota_pct(q, now));
+                    match reset_text(q, now) {
+                        Some(r) => format!("{used} \u{b7} {}", r.to_lowercase()),
+                        None => used,
+                    }
+                }
+                None => format!("{label}: no data yet"),
+            });
         }
     });
-    ui.add_space(8.0);
 }
 
 /// A window whose reset time has passed holds no usage any more.
@@ -924,6 +981,25 @@ mod tests {
         assert_eq!(reset_text(&window(10.0, None, now), now), None);
     }
 
+    #[test]
+    fn quota_groups_give_way_to_the_toggle_and_cap_at_the_providers() {
+        assert_eq!(quota_groups_that_fit(200.0, 190.0, 2), 0);
+        assert_eq!(quota_groups_that_fit(190.0 + 24.0 + 90.0, 190.0, 3), 1);
+        assert_eq!(quota_groups_that_fit(2000.0, 190.0, 2), 2);
+        assert_eq!(quota_groups_that_fit(2000.0, 190.0, 0), 0);
+        let now = OffsetDateTime::now_utc();
+        let q = |p| (p, window(1.0, None, now));
+        let list = [
+            q(ProviderId::Claude),
+            q(ProviderId::Antigravity),
+            q(ProviderId::Claude),
+        ];
+        assert_eq!(
+            quota_providers(&list),
+            vec![ProviderId::Claude, ProviderId::Antigravity]
+        );
+    }
+
     /// `(text rects, frame rects)` the top bar draws at window width `width`.
     fn top_bar_rects(width: f32, two: bool) -> (Vec<egui::Rect>, Vec<egui::Rect>) {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -940,11 +1016,14 @@ mod tests {
         }
         let now = OffsetDateTime::now_utc();
         app.quota = vec![
-            window(80.0, Some(5400), now),
-            QuotaWindow {
-                kind: QuotaKind::SevenDay,
-                ..window(20.0, Some(90_000), now)
-            },
+            (ProviderId::Claude, window(80.0, Some(5400), now)),
+            (
+                ProviderId::Claude,
+                QuotaWindow {
+                    kind: QuotaKind::SevenDay,
+                    ..window(20.0, Some(90_000), now)
+                },
+            ),
         ];
         let input = || egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(

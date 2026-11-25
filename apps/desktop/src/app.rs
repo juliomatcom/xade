@@ -38,6 +38,9 @@ use crate::windows_state::Saved;
 use crate::workspace::{Tiling, WindowKind};
 use crate::{composer, home, logging, status_bar, theme, workspace};
 
+/// The only provider that reports quota so far; the runtime's quota event carries no provider.
+/// A second one adds its id to that event and replaces this constant where it is read.
+const QUOTA_PROVIDER: ProviderId = ProviderId::Claude;
 const GIT_REFRESH: Duration = Duration::from_secs(5);
 /// A running-set change re-imports at most this often.
 const RUNNING_IMPORT_GAP: Duration = Duration::from_secs(30);
@@ -284,7 +287,8 @@ pub struct App {
     pub focused: Option<WindowKind>,
     pub editors: Editors,
     pub tree: FileTree,
-    pub quota: Vec<QuotaWindow>,
+    /// Last quota window per provider and kind, in draw order (session before weekly).
+    pub quota: Vec<(ProviderId, QuotaWindow)>,
     pub cmd_tx: UnboundedSender<ManagerCmd>,
     pub rt: Handle,
     pub git: HashMap<PathBuf, GitState>,
@@ -1966,11 +1970,12 @@ impl App {
             UiMsg::SavedQuota(saved) => {
                 // A live report may have arrived first; it wins.
                 for q in saved {
-                    if !self.quota.iter().any(|x| x.kind == q.kind) {
-                        self.quota.push(q);
+                    if !self.quota.iter().any(|(_, x)| x.kind == q.kind) {
+                        self.quota.push((QUOTA_PROVIDER, q));
                     }
                 }
-                self.quota.sort_by_key(|q| q.kind == QuotaKind::SevenDay);
+                self.quota
+                    .sort_by_key(|(p, q)| (*p as u8, q.kind == QuotaKind::SevenDay));
             }
         }
     }
@@ -2065,9 +2070,10 @@ impl App {
                 self.report(ErrorReport::new("Something went wrong", message))
             }
             (_, AppEventKind::Quota(q)) => {
-                self.quota.retain(|x| x.kind != q.kind);
-                self.quota.push(q);
-                self.quota.sort_by_key(|q| q.kind == QuotaKind::SevenDay);
+                self.quota.retain(|(_, x)| x.kind != q.kind);
+                self.quota.push((QUOTA_PROVIDER, q));
+                self.quota
+                    .sort_by_key(|(p, q)| (*p as u8, q.kind == QuotaKind::SevenDay));
             }
             (_, AppEventKind::ImportDone { imported, updated }) => {
                 self.home.importing = false;
