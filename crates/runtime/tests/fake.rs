@@ -20,6 +20,8 @@ struct FakeProvider {
     spawns: Mutex<Vec<SpawnConfig>>,
     prompts: Arc<Mutex<Vec<String>>>,
     started: AtomicUsize,
+    /// The next prompt ends as stopped before any session was started (no `Started`).
+    stop_before_start: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Default for FakeProvider {
@@ -36,6 +38,7 @@ impl FakeProvider {
             spawns: Mutex::default(),
             prompts: Arc::default(),
             started: AtomicUsize::new(0),
+            stop_before_start: Arc::default(),
         }
     }
 
@@ -71,6 +74,7 @@ impl AgentProvider for FakeProvider {
             n => format!("fake-session-{n}"),
         });
         let prompts = self.prompts.clone();
+        let stop_before_start = self.stop_before_start.clone();
         self.spawns.lock().unwrap().push(cfg);
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         let (ev_tx, events) = mpsc::unbounded_channel();
@@ -79,6 +83,14 @@ impl AgentProvider for FakeProvider {
                 match cmd {
                     SessionCommand::SendPrompt(text) => {
                         prompts.lock().unwrap().push(text);
+                        if stop_before_start.swap(false, Ordering::SeqCst) {
+                            let _ = ev_tx.send(ProviderEvent::TurnComplete {
+                                usage: UsageTotals::default(),
+                                is_error: false,
+                                interrupted: true,
+                            });
+                            continue;
+                        }
                         let script = [
                             ProviderEvent::Started {
                                 provider_session_id: psid.clone(),
@@ -458,6 +470,26 @@ async fn the_first_send_to_a_fork_carries_the_handoff_once() {
     // Once the provider stored its session id, reopening never repeats it.
     close(&mut h, new).await;
     open(&mut h, new).await;
+    send(&mut h, new, "third").await;
+    assert_eq!(agy.prompts()[2], "third");
+}
+
+#[tokio::test]
+async fn a_first_turn_stopped_before_the_provider_started_keeps_the_handoff() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, _claude, agy) = both(dir.path()).await;
+    let src = create(&mut h, ProviderId::Claude).await;
+    send(&mut h, src, "remember the word apple").await;
+    close(&mut h, src).await;
+    let new = fork(&mut h, src, ProviderId::Antigravity).await;
+    open(&mut h, new).await;
+    agy.stop_before_start.store(true, Ordering::SeqCst);
+    send(&mut h, new, "first try").await;
+    send(&mut h, new, "second try").await;
+    let prompts = agy.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[0].starts_with(HANDOFF_TAG));
+    assert!(prompts[1].starts_with(HANDOFF_TAG), "{}", prompts[1]);
     send(&mut h, new, "third").await;
     assert_eq!(agy.prompts()[2], "third");
 }

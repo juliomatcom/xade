@@ -45,6 +45,9 @@ pub(crate) struct Actor {
     last_error: Option<String>,
     /// Transcript of a forked history, prepended to the first prompt only.
     handoff: Option<String>,
+    /// The hand-off of the turn in flight, put back if the turn ends before the provider
+    /// reported a session (e.g. stopped during its handshake), so it is not lost.
+    handoff_sent: Option<String>,
 }
 
 impl Actor {
@@ -70,6 +73,7 @@ impl Actor {
             pending_effort: None,
             last_error: None,
             handoff: None,
+            handoff_sent: None,
         }
     }
 
@@ -199,7 +203,9 @@ impl Actor {
                 if self.status != SessionStatus::Streaming {
                     self.set_status(SessionStatus::Streaming);
                 }
-                let prompt = match (self.handoff.take(), context) {
+                let handoff = self.handoff.take();
+                self.handoff_sent.clone_from(&handoff);
+                let prompt = match (handoff, context) {
                     (None, None) => text,
                     (handoff, context) => [handoff, context, Some(text)]
                         .into_iter()
@@ -291,6 +297,7 @@ impl Actor {
                 provider_session_id,
                 ..
             } => {
+                self.handoff_sent = None;
                 if self.session.provider_session_id.as_deref() != Some(provider_session_id) {
                     self.session.provider_session_id = Some(provider_session_id.clone());
                     let mut op = self.update();
@@ -337,6 +344,12 @@ impl Actor {
                 return true;
             }
             ProviderEvent::TurnComplete { usage, .. } => {
+                if let Some(h) = self.handoff_sent.take() {
+                    // The provider never started a session, so it never saw the history.
+                    if self.session.provider_session_id.is_none() {
+                        self.handoff = Some(h);
+                    }
+                }
                 self.write(WriteOp::ApplyTurnUsage {
                     session_id: self.session.id,
                     turn: usage.clone(),
