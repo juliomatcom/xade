@@ -20,7 +20,7 @@ Xade is short for X-provider Agentic Development Environment (pronounced "zade")
 - Sessions are saved locally and searchable. Typos are fine in titles.
 - Review code changes in a side-by-side diff before they are applied, and open any file in VS Code.
 - Turn auto-approve on or off per session. With it on, changes still show up for review afterwards.
-- Pick the model and effort level, and see context and cost meters.
+- Pick the model and effort level, and see context and token meters.
 - The git branch and changed-file count stay visible in the bottom bar.
 - Auto mode and the model choice carry over to new sessions.
 

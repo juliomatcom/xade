@@ -24,7 +24,7 @@ const features = [
   ["Your setup, as is", "Your login, CLAUDE.md files, MCP servers, skills and permission rules all apply."],
   ["Review before it lands", "Every change shows up in a side-by-side diff. Turn auto-approve on or off per session."],
   ["Searchable sessions", "Saved locally in SQLite and searchable. Typos are fine. Import and resume existing sessions."],
-  ["Model, effort, cost", "Pick the model and effort level, and watch the context and cost meters."],
+  ["Model, effort, context", "Pick the model and effort level, and watch the context and token meters."],
   ["Git in view", "The branch and changed-file count stay visible in the bottom bar."],
 ];
 

@@ -13,7 +13,7 @@
 - The top bar shows usage quota per provider: Claude 5-hour and weekly usage, and Antigravity 5-hour and weekly usage per model group.
 - Uses your existing CLI login, settings, CLAUDE.md files, MCP servers, skills and permission rules. No API keys to paste; Xade never reads your credentials.
 - Side-by-side diff review for every change, with per-session auto-approve.
-- Model and effort picker, context and cost meters, git branch and changed-file count in the bottom bar.
+- Model and effort picker, context and token meters, git branch and changed-file count in the bottom bar.
 - Native Rust binary rendered on the GPU. No Electron.
 - Roadmap: more providers and local models.
 - Platforms: macOS (Apple Silicon), Linux (x86_64, aarch64).
