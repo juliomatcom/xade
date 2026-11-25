@@ -40,7 +40,7 @@ use crate::{composer, home, logging, status_bar, theme, workspace};
 
 /// The only provider that reports quota so far; the runtime's quota event carries no provider.
 /// A second one adds its id to that event and replaces this constant where it is read.
-const QUOTA_PROVIDER: ProviderId = ProviderId::Claude;
+pub(crate) const QUOTA_PROVIDER: ProviderId = ProviderId::Claude;
 const GIT_REFRESH: Duration = Duration::from_secs(5);
 /// A running-set change re-imports at most this often.
 const RUNNING_IMPORT_GAP: Duration = Duration::from_secs(30);

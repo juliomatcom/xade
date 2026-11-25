@@ -197,7 +197,8 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                     .data(|d| d.get_temp::<f32>(egui::Id::unique("view_toggle_width")))
                     .unwrap_or(190.0);
                 let room = ui.min_rect().left() - left_end;
-                let providers = quota_providers(&app.quota);
+                // Every available provider gets a group, even one that reports no quota.
+                let providers = app.selectable_providers();
                 let fit = quota_groups_that_fit(room, toggle, providers.len());
                 // Right to left: the last provider is drawn first, so the first ends up leftmost.
                 for p in providers.iter().take(fit).rev() {
@@ -312,17 +313,6 @@ fn provider_color(id: ProviderId) -> egui::Color32 {
 const QUOTA_GROUP_WIDTH: f32 = 82.0;
 const QUOTA_BAR_WIDTH: f32 = 48.0;
 
-/// The providers with quota data, in a stable order.
-fn quota_providers(quota: &[(ProviderId, QuotaWindow)]) -> Vec<ProviderId> {
-    let mut out: Vec<ProviderId> = Vec::new();
-    for (p, _) in quota {
-        if !out.contains(p) {
-            out.push(*p);
-        }
-    }
-    out
-}
-
 /// How many provider groups fit in `room`, once the centered toggle has its space.
 fn quota_groups_that_fit(room: f32, toggle: f32, providers: usize) -> usize {
     let free = room - toggle - 24.0;
@@ -336,6 +326,7 @@ fn quota_groups_that_fit(room: f32, toggle: f32, providers: usize) -> usize {
 /// A provider's quota as a glyph: its symbol, a 5 px bar for the session window and a hairline
 /// for the weekly one; the numbers are in the tooltip.
 fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, windows: &[&QuotaWindow]) {
+    let reports_quota = provider == crate::app::QUOTA_PROVIDER;
     let now = OffsetDateTime::now_utc();
     let height = ui.available_height();
     let (rect, resp) = ui.allocate_exact_size(
@@ -374,11 +365,17 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, windows: &[&
     bar(mid + 3.0, 2.0, QuotaKind::SevenDay);
     resp.on_hover_ui(|ui| {
         ui.label(RichText::new(name).strong());
+        if !reports_quota {
+            ui.label(format!("{name} doesn't report usage limits."));
+        }
         for kind in [QuotaKind::FiveHour, QuotaKind::SevenDay] {
             let label = match kind {
                 QuotaKind::FiveHour => "5h session",
                 QuotaKind::SevenDay => "Weekly",
             };
+            if !reports_quota {
+                break;
+            }
             ui.label(match windows.iter().find(|q| q.kind == kind) {
                 Some(q) => {
                     let used = format!("{label}: {:.0}% used", quota_pct(q, now));
@@ -987,17 +984,6 @@ mod tests {
         assert_eq!(quota_groups_that_fit(190.0 + 24.0 + 90.0, 190.0, 3), 1);
         assert_eq!(quota_groups_that_fit(2000.0, 190.0, 2), 2);
         assert_eq!(quota_groups_that_fit(2000.0, 190.0, 0), 0);
-        let now = OffsetDateTime::now_utc();
-        let q = |p| (p, window(1.0, None, now));
-        let list = [
-            q(ProviderId::Claude),
-            q(ProviderId::Antigravity),
-            q(ProviderId::Claude),
-        ];
-        assert_eq!(
-            quota_providers(&list),
-            vec![ProviderId::Claude, ProviderId::Antigravity]
-        );
     }
 
     /// `(text rects, frame rects)` the top bar draws at window width `width`.
