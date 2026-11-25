@@ -575,6 +575,7 @@ mod tests {
             sync: Default::default(),
             mention: Default::default(),
             attach_note: None,
+            focus_input: false,
             subagent_msgs: Vec::new(),
             view_subagents: false,
             fork_preparing: false,

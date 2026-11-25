@@ -93,6 +93,11 @@ fn linkify(text: &str, cwd: &Path, exists: impl Fn(&Path) -> bool) -> (String, V
             Event::Text(t) if skip == 0 && text.get(range.clone()) == Some(&*t) => {
                 for (start, word) in words(&t) {
                     let (lead, core) = trim_punct(word);
+                    if is_url(core) {
+                        let at = range.start + start + lead;
+                        edits.push((at..at + core.len(), escape(core), core.to_string()));
+                        continue;
+                    }
                     let token = strip_line_suffix(core);
                     if let Some(path) = resolve(token) {
                         let at = range.start + start + lead;
@@ -112,11 +117,21 @@ fn linkify(text: &str, cwd: &Path, exists: impl Fn(&Path) -> bool) -> (String, V
         }
         out.push_str(&text[at..range.start]);
         out.push_str(&format!("[{label}](<{dest}>)"));
-        dests.push(dest);
+        // Web links open in the browser by themselves; only file links are hooks.
+        if dest.starts_with(SCHEME) {
+            dests.push(dest);
+        }
         at = range.end;
     }
     out.push_str(&text[at..]);
     (out, dests)
+}
+
+/// A bare web address; the viewer opens its link in the default browser.
+fn is_url(token: &str) -> bool {
+    (token.starts_with("https://") || token.starts_with("http://"))
+        && token.len() > 8
+        && !token.contains(['<', '>', '`'])
 }
 
 /// The path a token names, when it looks like one; never touches the disk.
@@ -203,6 +218,16 @@ mod tests {
     }
 
     #[test]
+    fn bare_web_addresses_become_links_without_file_hooks() {
+        let (out, dests) = run("Open (https://example.com/a?b=1), then src/main.rs.");
+        assert_eq!(
+            out,
+            "Open ([https://example.com/a?b=1](<https://example.com/a?b=1>)), then [src/main.rs](<xade-file:/w/src/main.rs>)."
+        );
+        assert_eq!(dests, vec!["xade-file:/w/src/main.rs".to_string()]);
+    }
+
+    #[test]
     fn links_existing_paths_in_text_and_inline_code() {
         let (out, dests) = run("See src/main.rs:12, `Cargo.toml` and (/abs/x.md).");
         assert_eq!(
@@ -219,7 +244,6 @@ mod tests {
             "and/or e.g. src/nope.rs",
             "```\nsrc/main.rs\n```",
             "[src/main.rs](https://x.y)",
-            "https://example.com/src/main.rs",
         ] {
             let (out, dests) = run(text);
             assert_eq!(out, text);

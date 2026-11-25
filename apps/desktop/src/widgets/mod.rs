@@ -9,6 +9,7 @@ pub mod keymaps_modal;
 pub mod markdown;
 pub mod path_links;
 pub mod quit_modal;
+pub mod selection_menu;
 pub mod session_picker;
 pub mod tool_card;
 

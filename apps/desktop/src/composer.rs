@@ -103,6 +103,27 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
             note_frame(ui, &text);
         }
     }
+    if std::mem::take(&mut vm.focus_input) {
+        let ctx = ui.ctx();
+        let mut state = egui::TextEdit::load_state(ctx, input_id).unwrap_or_default();
+        let end = egui::text::CCursor::new(vm.input.chars().count());
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(end)));
+        state.store(ctx, input_id);
+        ctx.memory_mut(|m| m.request_focus(input_id));
+    }
+    let break_all = env.break_all;
+    let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+        let mut job = egui::text::LayoutJob::simple(
+            buf.as_str().to_owned(),
+            egui::TextStyle::Body.resolve(ui.style()),
+            ui.visuals().text_color(),
+            wrap,
+        );
+        job.wrap.break_anywhere = break_all;
+        ui.fonts_mut(|f| f.layout_job(job))
+    };
     let input_box = egui::Frame::new()
         .fill(theme::bg_hover())
         .stroke(egui::Stroke::new(1.5, theme::border_strong()))
@@ -126,6 +147,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
                                         .frame(egui::Frame::NONE)
                                         .desired_width(f32::INFINITY)
                                         .desired_rows(INPUT_MIN_ROWS)
+                                        .layouter(&mut layouter)
                                         .hint_text(format!(
                                             "Message ({} to {})",
                                             keymap::shortcut_text(Action::Send),
@@ -268,6 +290,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: crate::config::SendMode::Queue,
+            break_all: true,
             ide_context: None,
             focused: false,
         };

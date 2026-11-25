@@ -480,6 +480,10 @@ fn app_menu(app: &mut App, ui: &mut egui::Ui) {
         if ui.button(icons::with(icons::ABOUT, "About Xade")).clicked() {
             app.about_open = true;
         }
+        ui.separator();
+        if ui.button(icons::with(icons::EXIT, "Exit")).clicked() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+        }
     })
     .response
     .on_hover_text("Menu");

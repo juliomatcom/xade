@@ -11,6 +11,7 @@ Xade reads `settings.json` from its data folder (`<data dir>/xade/`, or `XADE_DA
 | `send_while_running` | `"queue"` | What Cmd+Enter does while a turn runs: `"queue"` sends it when the turn ends, `"steer"` sends it at once. Cmd+Shift+Enter does the other one. |
 | `show_fps` | `false` | Show the frame rate at the right of the status bar. |
 | `show_whitespace` | `true` | Mark every space (dot) and tab (dash) in file windows. Colored by `theme.whitespace`. |
+| `input_break_all` | `true` | The session text box breaks long words anywhere (like CSS `word-break: break-all`), saving space; `false` wraps only at word boundaries. |
 | `restore_windows` | `true` | Reopen the session and file windows left open when Xade starts without a path. |
 | `fork_handoff_prompt` | `"prompts/fork-handoff.md"` | File with the prompt a fork asks the source provider to write its state hand-off with. A relative path is relative to the data folder; absolute paths work too. Xade creates the default file on first run and never overwrites it, so edit it freely. A missing, empty or unreadable file shows a status-bar warning and the bundled prompt is used. |
 | `shortcuts` | see below | Keyboard shortcuts by action name. |

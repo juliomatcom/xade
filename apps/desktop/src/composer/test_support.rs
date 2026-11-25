@@ -52,6 +52,7 @@ pub(super) fn vm(input: String) -> SessionVm {
         sync: Default::default(),
         mention: Default::default(),
         attach_note: None,
+        focus_input: false,
         subagent_msgs: Vec::new(),
         view_subagents: false,
         fork_preparing: false,
@@ -71,6 +72,7 @@ pub(super) fn height_with_note(note: Option<(String, std::time::Instant)>) -> f3
         vscode: None,
         maximized: None,
         send_mode: crate::config::SendMode::Queue,
+        break_all: true,
         ide_context: None,
         focused: false,
     };
@@ -109,6 +111,7 @@ pub(super) fn render(input: String) -> egui::Rect {
         vscode: None,
         maximized: None,
         send_mode: crate::config::SendMode::Queue,
+        break_all: true,
         ide_context: None,
         focused: false,
     };
@@ -145,6 +148,7 @@ pub(super) fn frame(
         vscode: None,
         maximized: None,
         send_mode: crate::config::SendMode::Queue,
+        break_all: true,
         ide_context: None,
         focused: false,
     };

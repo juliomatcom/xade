@@ -192,6 +192,8 @@ pub struct SessionVm {
     pub mention: crate::mention::MentionState,
     /// Why an attachment was refused, shown above the input until it expires or a send.
     pub attach_note: Option<(String, std::time::Instant)>,
+    /// The next composer frame focuses the text box with the cursor at the end (after a quote).
+    pub focus_input: bool,
     /// What running subagents did this turn, in memory only (never stored); cleared when the turn ends.
     pub subagent_msgs: Vec<Message>,
     /// The chat area shows `subagent_msgs` instead of the main transcript.
@@ -324,6 +326,10 @@ pub struct App {
     /// Awaiting confirmation to quit while sessions are mid-turn.
     pub pending_quit: bool,
     quit_confirmed: bool,
+    /// Frames drawn with the "Saving workspaces…" overlay; the real close waits for it to paint.
+    saving_frames: Option<u8>,
+    /// Text selected in a chat and where the pointer left it: the Copy / Quote popup.
+    pub selection_menu: Option<crate::widgets::selection_menu::Pending>,
     running_checked: Option<Instant>,
     tree_checked: Option<Instant>,
     running_inflight: bool,
@@ -361,6 +367,8 @@ impl App {
         initial_workspace: Option<PathBuf>,
     ) -> Self {
         theme::apply(&cc.egui_ctx);
+        cc.egui_ctx
+            .add_plugin(crate::widgets::selection_menu::SelectionWatcher);
         let (config, config_error) = config::load(&config_path);
         if let Some(dir) = config_path.parent().map(Path::to_path_buf) {
             rt.spawn_blocking(move || config::ensure_default_fork_prompt(&dir));
@@ -433,6 +441,8 @@ impl App {
             pending_delete: None,
             pending_quit: false,
             quit_confirmed: false,
+            saving_frames: None,
+            selection_menu: None,
             running_checked: None,
             tree_checked: None,
             running_inflight: false,
@@ -519,6 +529,8 @@ impl App {
             pending_delete: None,
             pending_quit: false,
             quit_confirmed: false,
+            saving_frames: None,
+            selection_menu: None,
             running_checked: None,
             tree_checked: None,
             running_inflight: false,
@@ -1301,7 +1313,7 @@ impl App {
     }
 
     /// The focused window when it is a live session.
-    fn focused_session(&self) -> Option<SessionId> {
+    pub(crate) fn focused_session(&self) -> Option<SessionId> {
         self.focused
             .and_then(WindowKind::session)
             .filter(|id| self.sessions.contains_key(id))
@@ -2006,6 +2018,7 @@ impl App {
                 sync: Default::default(),
                 mention: Default::default(),
                 attach_note: None,
+                focus_input: false,
                 subagent_msgs: Vec::new(),
                 view_subagents: false,
                 fork_preparing: false,
@@ -2184,17 +2197,45 @@ impl App {
         if !ctx.input(|i| i.viewport().close_requested()) || self.quit_confirmed {
             return;
         }
+        ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
         if self.busy_sessions() > 0 {
-            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
             self.pending_quit = true;
+        } else {
+            self.begin_exit(ctx);
         }
     }
 
-    /// Lets the next close request through and issues it.
+    /// Quit confirmed: shows the saving overlay first, because shutting down blocks the UI.
     pub fn confirm_quit(&mut self, ctx: &egui::Context) {
         self.pending_quit = false;
+        self.begin_exit(ctx);
+    }
+
+    fn begin_exit(&mut self, ctx: &egui::Context) {
         self.quit_confirmed = true;
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        self.saving_frames = Some(0);
+        ctx.request_repaint();
+    }
+
+    /// Paints the overlay for two frames, then lets the close through (`on_exit` blocks).
+    fn saving_overlay(&mut self, ctx: &egui::Context) {
+        let Some(frames) = self.saving_frames else {
+            return;
+        };
+        crate::widgets::modal(ctx, egui::Id::unique("saving_workspaces")).show(ctx, |ui| {
+            ui.label(
+                egui::RichText::new("Saving workspaces…")
+                    .strong()
+                    .size(18.0),
+            );
+        });
+        if frames >= 2 {
+            self.saving_frames = None;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else {
+            self.saving_frames = Some(frames + 1);
+            ctx.request_repaint();
+        }
     }
 
     fn on_provider_event(&mut self, id: SessionId, ev: ProviderEvent) {
@@ -2562,6 +2603,8 @@ impl App {
         running::confirm_modal(self, &ctx);
         delete_modal::show(self, &ctx);
         quit_modal::show(self, &ctx);
+        crate::widgets::selection_menu::show(self, &ctx);
+        self.saving_overlay(&ctx);
         about_modal::show(self, &ctx);
         crate::find::show(self, &ctx);
         self.editor_modal(&ctx);

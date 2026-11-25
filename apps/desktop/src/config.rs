@@ -53,6 +53,8 @@ pub struct Config {
     pub show_fps: bool,
     /// Whether file windows mark every space and tab (`theme.whitespace` colors them).
     pub show_whitespace: bool,
+    /// Whether the session text box breaks long words anywhere (CSS `word-break: break-all`).
+    pub input_break_all: bool,
     /// Whether a plain launch reopens the windows left open (they are saved only while true).
     pub restore_windows: bool,
     /// File with the prompt a fork asks the source provider; relative to the data dir unless
@@ -71,6 +73,7 @@ impl Default for Config {
             send_while_running: SendMode::default(),
             show_fps: false,
             show_whitespace: true,
+            input_break_all: true,
             restore_windows: true,
             fork_handoff_prompt: PathBuf::from(DEFAULT_FORK_PROMPT_FILE),
             shortcuts: Arc::default(),
@@ -117,6 +120,11 @@ impl Config {
             None => {}
             Some(Value::Bool(b)) => cfg.show_whitespace = *b,
             Some(_) => return Err("show_whitespace must be true or false".into()),
+        }
+        match obj.get("input_break_all") {
+            None => {}
+            Some(Value::Bool(b)) => cfg.input_break_all = *b,
+            Some(_) => return Err("input_break_all must be true or false".into()),
         }
         match obj.get("restore_windows") {
             None => {}
@@ -166,6 +174,7 @@ fn defaults_json() -> String {
         "send_while_running": "queue",
         "show_fps": false,
         "show_whitespace": true,
+        "input_break_all": true,
         "restore_windows": true,
         "fork_handoff_prompt": DEFAULT_FORK_PROMPT_FILE,
         "shortcuts": keymap::default_shortcuts(),
@@ -385,6 +394,17 @@ mod tests {
         assert!(Config::parse(r#"{"show_fps":true}"#).unwrap().show_fps);
         assert!(Config::parse(r#"{"show_fps":"no"}"#).is_err());
         assert!(Config::parse(r#"{"show_fps":null}"#).is_err());
+    }
+
+    #[test]
+    fn input_break_all_defaults_to_true_and_must_be_a_bool() {
+        assert!(Config::default().input_break_all);
+        assert!(
+            !Config::parse(r#"{"input_break_all":false}"#)
+                .unwrap()
+                .input_break_all
+        );
+        assert!(Config::parse(r#"{"input_break_all":"yes"}"#).is_err());
     }
 
     #[test]

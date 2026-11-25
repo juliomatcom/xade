@@ -85,6 +85,8 @@ pub struct Env<'a> {
     pub vscode: Option<&'a Path>,
     pub maximized: Option<SessionId>,
     pub send_mode: SendMode,
+    /// The text box breaks long words anywhere (`input_break_all`).
+    pub break_all: bool,
     /// `<ide_opened_file>` tag for the file the user last had open, sent ahead of prompts.
     pub ide_context: Option<&'a str>,
     /// This window is the focused one: its header is highlighted.
@@ -301,6 +303,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             vscode: app.vscode.as_deref(),
             maximized: app.maximized.and_then(WindowKind::session),
             send_mode: app.config.send_while_running,
+            break_all: app.config.input_break_all,
             ide_context: ide_context.as_deref(),
             focused,
         };
@@ -675,6 +678,7 @@ mod tests {
             sync: Default::default(),
             mention: Default::default(),
             attach_note: None,
+            focus_input: false,
             subagent_msgs: Vec::new(),
             view_subagents: false,
             fork_preparing: false,
@@ -783,6 +787,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
+            break_all: true,
             ide_context: None,
             focused: false,
         };
@@ -829,6 +834,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
+            break_all: true,
             ide_context: None,
             focused: false,
         };
