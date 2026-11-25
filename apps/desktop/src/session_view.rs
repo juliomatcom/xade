@@ -96,6 +96,8 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
                 ui.label(RichText::new(cwd).small().color(theme::text_muted()))
                     .on_hover_text(vm.cwd.display().to_string());
             }
+            // Before the truncating labels, which take all the width left.
+            fork_button(ui, vm, env);
             if let Some(tex) = conversation::provider_symbol(ui.ctx(), vm.session.provider_id) {
                 ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)));
             }
@@ -105,7 +107,6 @@ fn header(ui: &mut egui::Ui, vm: &SessionVm, env: &Env, out: &mut ViewOut) {
                     .sense(egui::Sense::hover()),
             )
             .on_hover_text(provider);
-            fork_button(ui, vm, env);
             ui.add(egui::Label::new(RichText::new(format!("• {title}")).strong()).truncate());
         },
     );
