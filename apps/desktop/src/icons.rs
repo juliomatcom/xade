@@ -24,7 +24,9 @@ pub const NEXT: &str = "\u{23F5}";
 pub const AUTO: &str = "\u{1F680}";
 pub const MENU: &str = "\u{2630}";
 pub const ABOUT: &str = "\u{2139}";
-pub const STATUS: &str = SETTINGS;
+/// A terminal prompt: providers are CLIs.
+pub const PROVIDERS: &str = ">_";
+pub const STATUS: &str = PROVIDERS;
 pub const OPEN_SESSION: &str = "\u{1F4C2}";
 pub const SHORTCUTS: &str = "\u{2328}";
 pub const SETTINGS: &str = "\u{2699}";
@@ -53,6 +55,7 @@ mod tests {
     fn glyphs_exist() {
         let all = [
             NEW_SESSION,
+            PROVIDERS,
             ADD_DIR,
             TILE,
             HOME,

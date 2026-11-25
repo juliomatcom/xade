@@ -55,7 +55,11 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let mut retry = None;
     let resp = crate::widgets::modal(ctx, egui::Id::unique("status")).show(ctx, |ui| {
         ui.set_min_width(360.0);
-        ui.label(RichText::new("Status").strong().size(20.0));
+        ui.label(
+            RichText::new(icons::with(icons::PROVIDERS, "Status"))
+                .strong()
+                .size(20.0),
+        );
         ui.add_space(8.0);
         egui::Grid::new("status_grid")
             .num_columns(3)
