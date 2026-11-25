@@ -61,6 +61,9 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
     } else {
         None
     };
+    if focused {
+        crate::widgets::selection_menu::mark_text_box(ui.ctx());
+    }
     let hotkey_other = pressed == Some(Action::SendOther);
     let hotkey = pressed == Some(Action::Send);
     // Pasting copied files or an image attaches them, like the attach button.

@@ -408,6 +408,7 @@ fn edit(ui: &mut egui::Ui, vm: &mut EditorVm, show_whitespace: bool) {
                 // Follows the cursor only while the text has focus: clicking into a session's
                 // composer must not forget what was selected here.
                 if output.response.has_focus() {
+                    crate::widgets::selection_menu::mark_text_box(ui.ctx());
                     vm.selection = output.cursor_range.and_then(|r| {
                         let range = r.as_sorted_char_range();
                         selected_lines(&vm.text, range.start.0, range.end.0)

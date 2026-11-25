@@ -71,6 +71,8 @@ To install it as a regular macOS app (so you can open it from Launchpad and keep
 ./scripts/bundle-macos.sh            # builds and installs /Applications/Xade.app
 ```
 
+On Linux, `./scripts/bundle-linux.sh --install` does the same: it builds and installs to `~/.local/share/xade` with a desktop entry, an icon and `~/.local/bin/xade`. Without `--install` it packs `dist/Xade-linux-<arch>.tar.gz` for releases.
+
 Run the script again after pulling changes to update the app.
 
 Xade stores its data in the `xade/` folder inside your OS data directory. To use another location, set `XADE_DATA_DIR`.
