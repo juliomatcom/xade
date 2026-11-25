@@ -15,7 +15,7 @@ const VIDEO_SRC = "";
 
 const pillars = [
   ["All your subscriptions, one place", "Bring the plans you already pay for. Xade drives the agent CLIs you have installed and logged in, so there are no API keys to paste and nothing to set up again."],
-  ["Hand work between providers", "Start a task with one agent and pass it to another when you hit a limit or want a second opinion, without leaving the workspace or losing context."],
+  ["Hand work between providers", "Fork a session to the other provider when you hit a limit or want a second opinion. The new agent continues from a summary of the work, without leaving the workspace."],
   ["Cloud or local models", "One interface for hosted agents and models running on your own machine. Pick the right brain for each job."],
 ];
 
@@ -117,7 +117,7 @@ export default function App() {
 
           <figure className="mx-auto mt-14 max-w-6xl">
             {VIDEO_SRC ? (
-              <video src={VIDEO_SRC} poster="/app.webp" autoPlay muted loop playsInline className="w-full rounded-2xl shadow-[0_30px_120px_-20px_rgb(16_185_129/0.3)]" aria-label="Xade running Claude, Codex and Google sessions side by side" />
+              <video src={VIDEO_SRC} poster="/app.webp" autoPlay muted loop playsInline className="w-full rounded-2xl shadow-[0_30px_120px_-20px_rgb(16_185_129/0.3)]" aria-label="Xade running Claude Code and Antigravity sessions side by side" />
             ) : (
               <Carousel />
             )}
@@ -151,7 +151,7 @@ export default function App() {
         <section id="why" className="scroll-mt-24 pb-24">
           <h2 className="mx-auto max-w-3xl text-center text-3xl font-semibold tracking-tight text-white sm:text-4xl">One place for every agent, subscription and model</h2>
           <p className="mx-auto mt-3 max-w-2xl text-center text-slate-400">
-            Today Xade drives Claude Code. It is built for a multi-provider future, so the workspace you learn now is the one you keep.
+            Today Xade drives Claude Code and Antigravity, and sessions can be forked between them. It is built to take more providers, so the workspace you learn now is the one you keep.
           </p>
           <div className="mt-12 grid gap-px overflow-hidden rounded-2xl border border-edge bg-edge md:grid-cols-3">
             {pillars.map(([t, d]) => (
@@ -161,13 +161,13 @@ export default function App() {
               </article>
             ))}
           </div>
-          <p className="mt-3 text-center text-xs uppercase tracking-widest text-slate-600">Multi-provider and local models are on the roadmap</p>
+          <p className="mt-3 text-center text-xs uppercase tracking-widest text-slate-600">More providers and local models are on the roadmap</p>
         </section>
 
         <section className="pb-24" aria-labelledby="features">
           <h2 id="features" className="text-3xl font-semibold tracking-tight text-white">Everything you need, nothing you don't</h2>
           <p className="mt-3 max-w-2xl text-slate-400">
-            Simple, opinionated and really fast. Xade never reads or touches your credentials; it runs the official CLI you already have.
+            Simple, opinionated and really fast. Xade never reads or touches your credentials; it runs the official CLIs you already have.
           </p>
           <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {features.map(([t, d]) => (
@@ -187,7 +187,7 @@ export default function App() {
             <Copy text={INSTALL} />
           </div>
           <p className="mt-4 text-sm text-slate-500">
-            Requires the Claude Code CLI, installed and logged in, plus git. VS Code with the <code className="font-mono">code</code> command is optional. Linux needs a Vulkan-capable GPU driver.
+            Requires the Claude Code CLI, installed and logged in, and/or the Antigravity CLI <code className="font-mono">agy</code>, signed in, plus git. VS Code with the <code className="font-mono">code</code> command is optional. Linux needs a Vulkan-capable GPU driver.
           </p>
         </section>
 

@@ -1,6 +1,6 @@
 # Xade
 
-> Xade (X-provider Agentic Development Environment, pronounced "zade") is a fast native desktop app, written in Rust, for running several AI coding agent sessions side by side. It drives the agent CLIs you already have installed and logged in, starting with Claude Code. Free and open source (MIT). macOS and Linux.
+> Xade (X-provider Agentic Development Environment, pronounced "zade") is a fast native desktop app, written in Rust, for running several AI coding agent sessions side by side. It drives the agent CLIs you already have installed and logged in: Claude Code and Antigravity. Free and open source (MIT). macOS and Linux.
 
 - Website: https://xade.pro/
 - Source code: https://github.com/juliomatcom/xade
@@ -8,10 +8,12 @@
 - Install: curl -fsSL https://raw.githubusercontent.com/juliomatcom/xade/main/scripts/install.sh | sh
 
 ## Key facts
-- Runs multiple Claude Code sessions in side-by-side windows; sessions are saved locally (SQLite) and searchable.
+- Runs multiple Claude Code and Antigravity sessions in side-by-side windows; sessions are saved locally (SQLite) and searchable.
+- Forks a session to the other provider: the source agent writes a short state summary and the new one continues from it.
+- The top bar shows usage quota per provider: Claude 5-hour and weekly usage, and Antigravity 5-hour and weekly usage per model group.
 - Uses your existing CLI login, settings, CLAUDE.md files, MCP servers, skills and permission rules. No API keys to paste; Xade never reads your credentials.
 - Side-by-side diff review for every change, with per-session auto-approve.
 - Model and effort picker, context and cost meters, git branch and changed-file count in the bottom bar.
 - Native Rust binary rendered on the GPU. No Electron.
-- Roadmap: more providers (hand tasks between them) and local models.
+- Roadmap: more providers and local models.
 - Platforms: macOS (Apple Silicon), Linux (x86_64, aarch64).
