@@ -324,6 +324,42 @@ fn multi_title_label(ui: &mut egui::Ui, vm: &mut MultiSessionVm, title: &str) ->
     None
 }
 
+/// Draws one clickable tab container whose selected/hover highlight wraps its entire contents
+/// (`status dot + provider icon + handle`, or `Team`).
+fn tab_item(
+    ui: &mut egui::Ui,
+    id_salt: impl egui::AsIdSalt,
+    selected: bool,
+    body: impl FnOnce(&mut egui::Ui),
+) -> bool {
+    let mut prepared = egui::Frame::new()
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 4))
+        .begin(ui);
+    prepared
+        .content_ui
+        .style_mut()
+        .interaction
+        .selectable_labels = false;
+    prepared.content_ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 5.0;
+        body(ui);
+    });
+    let rect = prepared.allocate_space(ui).rect;
+    let resp = ui
+        .interact(rect, ui.make_persistent_id(id_salt), egui::Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    if selected {
+        prepared.frame.fill = theme::bg_header_focus();
+        prepared.frame.stroke = egui::Stroke::new(1.0, theme::accent());
+    } else if resp.hovered() {
+        prepared.frame.fill = theme::bg_hover();
+        prepared.frame.stroke = egui::Stroke::new(1.0, theme::border_strong());
+    }
+    prepared.paint(ui);
+    resp.clicked()
+}
+
 fn tab_bar(ui: &mut egui::Ui, vm: &mut MultiSessionVm, members: &HashMap<SessionId, SessionVm>) {
     egui::Frame::new()
         .fill(theme::bg_raised())
@@ -332,13 +368,14 @@ fn tab_bar(ui: &mut egui::Ui, vm: &mut MultiSessionVm, members: &HashMap<Session
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
-                if ui
-                    .selectable_label(
-                        vm.active_tab == MultiTab::Team,
-                        RichText::new("Team").strong(),
-                    )
-                    .clicked()
-                {
+                if tab_item(
+                    ui,
+                    ("multi_tab_team", vm.multi.id),
+                    vm.active_tab == MultiTab::Team,
+                    |ui| {
+                        ui.label(RichText::new("Team").strong());
+                    },
+                ) {
                     vm.active_tab = MultiTab::Team;
                 }
                 ui.separator();
@@ -358,8 +395,7 @@ fn tab_bar(ui: &mut egui::Ui, vm: &mut MultiSessionVm, members: &HashMap<Session
                     } else {
                         RichText::new(format!("#{handle}"))
                     };
-                    ui.horizontal(|ui| {
-                        ui.spacing_mut().item_spacing.x = 4.0;
+                    if tab_item(ui, ("multi_tab_member", vm.multi.id, sid), selected, |ui| {
                         session_view::status_dot(ui, &m.status);
                         if let Some(tex) =
                             conversation::company_symbol(ui.ctx(), m.session.provider_id)
@@ -368,10 +404,10 @@ fn tab_bar(ui: &mut egui::Ui, vm: &mut MultiSessionVm, members: &HashMap<Session
                                 egui::Image::new(&tex).fit_to_exact_size(egui::vec2(12.0, 12.0)),
                             );
                         }
-                        if ui.selectable_label(selected, label).clicked() {
-                            vm.active_tab = MultiTab::Member(sid);
-                        }
-                    });
+                        ui.label(label);
+                    }) {
+                        vm.active_tab = MultiTab::Member(sid);
+                    }
                 }
             });
         });
