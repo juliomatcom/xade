@@ -65,6 +65,9 @@ impl Xade {
             xade::backend_with(&dir.join("data"), providers).expect("backend starts");
         let ui = Harness::builder()
             .with_size(size)
+            // Background tasks (git, tree, running polls) wake the UI via `Bridge::send`, so a
+            // transition can take more than kittest's default 4 frames to settle.
+            .with_max_steps(16)
             // The top bar's combo box has no accessible name yet; that is not what is tested.
             .with_accessibility_check(false)
             .build_eframe(|cc| launch.into_app(cc, Some(workspace)));
@@ -92,7 +95,9 @@ impl Xade {
                 "timed out waiting for {what}"
             );
             std::thread::sleep(Duration::from_millis(20));
-            self.ui.run();
+            // Background work may keep requesting repaints while we wait; the loop's 5 s timeout
+            // bounds it, so exceeding `max_steps` on one tick is not a failure.
+            self.ui.run_ok();
         }
     }
 
