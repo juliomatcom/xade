@@ -1,6 +1,6 @@
 # Xade
 
-> Xade (X-provider Agentic Development Environment, pronounced "zade") is a fast native desktop app, written in Rust, for running several AI coding agent sessions side by side. It drives the agent CLIs you already have installed and logged in: Claude Code and Antigravity. Free and open source (MIT). macOS and Linux.
+> Xade (X-provider Agentic Development Environment, pronounced "zade") is a fast native desktop app, written in Rust, for running several AI coding agent sessions side by side. It drives the agent CLIs you already have installed and logged in: Claude Code and Antigravity. 100% free and open source (MIT), with no subscription or API keys required. macOS and Linux.
 
 - Website: https://xade.pro/
 - Source code: https://github.com/juliomatcom/xade

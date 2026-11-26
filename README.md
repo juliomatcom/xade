@@ -2,11 +2,11 @@
 
 # Xade
 
-A fast native desktop app for running several AI coding agent sessions side by side.
+A fast native desktop app for running several AI coding agent sessions side by side. **100% free and open source (MIT), no subscription required.**
 
 Xade is short for X-provider Agentic Development Environment (pronounced "zade").
 
-**It uses the agent clients you already have configured.** Xade drives your installed Claude Code (`claude`) and Antigravity (`agy`) CLIs as is: your login, settings, `CLAUDE.md` files, MCP servers, skills and permission rules all apply. There is nothing to set up again, no API keys to paste, and your existing Claude Code sessions can be imported and resumed.
+**It uses the agent clients you already have configured.** Xade drives your installed Claude Code (`claude`) and Antigravity (`agy`) CLIs as is: your login, settings, `CLAUDE.md` files, MCP servers, skills and permission rules all apply. There is no Xade account or subscription, no API keys to paste, nothing to set up again, and your existing Claude Code sessions can be imported and resumed.
 
 <p align="center"><a href="https://xade.pro/"><img src="docs/images/multi-session.webp" alt="Xade demo: three models on one Multi-Session team plan, code and test a feature while a solo session runs beside them" width="100%"></a></p>
 

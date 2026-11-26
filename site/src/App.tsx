@@ -11,7 +11,7 @@ const RELEASES = `${REPO}/releases/latest`;
 const INSTALL = `curl -fsSL https://raw.githubusercontent.com/juliomatcom/xade/main/scripts/install.sh | sh`;
 
 const pillars = [
-  ["All your subscriptions, one place", "Bring the plans you already pay for. Xade drives the agent CLIs you have installed and logged in, so there are no API keys to paste and nothing to set up again."],
+  ["100% free, no subscription required", "Xade has no subscription, account, or paywall. It drives the agent CLIs you already have installed and signed in, with no API keys to paste and nothing new to configure."],
   ["Hand work between providers", "Fork a session to the other provider when you hit a limit or want a second opinion. The new agent continues from a summary of the work, without leaving the workspace."],
   ["Cloud or local models", "One interface for hosted agents and models running on your own machine. Pick the right brain for each job."],
 ];
@@ -62,6 +62,15 @@ function LinuxIcon() {
   );
 }
 
+function ShieldIcon({ className = "size-4 shrink-0" }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+      <path d="m9 12 2 2 4-4" />
+    </svg>
+  );
+}
+
 function Copy({ text }: { text: string }) {
   const [done, setDone] = useState(false);
   return (
@@ -106,11 +115,11 @@ export default function App() {
         <section className="pb-20 pt-10 text-center md:pt-16">
           <p className="mb-5 font-mono text-base font-medium uppercase tracking-[0.2em] text-jade sm:text-xl">X-provider Agentic Development Environment</p>
           <h1 className="mx-auto max-w-4xl text-4xl font-semibold leading-[1.08] tracking-tight text-white sm:text-6xl">
-            Every AI coding agent you pay for,{" "}
+            All your AI coding agents,{" "}
             <span className="bg-gradient-to-r from-emerald-300 to-jade-deep bg-clip-text text-transparent">in one fast workspace.</span>
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-slate-400">
-            Xade is a native desktop app that runs your AI coding agents side by side, or puts them on one team. Use the subscriptions you already have, hand tasks between providers, and review every change in a diff. Native and built in Rust, so it stays fast however many sessions you run. Simple, opinionated, never boring.
+            Run your Agents side by side or as one multi-model team, with no extra install or setup. 100% free. Bring your own CLI or subscription, change it, fork it. Runs native, built in Rust.
           </p>
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <a href="#download" className="rounded-lg bg-jade px-6 py-3 text-sm font-semibold text-ink transition hover:bg-emerald-300">Download Xade</a>
@@ -118,7 +127,10 @@ export default function App() {
               <GitHubIcon /> Star on GitHub
             </a>
           </div>
-          <p className="mt-4 text-sm text-slate-500">Free and open source · Powered by Rust · macOS and Linux · Pronounced "zade"</p>
+          <p className="mx-auto mt-4 inline-flex items-center justify-center gap-2 text-sm text-slate-400">
+            <ShieldIcon className="size-4 shrink-0 text-jade" />
+            <span>Zero telemetry, zero tracking. Everything stays 100% local on your machine.</span>
+          </p>
 
           <figure className="mx-auto mt-14 max-w-6xl">
             <Carousel />
@@ -180,7 +192,7 @@ export default function App() {
         </section>
 
         <section id="why" className="scroll-mt-24 pb-24">
-          <h2 className="mx-auto max-w-3xl text-center text-3xl font-semibold tracking-tight text-white sm:text-4xl">One place for every agent, subscription and model</h2>
+          <h2 className="mx-auto max-w-3xl text-center text-3xl font-semibold tracking-tight text-white sm:text-4xl">One place for every agent and model</h2>
           <p className="mx-auto mt-3 max-w-2xl text-center text-slate-400">
             Today Xade drives Claude Code and Antigravity, and sessions can be forked between them. It is built to take more providers, so the workspace you learn now is the one you keep.
           </p>
@@ -198,7 +210,7 @@ export default function App() {
         <section className="pb-24" aria-labelledby="features">
           <h2 id="features" className="text-3xl font-semibold tracking-tight text-white">Everything you need, nothing you don't</h2>
           <p className="mt-3 max-w-2xl text-slate-400">
-            Simple, opinionated and really fast. Xade never reads or touches your credentials; it runs the official CLIs you already have.
+            Simple, opinionated and really fast. Everything stays local; it runs the official CLIs you already have.
           </p>
           <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {features.map(([t, d]) => (
@@ -296,7 +308,7 @@ export default function App() {
                 <img src="/favicon.svg" alt="" className="size-7" /> Xade
               </a>
               <p className="mt-4 max-w-sm text-sm leading-relaxed text-slate-400">
-                One fast, native workspace for all your AI coding agents. Free and open source.
+                One fast, native workspace for all your AI coding agents. 100% free, open source, no subscription required.
               </p>
               <a href={REPO} rel="noopener" className="mt-5 inline-flex items-center gap-2 rounded-lg border border-edge px-4 py-2 text-sm font-medium text-white transition hover:border-slate-500">
                 <GitHubIcon className="size-4" /> Star on GitHub
