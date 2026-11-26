@@ -36,7 +36,7 @@ arboard = { version = "=3.7.0", default-features = false }
 image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 
 [dev-dependencies]
-egui_kittest = { version = "=0.37.0", features = ["eframe"] }
+egui_kittest = { version = "=0.37.0", features = ["eframe", "wgpu"] }
 
 [lints]
 workspace = true
