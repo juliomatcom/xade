@@ -1818,6 +1818,10 @@ impl App {
                     self.refresh_picker();
                 }
             }
+            Action::SearchSessions => {
+                self.view = View::Home;
+                self.home.focus_search = true;
+            }
             Action::Find => match (&mut self.find, self.focused) {
                 (_, None) => self.warn("Focus a window to search in it."),
                 (Some(f), _) => f.refocus(),

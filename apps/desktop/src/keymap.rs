@@ -18,6 +18,7 @@ pub enum Action {
     Save,
     SaveAs,
     OpenPicker,
+    SearchSessions,
     QuickOpen,
     Find,
     Send,
@@ -200,6 +201,13 @@ static DEFS: &[Def] = &[
         Group::Sessions,
         "Open session picker",
         "cmd+shift+p",
+    ),
+    row(
+        "search_sessions",
+        Action::SearchSessions,
+        Group::Sessions,
+        "Fuzzy search sessions",
+        "cmd+shift+f",
     ),
     row(
         "quick_open",
@@ -758,6 +766,11 @@ mod tests {
     fn shift_variants_do_not_cross_fire() {
         let now = Instant::now();
         let mut c = Chord::default();
+        assert_eq!(press(&mut c, now, CMD, Key::F), Feed::Fired(Action::Find));
+        assert_eq!(
+            press(&mut c, now, CMD_SHIFT, Key::F),
+            Feed::Fired(Action::SearchSessions)
+        );
         assert_eq!(press(&mut c, now, CMD, Key::H), Feed::Ignored);
         assert_eq!(
             press(&mut c, now, CMD_SHIFT, Key::H),

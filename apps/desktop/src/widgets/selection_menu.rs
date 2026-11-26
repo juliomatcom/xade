@@ -2,8 +2,9 @@
 
 use egui::{Id, Pos2, Rect};
 
-use crate::app::App;
+use crate::app::{App, View};
 use crate::icons;
+use crate::workspace::{win_id, WindowKind};
 
 const SETTLED: &str = "xade_selection_settled";
 const TEXT_BOX: &str = "xade_text_box_focused";
@@ -74,17 +75,41 @@ pub fn append_quote(input: &mut String, text: &str) {
     input.push_str(&quoted(text));
 }
 
+/// True when `pos` lands directly on an open, uncollapsed workspace window (not the top bar,
+/// sidebar, status bar, or a floating modal).
+fn in_window(app: &App, ctx: &egui::Context, pos: Pos2) -> bool {
+    let Some(layer) = ctx.layer_id_at(pos) else {
+        return false;
+    };
+    app.open_windows.iter().any(|&kind| {
+        let collapsed = match kind {
+            WindowKind::Session(id) => app.sessions.get(&id).is_none_or(|vm| vm.collapsed),
+            WindowKind::Editor(id) => app.editors.map.get(&id).is_none_or(|vm| vm.collapsed),
+        };
+        !collapsed && layer.id == win_id(kind)
+    })
+}
+
 pub fn show(app: &mut App, ctx: &egui::Context) {
+    if app.view != View::Workspace {
+        ctx.data_mut(|d| {
+            d.remove_temp::<String>(Id::unique(SETTLED));
+        });
+        app.selection_menu = None;
+        return;
+    }
     if let Some(text) = ctx.data_mut(|d| d.remove_temp::<String>(Id::unique(SETTLED))) {
-        // Selections inside a text box (prompt, file) are not chat text.
+        // Selections inside a text box (prompt, file) or outside an open window are not chat text.
         let in_text_box = in_text_box(ctx);
         let pos = ctx.input(|i| i.pointer.latest_pos());
         app.selection_menu = match (in_text_box, pos, app.focused_session()) {
-            (false, Some(pos), Some(_)) if !text.trim().is_empty() => Some(Pending {
-                text,
-                pos,
-                rect: None,
-            }),
+            (false, Some(pos), Some(_)) if !text.trim().is_empty() && in_window(app, ctx, pos) => {
+                Some(Pending {
+                    text,
+                    pos,
+                    rect: None,
+                })
+            }
             _ => None,
         };
     }
@@ -217,5 +242,121 @@ mod tests {
     fn a_drag_across_a_list_and_code_is_reported() {
         let got = drag_report("- one\n- two\n- three\n\n```\ncode here\nmore\n```\n\nend");
         assert!(got.is_some(), "{got:?}");
+    }
+
+    #[test]
+    fn selection_menu_only_opens_inside_an_open_window() {
+        use egui::{Event, RawInput};
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let dir = std::env::temp_dir().join(format!("xade-sel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = egui::Context::default();
+        ctx.add_plugin(SelectionWatcher);
+        crate::theme::apply(&ctx);
+        let mut app = App::for_test(&ctx, rt.handle().clone(), &dir.join("workspace.db"));
+        let now = time::OffsetDateTime::now_utc();
+        let sid = xade_core::SessionId::new();
+        let session = xade_core::Session {
+            origin: xade_core::SessionOrigin::default(),
+            id: sid,
+            workspace_id: xade_core::WorkspaceId::new(),
+            provider_id: xade_core::ProviderId::Claude,
+            provider_session_id: None,
+            title: "Test".into(),
+            preview_snippet: String::new(),
+            model_id: "opus".into(),
+            effort: xade_core::Effort::Default,
+            sent_model_id: String::new(),
+            sent_effort: xade_core::Effort::Default,
+            auto_mode: false,
+            usage: xade_core::UsageTotals::default(),
+            created_at: now,
+            updated_at: now,
+        };
+        let vm = crate::app::SessionVm {
+            cwd: dir.clone(),
+            session,
+            status: xade_core::SessionStatus::Idle,
+            queued: Default::default(),
+            messages: Vec::new(),
+            live_text: String::new(),
+            thinking_tokens: None,
+            pending_permission: None,
+            input: String::new(),
+            error: None,
+            md_cache: crate::widgets::markdown::new_cache(),
+            path_links: Default::default(),
+            diff: None,
+            changes: Default::default(),
+            settings_pending: false,
+            turn_base: None,
+            turn_snapshotting: false,
+            turn_files: Default::default(),
+            sent_model: String::new(),
+            sent_effort: xade_core::Effort::Default,
+            collapsed: false,
+            window_rect: None,
+            apply_rect: None,
+            sync: Default::default(),
+            mention: Default::default(),
+            attach_note: None,
+            focus_input: false,
+            subagent_msgs: Vec::new(),
+            view_subagents: false,
+            fork_preparing: false,
+            renaming: None,
+            scroll_to_end: false,
+        };
+        app.sessions.insert(sid, vm);
+        app.open_windows.push(WindowKind::Session(sid));
+        app.focused = Some(WindowKind::Session(sid));
+        app.view = View::Workspace;
+
+        let step = |app: &mut App, events: Vec<Event>| {
+            let input = RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(1400.0, 800.0))),
+                events,
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                crate::home::top_bar(app, ui);
+                egui::CentralPanel::default().show(ui, |ui| {
+                    crate::workspace::show(app, ui);
+                });
+                show(app, ui.ctx());
+            })
+            .drop_without_applying_deltas();
+        };
+        // Settle layout so the top bar and window layers exist.
+        step(&mut app, vec![]);
+        step(&mut app, vec![]);
+        let win_rect = app.sessions[&sid].window_rect.expect("window rect");
+
+        // Selection settling over the top bar (e.g. search input) must NOT open the menu.
+        let top_bar_pos = Pos2::new(300.0, 16.0);
+        ctx.data_mut(|d| d.insert_temp(Id::unique(SETTLED), "query".to_string()));
+        step(&mut app, vec![Event::PointerMoved(top_bar_pos)]);
+        assert!(
+            app.selection_menu.is_none(),
+            "top bar selection must not open menu"
+        );
+
+        // Selection settling inside the open session window DOES open the menu.
+        let inside_pos = win_rect.center();
+        ctx.data_mut(|d| d.insert_temp(Id::unique(SETTLED), "hello".to_string()));
+        step(&mut app, vec![Event::PointerMoved(inside_pos)]);
+        assert!(
+            app.selection_menu.is_some(),
+            "in-window selection must open menu"
+        );
+
+        // Switching to Home clears the menu.
+        app.view = View::Home;
+        step(&mut app, vec![]);
+        assert!(app.selection_menu.is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

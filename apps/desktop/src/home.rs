@@ -36,6 +36,8 @@ pub struct HomeState {
     pub scope: Option<WorkspaceId>,
     pub search: String,
     pub search_changed_at: Option<Instant>,
+    /// Focus the top-bar search input on the next frame (set by `Action::SearchSessions`).
+    pub focus_search: bool,
     /// Zero-based.
     pub page: u32,
     pub cards: Vec<SessionCard>,
@@ -57,9 +59,9 @@ pub struct HomeState {
     pub md_cache: std::cell::RefCell<egui_commonmark::CommonMarkCache>,
 }
 
-/// Room the session controls container, view toggle and right-hand cluster (buttons, quota
-/// meters) take; the top-bar test fails if they outgrow it.
-const TOP_BAR_RESERVED: f32 = 290.0 + 214.0 + 180.0;
+/// Room the view toggle and right-hand cluster (buttons, quota meters) take; the top-bar test
+/// fails if they outgrow it.
+const TOP_BAR_RESERVED: f32 = 214.0 + 180.0;
 
 /// The search field shrinks with the space left of `TOP_BAR_RESERVED`.
 fn search_width(available: f32) -> f32 {
@@ -131,15 +133,23 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             app_menu(app, ui);
             scope_dropdown(app, ui);
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut app.home.search)
-                    .hint_text("Fuzzy search sessions")
-                    .desired_width(search_width(ui.available_width())),
-            );
+            session_controls(app, ui);
+            let resp = ui
+                .add(
+                    egui::TextEdit::singleline(&mut app.home.search)
+                        .hint_text("Fuzzy search sessions")
+                        .desired_width(search_width(ui.available_width())),
+                )
+                .on_hover_text(format!(
+                    "Fuzzy search sessions ({})",
+                    keymap::shortcut_text(Action::SearchSessions)
+                ));
+            if std::mem::take(&mut app.home.focus_search) {
+                resp.request_focus();
+            }
             if resp.changed() {
                 app.home.search_changed_at = Some(Instant::now());
             }
-            session_controls(app, ui);
             let left_end = ui.min_rect().right();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 settings_button(app, ui);
@@ -1247,16 +1257,52 @@ mod tests {
         let open = find(icons::OPEN_SESSION);
         let new = find("New Session");
         let provider = find("Claude");
+        let search = find("Fuzzy search sessions");
         let home = find("Home");
         assert!(open.right() < new.left(), "{open:?} vs {new:?}");
         assert!(new.right() < provider.left(), "{new:?} vs {provider:?}");
-        assert!(provider.right() < home.left(), "{provider:?} vs {home:?}");
+        assert!(
+            provider.right() < search.left(),
+            "{provider:?} vs {search:?}"
+        );
+        assert!(search.right() < home.left(), "{search:?} vs {home:?}");
         assert!(
             frames.iter().any(|f| f.contains_rect(open)
                 && f.contains_rect(new)
                 && f.contains_rect(provider)),
             "no single container encloses Open, New Session and Provider: {frames:?}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_sessions_shortcut_switches_to_home_and_focuses_search() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, ctx, dir) = home_app(&rt, false);
+        app.view = View::Workspace;
+        app.run_action(Action::SearchSessions);
+        assert!(app.view == View::Home);
+        assert!(app.home.focus_search);
+        let frame = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 760.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(frame(Vec::new()), |ui| top_bar(&mut app, ui))
+            .textures_delta
+            .clear();
+        assert!(!app.home.focus_search);
+        ctx.run_ui(frame(vec![egui::Event::Text("abc".into())]), |ui| {
+            top_bar(&mut app, ui)
+        })
+        .textures_delta
+        .clear();
+        assert_eq!(app.home.search, "abc");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
