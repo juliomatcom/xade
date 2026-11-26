@@ -734,7 +734,11 @@ fn team_feed(
                     }
                 });
             if std::mem::take(&mut vm.scroll_to_end) {
-                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+                // Unanimated: output arriving mid-animation would end `stick_to_bottom`.
+                ui.scroll_to_cursor_animation(
+                    Some(egui::Align::BOTTOM),
+                    egui::style::ScrollAnimation::none(),
+                );
             }
         });
     open_file
@@ -1008,7 +1012,7 @@ fn unified_composer(
         .inner_margin(egui::Margin::same(6))
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
-                let w = (ui.available_width() - if any_busy { 156.0 } else { 64.0 }).max(40.0);
+                let w = (ui.available_width() - if any_busy { 176.0 } else { 64.0 }).max(40.0);
                 let max_h = INPUT_MAX_ROWS as f32 * ui.text_style_height(&egui::TextStyle::Body);
                 let input_h = ui
                     .allocate_ui(egui::vec2(w, max_h), |ui| {

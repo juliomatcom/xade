@@ -2494,9 +2494,10 @@ impl App {
             (Some(id), AppEventKind::Provider(p)) => self.on_provider_event(id, p),
             (Some(id), AppEventKind::MemberMessage(msg)) => {
                 if let Some(vm) = self.sessions.get_mut(&id) {
+                    // Only a new prompt jumps to the end; replies follow `stick_to_bottom`.
+                    vm.scroll_to_end |= msg.role == Role::User;
                     vm.messages.push(msg);
                     vm.error = None;
-                    vm.scroll_to_end = true;
                 }
             }
             (_, AppEventKind::MultiCreated { multi, members }) => {
@@ -2530,7 +2531,6 @@ impl App {
             (_, AppEventKind::MultiTeamMessage { multi_id, message }) => {
                 if let Some(mvm) = self.multi_sessions.get_mut(&multi_id) {
                     mvm.team_messages.push(message);
-                    mvm.scroll_to_end = true;
                 }
                 self.refresh_cards();
             }
