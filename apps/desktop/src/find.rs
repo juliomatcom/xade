@@ -241,6 +241,17 @@ pub fn update(app: &mut App, ctx: &egui::Context) {
             .sessions
             .get(&id)
             .map_or(0, |vm| vm.messages.len() as u64),
+        Some(WindowKind::MultiSession(id)) => app
+            .multi_sessions
+            .get(&id)
+            .and_then(|m| match m.active_tab {
+                crate::multi_view::MultiTab::Member(sid) => app.sessions.get(&sid).map(|vm| {
+                    let tab_mix = (sid.0.as_u128() as u64).rotate_left(13);
+                    (vm.messages.len() as u64) ^ tab_mix
+                }),
+                crate::multi_view::MultiTab::Team => None,
+            })
+            .unwrap_or(0),
         None => 0,
     };
     let key: MatchKey = (f.query.clone(), target, revision);
@@ -259,6 +270,15 @@ pub fn update(app: &mut App, ctx: &egui::Context) {
                 .sessions
                 .get(&id)
                 .map(|vm| find_messages(&vm.messages, &f.query)),
+            Some(WindowKind::MultiSession(id)) => app.multi_sessions.get(&id).and_then(|m| match m
+                .active_tab
+            {
+                crate::multi_view::MultiTab::Member(sid) => app
+                    .sessions
+                    .get(&sid)
+                    .map(|vm| find_messages(&vm.messages, &f.query)),
+                crate::multi_view::MultiTab::Team => None,
+            }),
             None => None,
         };
         f.matches = Arc::new(found.unwrap_or_default());

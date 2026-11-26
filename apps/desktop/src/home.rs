@@ -301,6 +301,21 @@ fn session_controls(app: &mut App, ui: &mut egui::Ui) {
                 if new.clicked() {
                     app.new_session();
                 }
+                let disabled_tip = if app.home.scope.is_none() {
+                    "Select a workspace in the sidebar first"
+                } else {
+                    "No provider is available"
+                };
+                let multi_btn = ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(icons::with(icons::FORK, "Multi")),
+                    )
+                    .on_disabled_hover_text(disabled_tip)
+                    .on_hover_text("New Multi-Session (multiple models working together)");
+                if multi_btn.clicked() {
+                    app.open_multi_create();
+                }
                 provider_dropdown(app, ui);
             });
         });
@@ -822,10 +837,11 @@ fn card_ui(
     card: &SessionCard,
     rect: egui::Rect,
 ) -> Option<CardClick> {
+    let card_uuid = card.target.uuid();
     let resp = ui
         .interact(
             rect,
-            ui.make_persistent_id(("card", card.id)),
+            ui.make_persistent_id(("card", card_uuid)),
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -857,19 +873,31 @@ fn card_ui(
         );
         ui.interact(
             dot,
-            ui.make_persistent_id(("run_dot", card.id)),
+            ui.make_persistent_id(("run_dot", card_uuid)),
             egui::Sense::hover(),
         )
         .on_hover_text(running::tooltip(r));
         running::paint_dot(ui, dot.center(), 4.0, r.state);
     }
-    let status = app
-        .sessions
-        .get(&card.id)
-        .map_or(SessionStatus::Closed, |vm| vm.status.clone());
+    let status = match card.target {
+        xade_store::CardTarget::Session(id) => app
+            .sessions
+            .get(&id)
+            .map_or(SessionStatus::Closed, |vm| vm.status.clone()),
+        xade_store::CardTarget::Multi(mid) => app
+            .multi_sessions
+            .get(&mid)
+            .map_or(SessionStatus::Closed, |vm| {
+                vm.aggregate_status(&app.sessions)
+            }),
+    };
     let excerpt = card.excerpt.as_deref().unwrap_or(&card.preview_snippet);
     let title = if card.title.is_empty() {
-        "New session"
+        if card.multi_id().is_some() {
+            "New Multi-Session"
+        } else {
+            "New session"
+        }
     } else {
         &card.title
     };
@@ -923,7 +951,7 @@ fn card_ui(
             markdown(
                 ui,
                 &mut app.home.md_cache.borrow_mut(),
-                ("card_md", card.id),
+                ("card_md", card_uuid),
                 excerpt,
             );
         });
@@ -945,20 +973,48 @@ fn card_ui(
         );
     };
     row(ui, badges, &mut |ui| {
-        origin_badge(ui, card.origin);
-        ui.label(
-            RichText::new(app.provider_name(card.provider_id))
-                .small()
-                .color(provider_color(card.provider_id)),
-        );
-        ui.add(
-            egui::Label::new(
+        if card.multi_id().is_some() {
+            egui::Frame::new()
+                .fill(theme::bg_app())
+                .stroke(egui::Stroke::new(1.0, theme::accent()))
+                .corner_radius(3)
+                .inner_margin(egui::Margin::symmetric(5, 1))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Multi").small().color(theme::accent()));
+                });
+            ui.label(
                 RichText::new(app.workspace_name(card.workspace_id))
                     .small()
                     .color(theme::text_muted()),
-            )
-            .truncate(),
-        );
+            );
+            let handles = card
+                .members
+                .iter()
+                .map(|m| format!("#{}", m.handle))
+                .collect::<Vec<_>>()
+                .join(" \u{00B7} ");
+            if !handles.is_empty() {
+                ui.add(
+                    egui::Label::new(RichText::new(handles).small().color(theme::text()))
+                        .truncate(),
+                );
+            }
+        } else {
+            origin_badge(ui, card.origin);
+            ui.label(
+                RichText::new(app.provider_name(card.provider_id))
+                    .small()
+                    .color(provider_color(card.provider_id)),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new(app.workspace_name(card.workspace_id))
+                        .small()
+                        .color(theme::text_muted()),
+                )
+                .truncate(),
+            );
+        }
     });
     row(ui, bottom, &mut |ui| {
         ui.label(
@@ -966,7 +1022,7 @@ fn card_ui(
                 .small()
                 .color(theme::text_muted()),
         );
-        if running.is_none() {
+        if running.is_none() && card.multi_id().is_none() {
             ui.label(running::cache_text(card.updated_at));
         }
         let (text, color) = status_badge(&status);
@@ -983,7 +1039,7 @@ fn card_ui(
         // Added after the card so it takes the click before the tile's open handler.
         let tr = ui.interact(
             trash,
-            ui.make_persistent_id(("trash", card.id)),
+            ui.make_persistent_id(("trash", card_uuid)),
             egui::Sense::click(),
         );
         let (color, tip) = match running {
@@ -1308,7 +1364,7 @@ mod tests {
 
     fn test_card(provider_session_id: Option<&str>, age_secs: i64) -> SessionCard {
         SessionCard {
-            id: xade_core::SessionId::new(),
+            target: xade_store::CardTarget::Session(xade_core::SessionId::new()),
             workspace_id: xade_core::WorkspaceId::new(),
             title: "t".into(),
             preview_snippet: String::new(),
@@ -1318,6 +1374,7 @@ mod tests {
             model_id: String::new(),
             provider_session_id: provider_session_id.map(Into::into),
             provider_id: ProviderId::Claude,
+            members: Vec::new(),
         }
     }
 
@@ -1426,7 +1483,7 @@ mod tests {
         let p = app.pending_open.take().unwrap();
         assert_eq!(
             (p.id, p.location.as_str(), p.background),
-            (idle.id, "VS Code", true)
+            (idle.session_id().unwrap(), "VS Code", true)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1515,7 +1572,11 @@ mod tests {
         let (click, _) = click_card(&app, &ctx, &xade, Some(c));
         assert_eq!(click, Some(CardClick::Delete));
         app.request_delete(&xade);
-        assert_eq!(app.pending_delete.as_ref().map(|p| p.id), Some(xade.id));
+        assert_eq!(
+            app.pending_delete.as_ref().map(|p| p.target),
+            xade.session_id()
+                .map(crate::widgets::delete_modal::PendingDeleteTarget::Session)
+        );
         assert!(app.open_windows.is_empty() && cmds.try_recv().is_err());
         // A click elsewhere on the card still opens it.
         let (click, _) = click_card(&app, &ctx, &xade, Some(card_rect.center()));

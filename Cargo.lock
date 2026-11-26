@@ -5024,7 +5024,7 @@ checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
 
 [[package]]
 name = "xade"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "arboard",
  "chrono",
@@ -5058,7 +5058,7 @@ dependencies = [
 
 [[package]]
 name = "xade-antigravity"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -5071,7 +5071,7 @@ dependencies = [
 
 [[package]]
 name = "xade-claude"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "libc",
  "serde",
@@ -5086,7 +5086,7 @@ dependencies = [
 
 [[package]]
 name = "xade-core"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5098,7 +5098,7 @@ dependencies = [
 
 [[package]]
 name = "xade-runtime"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "libc",
  "serde_json",
@@ -5115,7 +5115,7 @@ dependencies = [
 
 [[package]]
 name = "xade-store"
-version = "0.4.4"
+version = "0.5.0"
 dependencies = [
  "nucleo-matcher",
  "rusqlite",

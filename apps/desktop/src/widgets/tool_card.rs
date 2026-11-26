@@ -375,6 +375,7 @@ mod tests {
             is_error: false,
             created_at: time::OffsetDateTime::now_utc(),
             provider_id: None,
+            sender_handle: None,
         }
     }
 

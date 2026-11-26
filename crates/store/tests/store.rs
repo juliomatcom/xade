@@ -112,6 +112,8 @@ fn session(ws: WorkspaceId, title: &str, at: OffsetDateTime) -> Session {
         usage: UsageTotals::default(),
         created_at: at,
         updated_at: at,
+        multi_session_id: None,
+        agent_handle: None,
     }
 }
 
@@ -129,6 +131,7 @@ fn message(session: SessionId, seq: i64, role: Role, text: &str) -> Message {
         is_error: false,
         created_at: OffsetDateTime::now_utc(),
         provider_id: None,
+        sender_handle: None,
     }
 }
 
@@ -179,10 +182,46 @@ fn a_database_from_before_message_providers_opens_unchanged_and_gains_the_column
             .unwrap();
         writer.flush().unwrap();
     }
-    // Back to the previous schema: no column, version 4.
+    // Back to schema version 4: strip V6 and V5 additions, then set user_version = 4.
     let conn = rusqlite::Connection::open(&path).unwrap();
-    conn.execute_batch("ALTER TABLE messages DROP COLUMN provider_id; PRAGMA user_version = 4;")
-        .unwrap();
+    conn.execute_batch(
+        "DROP TRIGGER multi_sessions_search_ai;
+         DROP TRIGGER multi_sessions_search_au;
+         DROP TRIGGER multi_sessions_search_ad;
+         DROP TRIGGER team_messages_search_ai;
+         DROP TRIGGER sessions_search_ai;
+         DROP TRIGGER sessions_search_au;
+         DROP TRIGGER messages_search_ai;
+         DROP TABLE team_messages;
+         DROP INDEX sessions_multi;
+         DROP INDEX sessions_multi_handle;
+         ALTER TABLE sessions DROP COLUMN multi_session_id;
+         ALTER TABLE sessions DROP COLUMN agent_handle;
+         ALTER TABLE sessions DROP COLUMN member_order;
+         DROP TABLE multi_sessions;
+         ALTER TABLE messages DROP COLUMN sender_handle;
+         ALTER TABLE messages DROP COLUMN provider_id;
+         CREATE TRIGGER sessions_search_ai AFTER INSERT ON sessions
+         BEGIN
+             INSERT INTO search_index(text, session_id, source)
+             VALUES (new.title, new.id, 'title');
+         END;
+         CREATE TRIGGER sessions_search_au AFTER UPDATE OF title ON sessions
+         WHEN old.title <> new.title
+         BEGIN
+             DELETE FROM search_index WHERE session_id = old.id AND source = 'title';
+             INSERT INTO search_index(text, session_id, source)
+             VALUES (new.title, new.id, 'title');
+         END;
+         CREATE TRIGGER messages_search_ai AFTER INSERT ON messages
+         WHEN new.role IN ('user', 'assistant') AND new.content_text <> ''
+         BEGIN
+             INSERT INTO search_index(text, session_id, source)
+             VALUES (new.content_text, new.session_id, 'msg');
+         END;
+         PRAGMA user_version = 4;",
+    )
+    .unwrap();
     drop(conn);
 
     let writer = StoreWriter::spawn(&path).unwrap();
@@ -292,7 +331,7 @@ fn message_body_word_finds_session_with_excerpt() {
     );
     let found = f.search(None, "websocket").items;
     assert_eq!(found.len(), 1);
-    assert_eq!(found[0].id, a);
+    assert_eq!(found[0].session_id(), Some(a));
     assert!(found[0].excerpt.as_deref().unwrap().contains("websocket"));
 }
 
@@ -376,7 +415,10 @@ fn ranking_exact_title_then_fts_then_fuzzy() {
     // Exact title substring, oldest.
     let exact = f.add_session("Plan the DEPLOY pipeline", 100);
     let hits = f.search(None, "deploy").items;
-    let ids: Vec<_> = hits.iter().map(|c| c.id).collect();
+    let ids: Vec<_> = hits
+        .iter()
+        .filter_map(xade_store::SessionCard::session_id)
+        .collect();
     assert_eq!(ids, [exact, body, fuzzy]);
 }
 
@@ -389,7 +431,7 @@ fn ties_in_a_tier_go_to_most_recently_updated() {
         .search(None, "deploy")
         .items
         .iter()
-        .map(|c| c.id)
+        .filter_map(xade_store::SessionCard::session_id)
         .collect();
     assert_eq!(ids, [new, old]);
 }
@@ -1171,4 +1213,181 @@ fn mark_sent_keeps_the_last_sent_model_and_effort_apart_from_the_current_choice(
         (s.sent_model_id.as_str(), s.sent_effort),
         ("sonnet", Effort::Low)
     );
+}
+
+#[test]
+fn multi_session_roundtrip_order_search_and_cascade_delete() {
+    use xade_core::{MultiSession, MultiSessionId, TeamMessage, TeamMessageKind};
+    use xade_store::StoreError;
+
+    let f = Fixture::new();
+    let now = OffsetDateTime::now_utc();
+    let mid = MultiSessionId::new();
+    let multi = MultiSession {
+        id: mid,
+        workspace_id: f.ws,
+        title: "Build Feature X".into(),
+        preview_snippet: String::new(),
+        created_at: now,
+        updated_at: now,
+    };
+    let mut m1 = session(f.ws, "opus-1", now);
+    m1.provider_id = ProviderId::Claude;
+    m1.model_id = "claude-opus-4-6".into();
+    m1.provider_session_id = Some("psid-opus".into());
+    m1.multi_session_id = Some(mid);
+    m1.agent_handle = Some("opus-1".into());
+
+    let mut m2 = session(f.ws, "neon-1", now);
+    m2.provider_id = ProviderId::Antigravity;
+    m2.model_id = "gemini-4-neon".into();
+    m2.multi_session_id = Some(mid);
+    m2.agent_handle = Some("neon-1".into());
+
+    let (m1_id, m2_id) = (m1.id, m2.id);
+    f.writer
+        .send(WriteOp::InsertMultiSession {
+            multi,
+            members: vec![m1, m2],
+        })
+        .unwrap();
+
+    // Deliver a broadcast message into m2 with sender attribution.
+    let mut delivered = message(m2_id, 1, Role::User, "Implement part B");
+    delivered.sender_handle = Some("opus-1".into());
+    f.writer.send(WriteOp::InsertMessage(delivered)).unwrap();
+
+    // Append team messages (user + broadcast).
+    let tm1 = TeamMessage {
+        id: Uuid::new_v4(),
+        multi_session_id: mid,
+        seq: 1,
+        kind: TeamMessageKind::User { target: None },
+        content_text: "Plan Feature X".into(),
+        created_at: now,
+    };
+    let tm2 = TeamMessage {
+        id: Uuid::new_v4(),
+        multi_session_id: mid,
+        seq: 2,
+        kind: TeamMessageKind::Broadcast {
+            sender_handle: "opus-1".into(),
+            sender_provider: ProviderId::Claude,
+        },
+        content_text: "please investigate the flaky telemetry reconnect".into(),
+        created_at: now,
+    };
+    f.writer.send(WriteOp::InsertTeamMessage(tm1)).unwrap();
+    f.writer.send(WriteOp::InsertTeamMessage(tm2)).unwrap();
+    f.writer.flush().unwrap();
+
+    // Load multi-session: member order and sender_handle preserved.
+    let loaded_multi = block_on(f.reader.load_multi_session(mid)).unwrap();
+    let (loaded, members, team_msgs) = (
+        loaded_multi.multi,
+        loaded_multi.members,
+        loaded_multi.team_messages,
+    );
+    assert_eq!(loaded.title, "Build Feature X");
+    assert_eq!(members.len(), 2);
+    assert_eq!(members[0].0.id, m1_id);
+    assert_eq!(members[0].0.agent_handle.as_deref(), Some("opus-1"));
+    assert_eq!(members[1].0.id, m2_id);
+    assert_eq!(members[1].1[0].sender_handle.as_deref(), Some("opus-1"));
+    assert_eq!(team_msgs.len(), 2);
+    assert_eq!(block_on(f.reader.max_team_seq(mid)).unwrap(), 2);
+
+    // Home lists ONE card (not the 2 child sessions), hydrated with member badges.
+    let listed = block_on(f.reader.list_sessions(Some(f.ws), None, 0, 10)).unwrap();
+    assert_eq!(listed.total, 1);
+    assert_eq!(listed.items[0].multi_id(), Some(mid));
+    assert_eq!(listed.items[0].members.len(), 2);
+    assert_eq!(listed.items[0].members[0].handle, "opus-1");
+    assert_eq!(listed.items[0].members[1].handle, "neon-1");
+
+    // ClaudeCode origin filter excludes multi-sessions.
+    let cc_only =
+        block_on(
+            f.reader
+                .list_sessions(Some(f.ws), Some(SessionOrigin::ClaudeCode), 0, 10),
+        )
+        .unwrap();
+    assert_eq!(cc_only.total, 0);
+
+    // FTS5 finds multi-session by team message text and supplies an excerpt.
+    let hits = f.search(Some(f.ws), "telemetry").items;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].multi_id(), Some(mid));
+    assert!(
+        hits[0].excerpt.as_deref().unwrap().contains("telemetry"),
+        "unexpected excerpt: {:?}",
+        hits[0].excerpt
+    );
+
+    // Child sessions do not affect standalone last_model_choice/last_provider,
+    // but DO appear in import_index so Claude Import skips them.
+    assert!(block_on(f.reader.last_provider()).unwrap().is_none());
+    assert!(block_on(f.reader.last_model_choice(ProviderId::Claude))
+        .unwrap()
+        .is_none());
+    let idx = block_on(f.reader.import_index(ProviderId::Claude)).unwrap();
+    assert!(idx.contains_key("psid-opus"));
+
+    // Rename updates title and FTS5.
+    f.writer
+        .send(WriteOp::UpdateMultiSessionTitle {
+            id: mid,
+            title: "Renamed Team".into(),
+        })
+        .unwrap();
+    f.writer.flush().unwrap();
+    assert_eq!(f.titles("Renamed"), ["Renamed Team"]);
+
+    // Deleting an individual member via DeleteSession is ignored while it belongs to a team.
+    f.writer.send(WriteOp::DeleteSession(m1_id)).unwrap();
+    f.writer.flush().unwrap();
+    assert!(block_on(f.reader.load_session(m1_id)).is_ok());
+
+    // Member rows are not inserted into search_index (only multi_sessions and team_messages are).
+    let conn = rusqlite::Connection::open(&f.path).unwrap();
+    let member_idx_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM search_index WHERE session_id IN (?1, ?2)",
+            rusqlite::params![m1_id.0.to_string(), m2_id.0.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(member_idx_rows, 0);
+
+    // Delete cascades member sessions, messages, team_messages and search rows.
+    f.writer.send(WriteOp::DeleteMultiSession(mid)).unwrap();
+    f.writer.flush().unwrap();
+    assert!(matches!(
+        block_on(f.reader.load_multi_session(mid)),
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        block_on(f.reader.load_session(m1_id)),
+        Err(StoreError::NotFound)
+    ));
+    assert!(matches!(
+        block_on(f.reader.load_session(m2_id)),
+        Err(StoreError::NotFound)
+    ));
+    let leftover_search: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM search_index WHERE session_id IN (?1, ?2, ?3)",
+            rusqlite::params![mid.0.to_string(), m1_id.0.to_string(), m2_id.0.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let leftover_team: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM team_messages WHERE multi_session_id = ?1",
+            [mid.0.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!((leftover_search, leftover_team), (0, 0));
+    assert!(f.search(None, "telemetry").items.is_empty());
 }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::ids::{ProviderId, SessionId, WorkspaceId};
+use crate::ids::{MultiSessionId, ProviderId, SessionId, WorkspaceId};
 
 const TITLE_MAX_CHARS: usize = 60;
 
@@ -113,6 +113,10 @@ pub struct Session {
     pub usage: UsageTotals,
     pub created_at: OffsetDateTime,
     pub updated_at: OffsetDateTime,
+    /// Set when this session is a member of a multi-session team.
+    pub multi_session_id: Option<MultiSessionId>,
+    /// Team handle without the leading `#` (e.g. `opus-1`), set when `multi_session_id` is `Some`.
+    pub agent_handle: Option<String>,
 }
 
 impl Session {
@@ -183,6 +187,9 @@ pub struct Message {
     /// The provider that wrote it when that is not the session's (history copied by a fork);
     /// `None` means the session's own.
     pub provider_id: Option<ProviderId>,
+    /// Team handle of the teammate that broadcast this message, when delivered into a member
+    /// session; `None` for normal user/assistant/tool messages.
+    pub sender_handle: Option<String>,
 }
 
 /// A message read from a provider's own history; the runtime assigns ids and `seq`.

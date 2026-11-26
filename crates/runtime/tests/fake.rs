@@ -1542,6 +1542,8 @@ async fn an_imported_session_forks_into_an_xade_session() {
         usage: UsageTotals::default(),
         created_at: now,
         updated_at: now,
+        multi_session_id: None,
+        agent_handle: None,
     };
     let message = |seq, role, text: &str| xade_core::Message {
         id: uuid::Uuid::new_v4(),
@@ -1556,6 +1558,7 @@ async fn an_imported_session_forks_into_an_xade_session() {
         is_error: false,
         created_at: now,
         provider_id: None,
+        sender_handle: None,
     };
     h.writer
         .send(xade_store::WriteOp::ImportSession {

@@ -14,6 +14,7 @@ mod icons;
 mod keymap;
 mod logging;
 mod mention;
+mod multi_view;
 mod running;
 mod send_anim;
 mod session_view;

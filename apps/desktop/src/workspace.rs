@@ -1,17 +1,19 @@
 //! Workspace view: one `egui::Window` per open session or editor, auto-tiled into a grid.
 
+use std::collections::HashMap;
 use std::panic::{catch_unwind, resume_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use egui::{Id, Order, Rect};
 use tokio::sync::mpsc::UnboundedSender;
-use xade_core::{AgentProvider, ProviderId, SessionId};
+use xade_core::{AgentProvider, MultiSessionId, ProviderId, SessionId};
 use xade_runtime::ManagerCmd;
 
 use crate::app::{App, SessionVm};
 use crate::config::SendMode;
 use crate::editor::{self, EditorId, EditorVm};
+use crate::multi_view::{self, MultiSessionVm};
 use crate::session_view;
 use crate::theme;
 use crate::widgets::diff_modal::{self, ModalAction};
@@ -24,10 +26,11 @@ const MIN_TILE: [f32; 2] = [380.0, 300.0];
 /// How far a window may drift from its tile before auto-tiling turns off.
 const MOVE_TOLERANCE: f32 = 3.0;
 
-/// An open window: a session or an editor, tiled alike in open order.
+/// An open window: a session, multi-session or editor, tiled alike in open order.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum WindowKind {
     Session(SessionId),
+    MultiSession(MultiSessionId),
     Editor(EditorId),
 }
 
@@ -35,7 +38,7 @@ impl WindowKind {
     pub fn session(self) -> Option<SessionId> {
         match self {
             WindowKind::Session(id) => Some(id),
-            WindowKind::Editor(_) => None,
+            WindowKind::MultiSession(_) | WindowKind::Editor(_) => None,
         }
     }
 }
@@ -47,16 +50,21 @@ pub fn win_id(kind: WindowKind) -> Id {
 /// A window's state while it is taken out of `App` for drawing.
 enum Taken {
     Session(Box<SessionVm>),
+    Multi {
+        vm: Box<MultiSessionVm>,
+        members: HashMap<SessionId, SessionVm>,
+    },
     Editor(Box<EditorVm>),
 }
 
 type Geom<'a> = (&'a mut bool, &'a mut Option<Rect>, &'a mut Option<Rect>);
 
 impl Taken {
-    /// `(collapsed, window_rect, apply_rect)` of either kind.
+    /// `(collapsed, window_rect, apply_rect)` of any window kind.
     fn geom(&mut self) -> Geom<'_> {
         match self {
             Taken::Session(vm) => (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect),
+            Taken::Multi { vm, .. } => (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect),
             Taken::Editor(vm) => (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect),
         }
     }
@@ -66,6 +74,10 @@ pub(crate) fn geom_of(app: &mut App, kind: WindowKind) -> Option<Geom<'_>> {
     match kind {
         WindowKind::Session(id) => app
             .sessions
+            .get_mut(&id)
+            .map(|vm| (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect)),
+        WindowKind::MultiSession(id) => app
+            .multi_sessions
             .get_mut(&id)
             .map(|vm| (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect)),
         WindowKind::Editor(id) => app
@@ -265,6 +277,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let mut reloads = Vec::new();
     let mut forks = Vec::new();
     let mut renames = Vec::new();
+    let mut multi_renames = Vec::new();
     let mut attaches = Vec::new();
     let mut indexes = Vec::new();
     let mut images = Vec::new();
@@ -286,6 +299,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .sessions
                 .remove(&id)
                 .map(|vm| Taken::Session(Box::new(vm))),
+            WindowKind::MultiSession(id) => app.multi_sessions.remove(&id).map(|vm| {
+                let mut members = HashMap::with_capacity(vm.member_ids.len());
+                for &sid in &vm.member_ids {
+                    if let Some(m) = app.sessions.remove(&sid) {
+                        members.insert(sid, m);
+                    }
+                }
+                Taken::Multi {
+                    vm: Box::new(vm),
+                    members,
+                }
+            }),
             WindowKind::Editor(id) => app
                 .editors
                 .map
@@ -308,7 +333,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ide_context: ide_context.as_deref(),
             focused,
         };
-        let editor_maximized = app.maximized == Some(*kind);
+        let is_maximized = app.maximized == Some(*kind);
         let collapsed = *taken.geom().0;
         let applying = taken.geom().2.take();
         let default_pos = if i > 0 {
@@ -317,7 +342,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             prev_min
         };
         let fill = match kind {
-            WindowKind::Session(_) => theme::bg_window(),
+            WindowKind::Session(_) | WindowKind::MultiSession(_) => theme::bg_window(),
             WindowKind::Editor(_) => theme::bg_file(),
         };
         let win = window(win_id(*kind), fill, collapsed, area, applying, default_pos);
@@ -325,8 +350,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let shown = catch_unwind(AssertUnwindSafe(|| {
             win.show(&ctx, |ui| match &mut taken {
                 Taken::Session(vm) => out = session_view::show(ui, vm, &env),
+                Taken::Multi { vm, members } => {
+                    out = multi_view::show(ui, vm, members, &env, is_maximized);
+                }
                 Taken::Editor(vm) => {
-                    let o = editor::show(ui, vm, editor_maximized, focused, show_whitespace);
+                    let o = editor::show(ui, vm, is_maximized, focused, show_whitespace);
                     out = o.view;
                     errors.extend(o.error);
                 }
@@ -340,6 +368,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 match (taken, *kind) {
                     (Taken::Session(vm), WindowKind::Session(id)) => {
                         app.sessions.insert(id, *vm);
+                    }
+                    (Taken::Multi { vm, members }, WindowKind::MultiSession(id)) => {
+                        app.sessions.extend(members);
+                        app.multi_sessions.insert(id, *vm);
                     }
                     (Taken::Editor(vm), WindowKind::Editor(id)) => {
                         app.editors.map.insert(id, *vm);
@@ -391,8 +423,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         if let (Some(to), WindowKind::Session(id)) = (out.fork, *kind) {
             forks.push((id, to));
         }
-        if let (Some(title), WindowKind::Session(id)) = (out.rename.take(), *kind) {
-            renames.push((id, title));
+        if let (Some(title), WindowKind::Session(id)) = (out.rename.as_deref(), *kind) {
+            renames.push((id, title.to_string()));
+        }
+        if let (Some(title), WindowKind::MultiSession(id)) = (out.rename.take(), *kind) {
+            multi_renames.push((id, title));
         }
         if let (true, WindowKind::Session(id)) = (out.attach, *kind) {
             attaches.push(id);
@@ -413,10 +448,53 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         }
         match taken {
-            Taken::Session(mut vm) => {
+            Taken::Session(vm) => {
                 if let WindowKind::Session(id) = *kind {
-                    opens.extend(diff_modal_for(&ctx, id, &mut vm, &env));
                     app.sessions.insert(id, *vm);
+                    if let Some(vm) = app.sessions.get_mut(&id) {
+                        let env = Env {
+                            cmd_tx: &app.cmd_tx,
+                            providers: &app.providers,
+                            fork_targets: &fork_targets,
+                            vscode: app.vscode.as_deref(),
+                            maximized: app.maximized.and_then(WindowKind::session),
+                            send_mode: app.config.send_while_running,
+                            break_all: app.config.input_break_all,
+                            ide_context: ide_context.as_deref(),
+                            focused,
+                        };
+                        opens.extend(diff_modal_for(&ctx, id, vm, &env));
+                    }
+                }
+            }
+            Taken::Multi { vm, members } => {
+                if let WindowKind::MultiSession(id) = *kind {
+                    let ordered_ids = vm.member_ids.clone();
+                    let show_diff = !vm.collapsed;
+                    app.sessions.extend(members);
+                    app.multi_sessions.insert(id, *vm);
+                    if show_diff {
+                        // Draw at most one diff modal per frame in deterministic roster order.
+                        for sid in ordered_ids {
+                            if app.sessions.get(&sid).is_some_and(|m| m.diff.is_some()) {
+                                if let Some(m) = app.sessions.get_mut(&sid) {
+                                    let env = Env {
+                                        cmd_tx: &app.cmd_tx,
+                                        providers: &app.providers,
+                                        fork_targets: &fork_targets,
+                                        vscode: app.vscode.as_deref(),
+                                        maximized: app.maximized.and_then(WindowKind::session),
+                                        send_mode: app.config.send_while_running,
+                                        break_all: app.config.input_break_all,
+                                        ide_context: ide_context.as_deref(),
+                                        focused,
+                                    };
+                                    opens.extend(diff_modal_for(&ctx, sid, m, &env));
+                                }
+                                break;
+                            }
+                        }
+                    }
                 }
             }
             Taken::Editor(vm) => {
@@ -454,8 +532,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     for kind in closes {
         match kind {
             WindowKind::Session(id) => app.close_session(id),
+            WindowKind::MultiSession(id) => app.close_multi_session(id),
             WindowKind::Editor(id) => app.request_close_editor(id),
         }
+    }
+    for (id, title) in multi_renames {
+        app.rename_multi_session(id, title);
     }
     for (id, img) in images {
         app.attach_image(id, img);
@@ -596,6 +678,7 @@ mod tests {
             is_error: false,
             created_at: OffsetDateTime::now_utc(),
             provider_id: None,
+            sender_handle: None,
         }
     }
 
@@ -617,6 +700,8 @@ mod tests {
             usage: UsageTotals::default(),
             created_at: now,
             updated_at: now,
+            multi_session_id: None,
+            agent_handle: None,
         };
         let edit = r#"{"file_path":"/tmp/nope/a.rs","old_string":"a","new_string":"b"}"#;
         let patch = r#"{"structuredPatch":[{"oldStart":3,"newStart":3,"lines":["-a","+b"]}]}"#;

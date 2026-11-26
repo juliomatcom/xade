@@ -32,7 +32,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .iter()
         .filter_map(|k| match k {
             WindowKind::Editor(id) => app.editors.map.get(id).map(|vm| (*id, vm.title())),
-            WindowKind::Session(_) => None,
+            WindowKind::Session(_) | WindowKind::MultiSession(_) => None,
         })
         .filter(|(_, name)| name.to_lowercase().contains(&needle))
         .collect();
@@ -162,11 +162,22 @@ fn row(app: &App, ui: &mut egui::Ui, card: &SessionCard, selected: bool) -> egui
                         .color(theme::text_muted()),
                 );
                 let running = app.running_for(card);
-                if running.is_none() {
+                if running.is_none() && card.multi_id().is_none() {
                     ui.label(running::cache_text(card.updated_at));
                 }
-                if app.open_windows.contains(&WindowKind::Session(card.id)) {
+                let is_open = match card.target {
+                    xade_store::CardTarget::Session(id) => {
+                        app.open_windows.contains(&WindowKind::Session(id))
+                    }
+                    xade_store::CardTarget::Multi(id) => {
+                        app.open_windows.contains(&WindowKind::MultiSession(id))
+                    }
+                };
+                if is_open {
                     ui.label(RichText::new("open").small().color(theme::ok()));
+                }
+                if card.multi_id().is_some() {
+                    ui.label(RichText::new("Multi").small().color(theme::accent()));
                 }
                 ui.label(
                     RichText::new(app.workspace_name(card.workspace_id))
@@ -181,7 +192,11 @@ fn row(app: &App, ui: &mut egui::Ui, card: &SessionCard, selected: bool) -> egui
                     resp.on_hover_text(running::tooltip(r));
                 }
                 let title = if card.title.is_empty() {
-                    "New session"
+                    if card.multi_id().is_some() {
+                        "New Multi-Session"
+                    } else {
+                        "New session"
+                    }
                 } else {
                     &card.title
                 };
@@ -202,7 +217,7 @@ mod tests {
     fn card(title: &str) -> SessionCard {
         let now = time::OffsetDateTime::now_utc();
         SessionCard {
-            id: xade_core::SessionId::new(),
+            target: xade_store::CardTarget::Session(xade_core::SessionId::new()),
             workspace_id: xade_core::WorkspaceId::new(),
             title: title.into(),
             preview_snippet: String::new(),
@@ -212,6 +227,7 @@ mod tests {
             model_id: String::new(),
             provider_session_id: None,
             provider_id: xade_core::ProviderId::Claude,
+            members: Vec::new(),
         }
     }
 
@@ -230,7 +246,10 @@ mod tests {
             card(&"very long title ".repeat(20)),
             card(""),
         ];
-        let (first, second) = (cards[0].id, cards[1].id);
+        let (first, second) = (
+            cards[0].session_id().unwrap(),
+            cards[1].session_id().unwrap(),
+        );
         app.open_windows.push(WindowKind::Session(first));
         app.picker = Some(PickerState {
             results: cards,

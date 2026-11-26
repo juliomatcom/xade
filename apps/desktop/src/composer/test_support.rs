@@ -26,6 +26,8 @@ pub(super) fn vm(input: String) -> SessionVm {
             usage: UsageTotals::default(),
             created_at: now,
             updated_at: now,
+            multi_session_id: None,
+            agent_handle: None,
         },
         cwd: "/tmp".into(),
         status: SessionStatus::Idle,

@@ -16,11 +16,14 @@ use crate::widgets::tool_card::{self, CardStatus};
 
 /// Draws the transcript; returns a file path the user clicked.
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
-    let find_mark = crate::find::mark(
-        ui.ctx(),
-        crate::workspace::WindowKind::Session(vm.session.id),
-    );
+    let mark_target = match vm.session.multi_session_id {
+        Some(mid) => crate::workspace::WindowKind::MultiSession(mid),
+        None => crate::workspace::WindowKind::Session(vm.session.id),
+    };
+    let find_mark = crate::find::mark(ui.ctx(), mark_target);
+    let session_id = vm.session.id;
     let provider = vm.session.provider_id;
+    let vm_multi = vm.session.multi_session_id.is_some();
     let mut review = None;
     let mut open = None;
     let mut changes_review = None;
@@ -69,8 +72,9 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
         };
         (result, status)
     };
+    let scroll_id = ("conversation", session_id);
     egui::ScrollArea::vertical()
-        .id_salt("conversation")
+        .id_salt(scroll_id)
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
@@ -116,9 +120,16 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                                 Role::Assistant => {
                                     let id = m.id;
                                     let text = &m.content_text;
+                                    let is_multi = vm_multi;
                                     let clicked = with_time(ui, m, |ui| {
                                         assistant(ui, avatar_provider(m, provider), |ui| {
-                                            path_links.markdown(ui, md_cache, cwd, id, text)
+                                            if is_multi {
+                                                render_multi_assistant(
+                                                    ui, md_cache, path_links, cwd, id, text,
+                                                )
+                                            } else {
+                                                path_links.markdown(ui, md_cache, cwd, id, text)
+                                            }
                                         })
                                     });
                                     open = open.take().or(clicked);
@@ -369,6 +380,14 @@ fn user_bubble(
                 ui.set_width(ui.available_width());
                 // The row is a horizontal layout; the bubble's own content stacks vertically.
                 ui.vertical(|ui| {
+                    if let Some(sender) = &m.sender_handle {
+                        ui.label(
+                            RichText::new(format!("Broadcast from #{sender}"))
+                                .small()
+                                .strong()
+                                .color(theme::accent()),
+                        );
+                    }
                     if let Some(d) = Delivery::of(m) {
                         let (label, color) = match d {
                             Delivery::Queued => ("Queued", theme::text_muted()),
@@ -400,6 +419,54 @@ fn user_bubble(
                 });
             });
     });
+    clicked
+}
+
+/// Renders an assistant message in a multi-session member tab, framing `<broadcast>` segments
+/// distinctly from user-only plain text.
+fn render_multi_assistant(
+    ui: &mut egui::Ui,
+    cache: &mut CommonMarkCache,
+    links: &mut PathLinks,
+    cwd: &Path,
+    id: uuid::Uuid,
+    text: &str,
+) -> Option<PathBuf> {
+    let segs = xade_core::split_broadcast_segments(text);
+    if segs.is_empty() {
+        return links.markdown(ui, cache, cwd, id, text);
+    }
+    let mut clicked = None;
+    for (idx, seg) in segs.iter().enumerate() {
+        let seg_id = uuid::Uuid::from_u128(id.as_u128().wrapping_add(idx as u128));
+        let seg_clicked = match seg {
+            xade_core::TextSegment::Plain(body) => links.markdown(ui, cache, cwd, seg_id, body),
+            xade_core::TextSegment::Broadcast(body) => {
+                egui::Frame::new()
+                    .fill(theme::bg_raised())
+                    .stroke(egui::Stroke::new(1.0, theme::accent()))
+                    .corner_radius(6)
+                    .inner_margin(egui::Margin::same(8))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.label(
+                            RichText::new("Broadcast to team")
+                                .small()
+                                .strong()
+                                .color(theme::accent()),
+                        );
+                        links.markdown(ui, cache, cwd, seg_id, body)
+                    })
+                    .inner
+            }
+        };
+        if clicked.is_none() {
+            clicked = seg_clicked;
+        }
+        if idx + 1 < segs.len() {
+            ui.add_space(4.0);
+        }
+    }
     clicked
 }
 
@@ -563,6 +630,8 @@ mod tests {
             usage: UsageTotals::default(),
             created_at: now,
             updated_at: now,
+            multi_session_id: None,
+            agent_handle: None,
         }
     }
 
@@ -580,6 +649,7 @@ mod tests {
             is_error: false,
             created_at: OffsetDateTime::now_utc(),
             provider_id: None,
+            sender_handle: None,
         }
     }
 

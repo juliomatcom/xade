@@ -12,9 +12,9 @@ use time::OffsetDateTime;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use xade_core::{
-    AgentProvider, Delivery, Message, ProviderError, ProviderEvent, ProviderId, QuotaGroup,
-    QuotaKind, QuotaWindow, Role, RunningSession, Session, SessionId, SessionStatus, Workspace,
-    WorkspaceId,
+    AgentProvider, Delivery, Effort, Message, ModelOption, MultiSessionId, ProviderError,
+    ProviderEvent, ProviderId, QuotaGroup, QuotaKind, QuotaWindow, Role, RunningSession, Session,
+    SessionId, SessionStatus, Workspace, WorkspaceId,
 };
 use xade_runtime::git::{git_status, GitState};
 use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
@@ -27,11 +27,13 @@ use crate::errors::{self, ErrorQueue, ErrorReport, ModalAction};
 use crate::file_tree::{self, FileTree, Listing, TreeAction};
 use crate::home::HomeState;
 use crate::keymap::{self, Action, Chord};
+use crate::multi_view::{MultiSessionVm, MultiTab};
 use crate::running::{self, PendingOpen};
 use crate::widgets::about_modal;
-use crate::widgets::delete_modal::{self, PendingDelete};
+use crate::widgets::delete_modal::{self, PendingDelete, PendingDeleteTarget};
 use crate::widgets::file_picker::{self, FilePicker};
 use crate::widgets::keymaps_modal;
+use crate::widgets::multi_modal::{self, MultiCreateState};
 use crate::widgets::path_links::PathLinks;
 use crate::widgets::quit_modal;
 use crate::widgets::session_picker::{self, PickerState};
@@ -290,6 +292,8 @@ pub struct App {
     pub view: View,
     pub home: HomeState,
     pub sessions: HashMap<SessionId, SessionVm>,
+    pub multi_sessions: HashMap<MultiSessionId, MultiSessionVm>,
+    pub multi_create: Option<MultiCreateState>,
     pub open_windows: Vec<WindowKind>,
     /// Where the open windows are saved; `None` for a launch with a path, which leaves the plain window's list alone.
     windows_file: Option<PathBuf>,
@@ -368,6 +372,8 @@ pub struct App {
     reloading: HashSet<SessionId>,
     /// Sessions being opened from Home with Cmd+click: they get a window but no view switch.
     background: HashSet<SessionId>,
+    /// Multi-sessions opened from Home with Cmd+click (no view switch).
+    background_multi: HashSet<MultiSessionId>,
     events_rx: Receiver<UiMsg>,
     bridge: Bridge,
     git_inflight: HashSet<PathBuf>,
@@ -424,6 +430,8 @@ impl App {
                 ..HomeState::default()
             },
             sessions: HashMap::new(),
+            multi_sessions: HashMap::new(),
+            multi_create: None,
             open_windows: Vec::new(),
             windows_file: None,
             windows_saved: Vec::new(),
@@ -481,6 +489,7 @@ impl App {
             running_import_at: None,
             reloading: HashSet::new(),
             background: HashSet::new(),
+            background_multi: HashSet::new(),
             events_rx,
             bridge,
             git_inflight: HashSet::new(),
@@ -521,6 +530,8 @@ impl App {
             view: View::Home,
             home: HomeState::default(),
             sessions: HashMap::new(),
+            multi_sessions: HashMap::new(),
+            multi_create: None,
             open_windows: Vec::new(),
             windows_file: None,
             windows_saved: Vec::new(),
@@ -574,6 +585,7 @@ impl App {
             running_import_at: None,
             reloading: HashSet::new(),
             background: HashSet::new(),
+            background_multi: HashSet::new(),
             events_rx,
             bridge: Bridge {
                 tx,
@@ -999,32 +1011,151 @@ impl App {
 
     /// The process running this session outside Xade, unless Xade has it live itself.
     pub fn running_for(&self, card: &SessionCard) -> Option<&RunningSession> {
-        if self.is_live(card.id) {
+        let id = card.session_id()?;
+        if self.is_live(id) {
             return None;
         }
         self.running.get(card.provider_session_id.as_deref()?)
     }
 
-    /// Opens a card's session, asking first when it is running elsewhere.
+    /// Opens a card's session or multi-session, asking first when a standalone session is running
+    /// elsewhere.
     pub fn request_open(&mut self, card: &SessionCard, background: bool) {
-        match self.running_for(card) {
-            Some(r) => {
-                self.pending_open = Some(PendingOpen {
-                    id: card.id,
-                    location: r.location.clone(),
-                    background,
-                });
+        match card.target {
+            xade_store::CardTarget::Session(id) => match self.running_for(card) {
+                Some(r) => {
+                    self.pending_open = Some(PendingOpen {
+                        id,
+                        location: r.location.clone(),
+                        background,
+                    });
+                }
+                None => self.open_confirmed(id, background),
+            },
+            xade_store::CardTarget::Multi(mid) => {
+                if background {
+                    self.open_multi_session_background(mid);
+                } else {
+                    self.open_multi_session(mid);
+                }
             }
-            None => self.open_confirmed(card.id, background),
         }
     }
 
-    /// Asks for confirmation before deleting a card's session.
+    /// Asks for confirmation before deleting a card's session or multi-session.
     pub fn request_delete(&mut self, card: &SessionCard) {
+        let target = match card.target {
+            xade_store::CardTarget::Session(id) => PendingDeleteTarget::Session(id),
+            xade_store::CardTarget::Multi(id) => PendingDeleteTarget::Multi(id),
+        };
         self.pending_delete = Some(PendingDelete {
-            id: card.id,
+            target,
             title: card.title.clone(),
             provider: card.provider_id,
+        });
+    }
+
+    pub fn provider_models(&self, id: ProviderId) -> Vec<ModelOption> {
+        self.provider(id).map_or_else(Vec::new, |p| p.models())
+    }
+
+    pub fn provider_default_model(&self, id: ProviderId) -> String {
+        self.provider(id)
+            .map_or_else(|| "default".into(), |p| p.default_model())
+    }
+
+    pub fn model_effort_levels(&self, id: ProviderId, model_id: &str) -> Vec<Effort> {
+        let Some(p) = self.provider(id) else {
+            return vec![Effort::Default];
+        };
+        let mut levels = vec![Effort::Default];
+        if let Some(m) = p.models().into_iter().find(|m| m.id == model_id) {
+            for e in m.effort_levels {
+                if !levels.contains(&e) {
+                    levels.push(e);
+                }
+            }
+        } else {
+            for e in p.effort_levels() {
+                if !levels.contains(&e) {
+                    levels.push(e);
+                }
+            }
+        }
+        levels
+    }
+
+    /// Opens the "New Multi-Session" dialog for the currently selected workspace.
+    pub fn open_multi_create(&mut self) {
+        let Some(ws_id) = self.home.scope else {
+            return;
+        };
+        let Some(cwd) = self
+            .home
+            .workspaces
+            .iter()
+            .find(|w| w.id == ws_id && w.is_open)
+            .map(|w| w.root_path.clone())
+        else {
+            return;
+        };
+        self.multi_create = MultiCreateState::default_for(self, ws_id, cwd);
+    }
+
+    /// Opens a stored multi-session and focuses its composite window.
+    pub fn open_multi_session(&mut self, id: MultiSessionId) {
+        self.background_multi.remove(&id);
+        if !self.multi_sessions.contains_key(&id) {
+            let _ = self.cmd_tx.send(ManagerCmd::OpenMulti { multi_id: id });
+        }
+        self.focus(WindowKind::MultiSession(id));
+    }
+
+    /// Opens a stored multi-session as a window without leaving Home.
+    pub fn open_multi_session_background(&mut self, id: MultiSessionId) {
+        if self.multi_sessions.contains_key(&id) {
+            self.add_window(WindowKind::MultiSession(id));
+        } else if self.background_multi.insert(id) {
+            let _ = self.cmd_tx.send(ManagerCmd::OpenMulti { multi_id: id });
+        }
+    }
+
+    pub fn close_multi_session(&mut self, id: MultiSessionId) {
+        let _ = self.cmd_tx.send(ManagerCmd::CloseMulti { multi_id: id });
+        self.drop_multi_session(id);
+    }
+
+    fn drop_multi_session(&mut self, id: MultiSessionId) {
+        self.background_multi.remove(&id);
+        self.restoring.remove(&Saved::MultiSession(id));
+        if let Some(vm) = self.multi_sessions.remove(&id) {
+            for sid in vm.member_ids {
+                self.sessions.remove(&sid);
+            }
+        }
+        self.drop_window(WindowKind::MultiSession(id));
+    }
+
+    pub fn rename_multi_session(&mut self, id: MultiSessionId, title: String) {
+        let title = title.trim().to_string();
+        let Some(vm) = self.multi_sessions.get_mut(&id) else {
+            return;
+        };
+        if title.is_empty() || vm.multi.title == title {
+            return;
+        }
+        vm.multi.title.clone_from(&title);
+        for card in self
+            .home
+            .cards
+            .iter_mut()
+            .filter(|c| c.multi_id() == Some(id))
+        {
+            card.title.clone_from(&title);
+        }
+        let _ = self.cmd_tx.send(ManagerCmd::RenameMulti {
+            multi_id: id,
+            title,
         });
     }
 
@@ -1140,7 +1271,7 @@ impl App {
                 self.home
                     .cards
                     .iter()
-                    .find(|c| c.id == id)
+                    .find(|c| c.session_id() == Some(id))
                     .map(|c| c.provider_id)
             })
     }
@@ -1301,6 +1432,7 @@ impl App {
     pub fn window_exists(&self, kind: WindowKind) -> bool {
         match kind {
             WindowKind::Session(id) => self.sessions.contains_key(&id),
+            WindowKind::MultiSession(id) => self.multi_sessions.contains_key(&id),
             WindowKind::Editor(id) => self.editors.map.contains_key(&id),
         }
     }
@@ -1332,6 +1464,7 @@ impl App {
             self.restoring.insert(w.clone());
             match w {
                 Saved::Session(id) => self.open_session(*id),
+                Saved::MultiSession(id) => self.open_multi_session(*id),
                 Saved::File(path) => self.open_path(path.clone()),
             }
         }
@@ -1349,6 +1482,7 @@ impl App {
             .filter(|_| self.config.restore_windows)
             .filter_map(|k| match k {
                 WindowKind::Session(id) => Some(Saved::Session(*id)),
+                WindowKind::MultiSession(id) => Some(Saved::MultiSession(*id)),
                 WindowKind::Editor(id) => self.editors.map.get(id)?.path.clone().map(Saved::File),
             })
             .collect();
@@ -1371,6 +1505,14 @@ impl App {
         self.focused
             .and_then(WindowKind::session)
             .filter(|id| self.sessions.contains_key(id))
+    }
+
+    /// The focused window when it is an open multi-session.
+    pub(crate) fn focused_multi_session(&self) -> Option<MultiSessionId> {
+        match self.focused {
+            Some(WindowKind::MultiSession(id)) if self.multi_sessions.contains_key(&id) => Some(id),
+            _ => None,
+        }
     }
 
     pub fn close_session(&mut self, id: SessionId) {
@@ -1411,6 +1553,11 @@ impl App {
             .or_else(|| {
                 self.focused_session()
                     .and_then(|id| self.sessions.get(&id))
+                    .map(|vm| vm.cwd.clone())
+            })
+            .or_else(|| {
+                self.focused_multi_session()
+                    .and_then(|id| self.multi_sessions.get(&id))
                     .map(|vm| vm.cwd.clone())
             })
             .or_else(dirs::home_dir)
@@ -1755,6 +1902,11 @@ impl App {
                         return Some(vm.cwd.clone());
                     }
                 }
+                Some(WindowKind::MultiSession(id)) => {
+                    if let Some(vm) = self.multi_sessions.get(&id) {
+                        return Some(vm.cwd.clone());
+                    }
+                }
                 Some(WindowKind::Editor(id)) => {
                     if let Some(vm) = self.editors.map.get(&id) {
                         let parent = vm.path.as_deref().and_then(|p| p.parent());
@@ -1781,12 +1933,19 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// Sessions of the workspace whose child is running.
+    /// Open sessions (standalone and multi-session) in the workspace.
     pub fn live_count(&self, id: WorkspaceId) -> usize {
-        self.sessions
+        let standalone = self
+            .sessions
             .values()
-            .filter(|vm| vm.session.workspace_id == id)
-            .count()
+            .filter(|vm| vm.session.multi_session_id.is_none() && vm.session.workspace_id == id)
+            .count();
+        let multi = self
+            .multi_sessions
+            .values()
+            .filter(|mvm| mvm.multi.workspace_id == id)
+            .count();
+        standalone + multi
     }
 
     /// Runs one shortcut. Actions that need a focused session do nothing without one.
@@ -1839,11 +1998,17 @@ impl App {
                             session_id: vm.session.id,
                         });
                     }
+                } else if let Some(mid) = self.focused_multi_session() {
+                    let _ = self
+                        .cmd_tx
+                        .send(ManagerCmd::InterruptMultiAll { multi_id: mid });
                 }
             }
             Action::CloseWindow => {
                 if let (true, Some(id)) = (in_workspace, focused) {
                     self.close_session(id);
+                } else if let (true, Some(mid)) = (in_workspace, self.focused_multi_session()) {
+                    self.close_multi_session(mid);
                 } else if let (true, Some(id)) = (in_workspace, focused_editor) {
                     self.request_close_editor(id);
                 }
@@ -1891,7 +2056,14 @@ impl App {
                 }
             }
             Action::ToggleAuto => {
-                if let Some(vm) = focused.and_then(|id| self.sessions.get_mut(&id)) {
+                let target_sid = focused.or_else(|| {
+                    let mid = self.focused_multi_session()?;
+                    match self.multi_sessions.get(&mid)?.active_tab {
+                        MultiTab::Member(sid) => Some(sid),
+                        MultiTab::Team => None,
+                    }
+                });
+                if let Some(vm) = target_sid.and_then(|id| self.sessions.get_mut(&id)) {
                     vm.session.auto_mode = !vm.session.auto_mode;
                     let _ = self.cmd_tx.send(ManagerCmd::SetAutoMode {
                         session_id: vm.session.id,
@@ -2076,8 +2248,12 @@ impl App {
         }
     }
 
-    fn insert_vm(&mut self, session: Session, messages: Vec<Message>) {
-        let id = session.id;
+    fn build_session_vm(
+        &self,
+        session: Session,
+        messages: Vec<Message>,
+        status: SessionStatus,
+    ) -> SessionVm {
         let cwd = self
             .home
             .workspaces
@@ -2085,7 +2261,6 @@ impl App {
             .find(|w| w.id == session.workspace_id)
             .map(|w| w.root_path.clone())
             .unwrap_or_default();
-        // A session never sent from has no baseline: the warning has nothing to compare.
         let sent_model = if session.sent_model_id.is_empty() {
             session.model_id.clone()
         } else {
@@ -2096,43 +2271,76 @@ impl App {
         } else {
             session.sent_effort
         };
-        self.sessions.insert(
-            id,
-            SessionVm {
-                cwd,
-                session,
-                status: SessionStatus::Starting,
-                queued: Default::default(),
-                messages,
-                live_text: String::new(),
-                thinking_tokens: None,
-                pending_permission: None,
-                input: String::new(),
-                error: None,
-                md_cache: crate::widgets::markdown::new_cache(),
-                path_links: PathLinks::default(),
-                diff: None,
-                changes: Default::default(),
-                settings_pending: false,
-                turn_base: None,
-                turn_snapshotting: false,
-                turn_files: Default::default(),
-                sent_model,
-                sent_effort,
-                collapsed: false,
-                window_rect: None,
-                apply_rect: None,
-                sync: Default::default(),
-                mention: Default::default(),
-                attach_note: None,
-                focus_input: false,
-                subagent_msgs: Vec::new(),
-                view_subagents: false,
-                fork_preparing: false,
-                renaming: None,
-                scroll_to_end: false,
-            },
-        );
+        SessionVm {
+            cwd,
+            session,
+            status,
+            queued: Default::default(),
+            messages,
+            live_text: String::new(),
+            thinking_tokens: None,
+            pending_permission: None,
+            input: String::new(),
+            error: None,
+            md_cache: crate::widgets::markdown::new_cache(),
+            path_links: PathLinks::default(),
+            diff: None,
+            changes: Default::default(),
+            settings_pending: false,
+            turn_base: None,
+            turn_snapshotting: false,
+            turn_files: Default::default(),
+            sent_model,
+            sent_effort,
+            collapsed: false,
+            window_rect: None,
+            apply_rect: None,
+            sync: Default::default(),
+            mention: Default::default(),
+            attach_note: None,
+            focus_input: false,
+            subagent_msgs: Vec::new(),
+            view_subagents: false,
+            fork_preparing: false,
+            renaming: None,
+            scroll_to_end: false,
+        }
+    }
+
+    fn insert_multi_vm(
+        &mut self,
+        multi: xade_core::MultiSession,
+        members: Vec<(Session, Vec<Message>)>,
+        team_messages: Vec<xade_core::TeamMessage>,
+    ) {
+        let mid = multi.id;
+        let cwd = self
+            .home
+            .workspaces
+            .iter()
+            .find(|w| w.id == multi.workspace_id)
+            .map(|w| w.root_path.clone())
+            .unwrap_or_default();
+        let mut member_ids = Vec::with_capacity(members.len());
+        for (session, messages) in members {
+            let sid = session.id;
+            member_ids.push(sid);
+            let vm = self.build_session_vm(session, messages, SessionStatus::Idle);
+            self.sessions.insert(sid, vm);
+        }
+        let mvm = MultiSessionVm::new(multi, cwd, member_ids, team_messages);
+        self.multi_sessions.insert(mid, mvm);
+        if self.background_multi.remove(&mid) {
+            self.add_window(WindowKind::MultiSession(mid));
+        } else {
+            self.focus(WindowKind::MultiSession(mid));
+        }
+    }
+
+    fn insert_vm(&mut self, session: Session, messages: Vec<Message>) {
+        let id = session.id;
+        let vm = self.build_session_vm(session, messages, SessionStatus::Starting);
+        self.sessions.insert(id, vm);
         if self.background.remove(&id) {
             self.add_window(WindowKind::Session(id));
         } else {
@@ -2224,6 +2432,16 @@ impl App {
             }
             (Some(id), AppEventKind::Status(status)) => {
                 if status == SessionStatus::Closed {
+                    if self
+                        .sessions
+                        .get(&id)
+                        .is_some_and(|vm| vm.session.multi_session_id.is_some())
+                    {
+                        if let Some(vm) = self.sessions.get_mut(&id) {
+                            vm.status = SessionStatus::Closed;
+                        }
+                        return;
+                    }
                     return self.drop_session(id);
                 }
                 if let Some(vm) = self.sessions.get_mut(&id) {
@@ -2259,6 +2477,80 @@ impl App {
                 }
             }
             (Some(id), AppEventKind::Provider(p)) => self.on_provider_event(id, p),
+            (Some(id), AppEventKind::MemberMessage(msg)) => {
+                if let Some(vm) = self.sessions.get_mut(&id) {
+                    vm.messages.push(msg);
+                    vm.error = None;
+                    vm.scroll_to_end = true;
+                }
+            }
+            (_, AppEventKind::MultiCreated { multi, members }) => {
+                let pairs = members.into_iter().map(|s| (s, Vec::new())).collect();
+                self.insert_multi_vm(multi, pairs, Vec::new());
+                self.refresh_workspaces();
+                self.refresh_cards();
+            }
+            (
+                _,
+                AppEventKind::MultiOpened {
+                    multi,
+                    members,
+                    team_messages,
+                },
+            ) => {
+                self.restoring.remove(&Saved::MultiSession(multi.id));
+                self.insert_multi_vm(multi, members, team_messages);
+                self.refresh_workspaces();
+            }
+            (_, AppEventKind::MultiOpenFailed { multi_id, message }) => {
+                let was_restoring = self.restoring.remove(&Saved::MultiSession(multi_id));
+                self.drop_multi_session(multi_id);
+                if !was_restoring {
+                    self.report(ErrorReport::new(
+                        "Could not open the multi-session",
+                        message,
+                    ));
+                }
+            }
+            (_, AppEventKind::MultiTeamMessage { multi_id, message }) => {
+                if let Some(mvm) = self.multi_sessions.get_mut(&multi_id) {
+                    mvm.team_messages.push(message);
+                    mvm.scroll_to_end = true;
+                }
+                self.refresh_cards();
+            }
+            (_, AppEventKind::MultiRenamed { multi_id, title }) => {
+                if let Some(mvm) = self.multi_sessions.get_mut(&multi_id) {
+                    mvm.multi.title.clone_from(&title);
+                }
+                for card in self
+                    .home
+                    .cards
+                    .iter_mut()
+                    .filter(|c| c.multi_id() == Some(multi_id))
+                {
+                    card.title.clone_from(&title);
+                }
+            }
+            (
+                _,
+                AppEventKind::MultiBroadcastPaused {
+                    multi_id,
+                    paused,
+                    hops,
+                },
+            ) => {
+                if let Some(mvm) = self.multi_sessions.get_mut(&multi_id) {
+                    mvm.broadcasts_paused = paused;
+                    mvm.paused_hops = hops;
+                }
+            }
+            (_, AppEventKind::MultiClosed { multi_id }) => self.drop_multi_session(multi_id),
+            (_, AppEventKind::MultiDeleted { multi_id }) => {
+                self.drop_multi_session(multi_id);
+                self.refresh_cards();
+                self.refresh_workspaces();
+            }
             _ => {}
         }
     }
@@ -2274,7 +2566,12 @@ impl App {
         }
         vm.session.title.clone_from(&title);
         // The card is patched in place: a re-read could land before the store write does.
-        for card in self.home.cards.iter_mut().filter(|c| c.id == id) {
+        for card in self
+            .home
+            .cards
+            .iter_mut()
+            .filter(|c| c.session_id() == Some(id))
+        {
             card.title.clone_from(&title);
         }
         let _ = self.cmd_tx.send(ManagerCmd::Rename {
@@ -2472,8 +2769,17 @@ impl App {
                     input_json,
                     reviewable: diff.is_some(),
                 });
-                if let Some(data) = diff {
-                    vm.diff = Some(DiffState { tool_use_id, data });
+                let is_active_tab = vm.session.multi_session_id.is_none_or(|mid| {
+                    self.focused == Some(WindowKind::MultiSession(mid))
+                        && self
+                            .multi_sessions
+                            .get(&mid)
+                            .is_some_and(|m| m.active_tab == MultiTab::Member(id))
+                });
+                if is_active_tab {
+                    if let Some(data) = diff {
+                        vm.diff = Some(DiffState { tool_use_id, data });
+                    }
                 }
             }
             ProviderEvent::TurnComplete { usage, .. } => {
@@ -2588,6 +2894,7 @@ pub(crate) fn new_message(
         is_error: false,
         created_at: OffsetDateTime::now_utc(),
         provider_id: None,
+        sender_handle: None,
     }
 }
 
@@ -2636,12 +2943,12 @@ impl eframe::App for App {
     }
 }
 
-/// The session window under `pointer`, else `fallback`.
-fn drop_target(
+/// The window under `pointer`, else `fallback`.
+fn drop_target<T: Copy>(
     pointer: Option<egui::Pos2>,
-    rects: &[(SessionId, egui::Rect)],
-    fallback: Option<SessionId>,
-) -> Option<SessionId> {
+    rects: &[(T, egui::Rect)],
+    fallback: Option<T>,
+) -> Option<T> {
     pointer
         .and_then(|p| rects.iter().find(|(_, r)| r.contains(p)).map(|(id, _)| *id))
         .or(fallback)
@@ -2711,24 +3018,61 @@ impl App {
         if dropped.is_empty() {
             return;
         }
-        let rects: Vec<(SessionId, egui::Rect)> = self
-            .open_windows
-            .iter()
-            .filter_map(|k| k.session())
-            .filter_map(|id| Some((id, self.sessions.get(&id)?.window_rect?)))
-            .collect();
-        let only = (self.sessions.len() == 1)
-            .then(|| self.sessions.keys().next().copied())
-            .flatten();
         let target = if self.view == View::Workspace {
-            drop_target(pointer, &rects, self.focused_session().or(only))
+            // Build z-ordered rects across all open Session and MultiSession windows so a drop over
+            // a MultiSession is never hijacked by a focused standalone session.
+            let rects: Vec<(WindowKind, egui::Rect)> = self
+                .open_windows
+                .iter()
+                .rev()
+                .filter_map(|&k| match k {
+                    WindowKind::Session(id) => Some((k, self.sessions.get(&id)?.window_rect?)),
+                    WindowKind::MultiSession(mid) => {
+                        Some((k, self.multi_sessions.get(&mid)?.window_rect?))
+                    }
+                    WindowKind::Editor(_) => None,
+                })
+                .collect();
+            let chat_windows: Vec<WindowKind> = self
+                .open_windows
+                .iter()
+                .copied()
+                .filter(|k| matches!(k, WindowKind::Session(_) | WindowKind::MultiSession(_)))
+                .collect();
+            let only = (chat_windows.len() == 1).then(|| chat_windows[0]);
+            let fallback = self
+                .focused_session()
+                .map(WindowKind::Session)
+                .or_else(|| self.focused_multi_session().map(WindowKind::MultiSession))
+                .or(only);
+            drop_target(pointer, &rects, fallback)
         } else {
             None
         };
-        match target.and_then(|id| self.sessions.get_mut(&id)) {
-            Some(vm) => composer::insert_mentions(vm, &dropped),
-            None => self.warn("Drop files on a session window to mention them."),
+        match target {
+            Some(WindowKind::Session(id)) => {
+                if let Some(vm) = self.sessions.get_mut(&id) {
+                    composer::insert_mentions(vm, &dropped);
+                    return;
+                }
+            }
+            Some(WindowKind::MultiSession(mid)) => {
+                if let Some(mvm) = self.multi_sessions.get_mut(&mid) {
+                    let before = mvm.input.len();
+                    let rejected =
+                        crate::composer::append_mentions(&mut mvm.input, &mvm.cwd, &dropped);
+                    if mvm.input.len() > before {
+                        mvm.focus_input = true;
+                    }
+                    if let Some(msg) = rejected {
+                        self.warn(msg);
+                    }
+                    return;
+                }
+            }
+            _ => {}
         }
+        self.warn("Drop files on a session window to mention them.");
     }
 
     /// Draws the whole window except the error modal.
@@ -2753,6 +3097,7 @@ impl App {
         file_picker::show(self, &ctx);
         running::confirm_modal(self, &ctx);
         delete_modal::show(self, &ctx);
+        multi_modal::show(self, &ctx);
         quit_modal::show(self, &ctx);
         crate::widgets::selection_menu::show(self, &ctx);
         self.saving_overlay(&ctx);
@@ -3119,6 +3464,8 @@ mod tests {
             usage: xade_core::UsageTotals::default(),
             created_at: now,
             updated_at: now,
+            multi_session_id: None,
+            agent_handle: None,
         }
     }
 

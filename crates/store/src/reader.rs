@@ -7,12 +7,13 @@ use std::sync::{Arc, Mutex};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use time::OffsetDateTime;
 use xade_core::{
-    Effort, Message, ProviderId, QuotaWindow, Session, SessionId, SessionOrigin, UsageTotals,
-    Workspace, WorkspaceId,
+    Effort, Message, MultiMemberBadge, MultiSession, MultiSessionId, ProviderId, QuotaWindow,
+    Session, SessionId, SessionOrigin, TeamMessage, TeamMessageKind, UsageTotals, Workspace,
+    WorkspaceId,
 };
 
 use crate::schema::{self, to_u64};
-use crate::{search, Page, SessionCard, StoreError};
+use crate::{search, CardTarget, Page, SessionCard, StoreError};
 
 /// A stored session that has a `provider_session_id`, as the importer sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,6 +21,15 @@ pub struct ImportRef {
     pub id: SessionId,
     pub origin: SessionOrigin,
     pub updated_at: OffsetDateTime,
+}
+
+/// A multi-session with its ordered member sessions (and each member's history) plus the shared
+/// Team feed.
+#[derive(Debug, Clone)]
+pub struct LoadedMultiSession {
+    pub multi: MultiSession,
+    pub members: Vec<(Session, Vec<Message>)>,
+    pub team_messages: Vec<TeamMessage>,
 }
 
 #[derive(Clone)]
@@ -66,8 +76,8 @@ impl StoreReader {
             .await
     }
 
-    /// Model, effort and Auto mode of the most recently updated session `provider` has in
-    /// Xade; another provider's model id is never returned.
+    /// Model, effort and Auto mode of the most recently updated standalone session `provider`
+    /// has in Xade; another provider's model id is never returned.
     pub async fn last_model_choice(
         &self,
         provider: ProviderId,
@@ -75,7 +85,7 @@ impl StoreReader {
         self.with_conn(move |c| {
             Ok(c.query_row(
                 "SELECT model_id, effort, auto_mode FROM sessions
-                 WHERE origin = 'xade' AND provider_id = ?1
+                 WHERE origin = 'xade' AND multi_session_id IS NULL AND provider_id = ?1
                  ORDER BY updated_at DESC LIMIT 1",
                 [schema::provider_str(provider)],
                 |r| {
@@ -91,11 +101,12 @@ impl StoreReader {
         .await
     }
 
-    /// Provider of the most recently updated session created in Xade.
+    /// Provider of the most recently updated standalone session created in Xade.
     pub async fn last_provider(&self) -> Result<Option<ProviderId>, StoreError> {
         self.with_conn(|c| {
             Ok(c.query_row(
-                "SELECT provider_id FROM sessions WHERE origin = 'xade'
+                "SELECT provider_id FROM sessions
+                 WHERE origin = 'xade' AND multi_session_id IS NULL
                  ORDER BY updated_at DESC LIMIT 1",
                 [],
                 |r| schema::parse_provider(0, &r.get::<_, String>(0)?),
@@ -120,6 +131,25 @@ impl StoreReader {
 
     pub async fn load_session(&self, id: SessionId) -> Result<(Session, Vec<Message>), StoreError> {
         self.with_conn(move |c| load_session(c, id)).await
+    }
+
+    pub async fn load_multi_session(
+        &self,
+        id: MultiSessionId,
+    ) -> Result<LoadedMultiSession, StoreError> {
+        self.with_conn(move |c| load_multi_session(c, id)).await
+    }
+
+    /// Highest `seq` in the multi-session's Team feed, or 0 when empty.
+    pub async fn max_team_seq(&self, id: MultiSessionId) -> Result<i64, StoreError> {
+        self.with_conn(move |c| {
+            Ok(c.query_row(
+                "SELECT COALESCE(MAX(seq), 0) FROM team_messages WHERE multi_session_id = ?1",
+                [id.0.to_string()],
+                |r| r.get(0),
+            )?)
+        })
+        .await
     }
 
     /// Highest `seq` in the session, or 0 when it has no messages.
@@ -147,22 +177,56 @@ impl StoreReader {
     }
 }
 
-pub(crate) const CARD_COLS: &str =
-    "id, workspace_id, title, preview_snippet, model_id, updated_at, origin, provider_session_id, provider_id";
-
-pub(crate) fn card_from_row(r: &Row) -> rusqlite::Result<SessionCard> {
+pub(crate) fn card_from_union_row(r: &Row) -> rusqlite::Result<SessionCard> {
+    let kind: String = r.get(0)?;
+    let target = if kind == "m" {
+        CardTarget::Multi(schema::multi_session_id(1, &r.get::<_, String>(1)?)?)
+    } else {
+        CardTarget::Session(schema::session_id(1, &r.get::<_, String>(1)?)?)
+    };
     Ok(SessionCard {
-        id: schema::session_id(0, &r.get::<_, String>(0)?)?,
-        workspace_id: schema::workspace_id(1, &r.get::<_, String>(1)?)?,
-        title: r.get(2)?,
-        preview_snippet: r.get(3)?,
-        model_id: r.get(4)?,
-        updated_at: schema::parse_ts(5, &r.get::<_, String>(5)?)?,
-        origin: schema::parse_origin(6, &r.get::<_, String>(6)?)?,
+        target,
+        workspace_id: schema::workspace_id(2, &r.get::<_, String>(2)?)?,
+        title: r.get(3)?,
+        preview_snippet: r.get(4)?,
+        model_id: r.get(5)?,
+        updated_at: schema::parse_ts(6, &r.get::<_, String>(6)?)?,
+        origin: schema::parse_origin(7, &r.get::<_, String>(7)?)?,
         excerpt: None,
-        provider_session_id: r.get(7)?,
-        provider_id: schema::parse_provider(8, &r.get::<_, String>(8)?)?,
+        provider_session_id: r.get(8)?,
+        provider_id: schema::parse_provider(9, &r.get::<_, String>(9)?)?,
+        members: Vec::new(),
     })
+}
+
+pub(crate) fn hydrate_multi_members(
+    conn: &Connection,
+    cards: &mut [SessionCard],
+) -> Result<(), StoreError> {
+    let mut stmt = conn.prepare(
+        "SELECT provider_id, agent_handle, model_id FROM sessions
+         WHERE multi_session_id = ?1
+         ORDER BY member_order, id",
+    )?;
+    for card in cards {
+        let Some(mid) = card.multi_id() else {
+            continue;
+        };
+        let members: Vec<MultiMemberBadge> = stmt
+            .query_map([mid.0.to_string()], |r| {
+                Ok(MultiMemberBadge {
+                    provider_id: schema::parse_provider(0, &r.get::<_, String>(0)?)?,
+                    handle: r.get::<_, String>(1)?,
+                    model_id: r.get(2)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        if let Some(first) = members.first() {
+            card.provider_id = first.provider_id;
+        }
+        card.members = members;
+    }
+    Ok(())
 }
 
 fn list_workspaces(conn: &Connection) -> Result<Vec<Workspace>, StoreError> {
@@ -189,27 +253,47 @@ pub(crate) fn list_sessions(
     page: u32,
     page_size: u32,
 ) -> Result<Page<SessionCard>, StoreError> {
+    let tx = conn.unchecked_transaction()?;
     let size = page_size.max(1);
     let scope = scope.map(|w| w.0.to_string());
     let origin = origin.map(schema::origin_str);
-    let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sessions
-         WHERE (?1 IS NULL OR workspace_id = ?1) AND (?2 IS NULL OR origin = ?2)",
+    let total: i64 = tx.query_row(
+        "SELECT
+            (SELECT COUNT(*) FROM sessions
+              WHERE multi_session_id IS NULL
+                AND (?1 IS NULL OR workspace_id = ?1)
+                AND (?2 IS NULL OR origin = ?2))
+            +
+            (SELECT COUNT(*) FROM multi_sessions
+              WHERE (?1 IS NULL OR workspace_id = ?1)
+                AND (?2 IS NULL OR 'xade' = ?2))",
         params![scope, origin],
         |r| r.get(0),
     )?;
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {CARD_COLS} FROM sessions
-         WHERE (?1 IS NULL OR workspace_id = ?1) AND (?2 IS NULL OR origin = ?2)
-         ORDER BY updated_at DESC, id LIMIT ?3 OFFSET ?4"
-    ))?;
-    let offset = i64::from(page) * i64::from(size);
-    let items = stmt
+    let mut stmt = tx.prepare(
+        "SELECT 's' AS row_kind, id, workspace_id, title, preview_snippet, model_id,
+                updated_at, origin, provider_session_id, provider_id
+         FROM sessions
+         WHERE multi_session_id IS NULL
+           AND (?1 IS NULL OR workspace_id = ?1)
+           AND (?2 IS NULL OR origin = ?2)
+         UNION ALL
+         SELECT 'm' AS row_kind, id, workspace_id, title, preview_snippet, '' AS model_id,
+                updated_at, 'xade' AS origin, NULL AS provider_session_id, 'claude' AS provider_id
+         FROM multi_sessions
+         WHERE (?1 IS NULL OR workspace_id = ?1)
+           AND (?2 IS NULL OR 'xade' = ?2)
+         ORDER BY updated_at DESC, id
+         LIMIT ?3 OFFSET ?4",
+    )?;
+    let offset = i64::from(page).saturating_mul(i64::from(size));
+    let mut items: Vec<SessionCard> = stmt
         .query_map(
             params![scope, origin, i64::from(size), offset],
-            card_from_row,
+            card_from_union_row,
         )?
         .collect::<Result<_, _>>()?;
+    hydrate_multi_members(&tx, &mut items)?;
     Ok(Page {
         items,
         total: to_u64(total),
@@ -255,53 +339,51 @@ fn import_index(
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
-fn load_session(conn: &Connection, id: SessionId) -> Result<(Session, Vec<Message>), StoreError> {
-    let key = id.0.to_string();
-    let session = conn
-        .query_row(
-            "SELECT id, workspace_id, provider_id, provider_session_id, title, preview_snippet,
-                model_id, effort, auto_mode, context_tokens_used, context_window_max,
-                input_tokens, output_tokens, cache_read_tokens, cost_usd, created_at, updated_at,
-                origin, sent_model_id, sent_effort
-             FROM sessions WHERE id = ?1",
-            [&key],
-            |r| {
-                Ok(Session {
-                    id: schema::session_id(0, &r.get::<_, String>(0)?)?,
-                    workspace_id: schema::workspace_id(1, &r.get::<_, String>(1)?)?,
-                    provider_id: schema::parse_provider(2, &r.get::<_, String>(2)?)?,
-                    provider_session_id: r.get(3)?,
-                    origin: schema::parse_origin(17, &r.get::<_, String>(17)?)?,
-                    title: r.get(4)?,
-                    preview_snippet: r.get(5)?,
-                    model_id: r.get(6)?,
-                    effort: schema::parse_effort(7, &r.get::<_, String>(7)?)?,
-                    sent_model_id: r.get(18)?,
-                    sent_effort: schema::parse_effort(19, &r.get::<_, String>(19)?)?,
-                    auto_mode: r.get(8)?,
-                    usage: UsageTotals {
-                        context_tokens_used: to_u64(r.get(9)?),
-                        context_window_max: to_u64(r.get(10)?),
-                        input_tokens: to_u64(r.get(11)?),
-                        output_tokens: to_u64(r.get(12)?),
-                        cache_read_tokens: to_u64(r.get(13)?),
-                        cost_usd: r.get(14)?,
-                    },
-                    created_at: schema::parse_ts(15, &r.get::<_, String>(15)?)?,
-                    updated_at: schema::parse_ts(16, &r.get::<_, String>(16)?)?,
-                })
-            },
-        )
-        .optional()?
-        .ok_or(StoreError::NotFound)?;
+const SESSION_COLS: &str = "id, workspace_id, provider_id, provider_session_id, title,
+    preview_snippet, model_id, effort, auto_mode, context_tokens_used, context_window_max,
+    input_tokens, output_tokens, cache_read_tokens, cost_usd, created_at, updated_at,
+    origin, sent_model_id, sent_effort, multi_session_id, agent_handle";
 
+fn session_from_row(r: &Row) -> rusqlite::Result<Session> {
+    Ok(Session {
+        id: schema::session_id(0, &r.get::<_, String>(0)?)?,
+        workspace_id: schema::workspace_id(1, &r.get::<_, String>(1)?)?,
+        provider_id: schema::parse_provider(2, &r.get::<_, String>(2)?)?,
+        provider_session_id: r.get(3)?,
+        origin: schema::parse_origin(17, &r.get::<_, String>(17)?)?,
+        title: r.get(4)?,
+        preview_snippet: r.get(5)?,
+        model_id: r.get(6)?,
+        effort: schema::parse_effort(7, &r.get::<_, String>(7)?)?,
+        sent_model_id: r.get(18)?,
+        sent_effort: schema::parse_effort(19, &r.get::<_, String>(19)?)?,
+        auto_mode: r.get(8)?,
+        usage: UsageTotals {
+            context_tokens_used: to_u64(r.get(9)?),
+            context_window_max: to_u64(r.get(10)?),
+            input_tokens: to_u64(r.get(11)?),
+            output_tokens: to_u64(r.get(12)?),
+            cache_read_tokens: to_u64(r.get(13)?),
+            cost_usd: r.get(14)?,
+        },
+        created_at: schema::parse_ts(15, &r.get::<_, String>(15)?)?,
+        updated_at: schema::parse_ts(16, &r.get::<_, String>(16)?)?,
+        multi_session_id: r
+            .get::<_, Option<String>>(20)?
+            .map(|id| schema::multi_session_id(20, &id))
+            .transpose()?,
+        agent_handle: r.get(21)?,
+    })
+}
+
+fn load_messages(conn: &Connection, session_key: &str) -> Result<Vec<Message>, StoreError> {
     let mut stmt = conn.prepare(
         "SELECT id, session_id, seq, role, content_text, thinking_text, tool_name, tool_use_id,
-            tool_payload_json, is_error, created_at, provider_id
+            tool_payload_json, is_error, created_at, provider_id, sender_handle
          FROM messages WHERE session_id = ?1 ORDER BY seq",
     )?;
     let messages = stmt
-        .query_map([&key], |r| {
+        .query_map([session_key], |r| {
             Ok(Message {
                 id: schema::parse_uuid(0, &r.get::<_, String>(0)?)?,
                 session_id: schema::session_id(1, &r.get::<_, String>(1)?)?,
@@ -318,8 +400,98 @@ fn load_session(conn: &Connection, id: SessionId) -> Result<(Session, Vec<Messag
                     .get::<_, Option<String>>(11)?
                     .map(|p| schema::parse_provider(11, &p))
                     .transpose()?,
+                sender_handle: r.get(12)?,
             })
         })?
         .collect::<Result<_, _>>()?;
+    Ok(messages)
+}
+
+fn load_session(conn: &Connection, id: SessionId) -> Result<(Session, Vec<Message>), StoreError> {
+    let key = id.0.to_string();
+    let session = conn
+        .query_row(
+            &format!("SELECT {SESSION_COLS} FROM sessions WHERE id = ?1"),
+            [&key],
+            session_from_row,
+        )
+        .optional()?
+        .ok_or(StoreError::NotFound)?;
+    let messages = load_messages(conn, &key)?;
     Ok((session, messages))
+}
+
+fn load_multi_session(
+    conn: &Connection,
+    id: MultiSessionId,
+) -> Result<LoadedMultiSession, StoreError> {
+    let tx = conn.unchecked_transaction()?;
+    let key = id.0.to_string();
+    let multi = tx
+        .query_row(
+            "SELECT id, workspace_id, title, preview_snippet, created_at, updated_at
+             FROM multi_sessions WHERE id = ?1",
+            [&key],
+            |r| {
+                Ok(MultiSession {
+                    id: schema::multi_session_id(0, &r.get::<_, String>(0)?)?,
+                    workspace_id: schema::workspace_id(1, &r.get::<_, String>(1)?)?,
+                    title: r.get(2)?,
+                    preview_snippet: r.get(3)?,
+                    created_at: schema::parse_ts(4, &r.get::<_, String>(4)?)?,
+                    updated_at: schema::parse_ts(5, &r.get::<_, String>(5)?)?,
+                })
+            },
+        )
+        .optional()?
+        .ok_or(StoreError::NotFound)?;
+
+    let mut member_stmt = tx.prepare(&format!(
+        "SELECT {SESSION_COLS} FROM sessions
+         WHERE multi_session_id = ?1
+         ORDER BY member_order, id"
+    ))?;
+    let member_rows: Vec<Session> = member_stmt
+        .query_map([&key], session_from_row)?
+        .collect::<Result<_, _>>()?;
+    let mut members = Vec::with_capacity(member_rows.len());
+    for session in member_rows {
+        let messages = load_messages(&tx, &session.id.0.to_string())?;
+        members.push((session, messages));
+    }
+
+    let mut team_stmt = tx.prepare(
+        "SELECT id, multi_session_id, seq, kind, target_handle, sender_handle, sender_provider,
+                content_text, created_at
+         FROM team_messages
+         WHERE multi_session_id = ?1
+         ORDER BY seq",
+    )?;
+    let team_messages = team_stmt
+        .query_map([&key], |r| {
+            let kind_str: String = r.get(3)?;
+            let kind = match kind_str.as_str() {
+                "user" => TeamMessageKind::User { target: r.get(4)? },
+                "broadcast" => TeamMessageKind::Broadcast {
+                    sender_handle: r.get::<_, String>(5)?,
+                    sender_provider: schema::parse_provider(6, &r.get::<_, String>(6)?)?,
+                },
+                other => return Err(schema::unknown_value(3, other.to_string())),
+            };
+            Ok(TeamMessage {
+                id: schema::parse_uuid(0, &r.get::<_, String>(0)?)?,
+                multi_session_id: schema::multi_session_id(1, &r.get::<_, String>(1)?)?,
+                seq: r.get(2)?,
+                kind,
+                content_text: r.get(7)?,
+                created_at: schema::parse_ts(8, &r.get::<_, String>(8)?)?,
+            })
+        })?
+        .collect::<Result<_, _>>()?;
+
+    Ok(LoadedMultiSession {
+        multi,
+        members,
+        team_messages,
+    })
 }

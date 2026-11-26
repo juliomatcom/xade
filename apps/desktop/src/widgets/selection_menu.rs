@@ -84,6 +84,9 @@ fn in_window(app: &App, ctx: &egui::Context, pos: Pos2) -> bool {
     app.open_windows.iter().any(|&kind| {
         let collapsed = match kind {
             WindowKind::Session(id) => app.sessions.get(&id).is_none_or(|vm| vm.collapsed),
+            WindowKind::MultiSession(id) => {
+                app.multi_sessions.get(&id).is_none_or(|vm| vm.collapsed)
+            }
             WindowKind::Editor(id) => app.editors.map.get(&id).is_none_or(|vm| vm.collapsed),
         };
         !collapsed && layer.id == win_id(kind)
@@ -102,8 +105,9 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         // Selections inside a text box (prompt, file) or outside an open window are not chat text.
         let in_text_box = in_text_box(ctx);
         let pos = ctx.input(|i| i.pointer.latest_pos());
-        app.selection_menu = match (in_text_box, pos, app.focused_session()) {
-            (false, Some(pos), Some(_)) if !text.trim().is_empty() && in_window(app, ctx, pos) => {
+        let can_quote = app.focused_session().is_some() || app.focused_multi_session().is_some();
+        app.selection_menu = match (in_text_box, pos, can_quote) {
+            (false, Some(pos), true) if !text.trim().is_empty() && in_window(app, ctx, pos) => {
                 Some(Pending {
                     text,
                     pos,
@@ -150,6 +154,12 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         } else if let Some(vm) = app
             .focused_session()
             .and_then(|id| app.sessions.get_mut(&id))
+        {
+            append_quote(&mut vm.input, &text);
+            vm.focus_input = true;
+        } else if let Some(vm) = app
+            .focused_multi_session()
+            .and_then(|id| app.multi_sessions.get_mut(&id))
         {
             append_quote(&mut vm.input, &text);
             vm.focus_input = true;
@@ -274,6 +284,8 @@ mod tests {
             usage: xade_core::UsageTotals::default(),
             created_at: now,
             updated_at: now,
+            multi_session_id: None,
+            agent_handle: None,
         };
         let vm = crate::app::SessionVm {
             cwd: dir.clone(),
