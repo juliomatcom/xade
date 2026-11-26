@@ -8,9 +8,12 @@ mod writer;
 
 use thiserror::Error;
 use time::OffsetDateTime;
-use xade_core::{ProviderId, SessionId, SessionOrigin, WorkspaceId};
+use uuid::Uuid;
+use xade_core::{
+    MultiMemberBadge, MultiSessionId, ProviderId, SessionId, SessionOrigin, WorkspaceId,
+};
 
-pub use reader::{ImportRef, StoreReader};
+pub use reader::{ImportRef, LoadedMultiSession, StoreReader};
 pub use schema::SCHEMA_VERSION;
 pub use writer::{PruneCounts, StoreWriter, WriteOp, WriterHandle};
 
@@ -39,10 +42,40 @@ pub struct Page<T> {
     pub page_size: u32,
 }
 
-/// Home-grid view of a session. `excerpt` is set by search when a message body matched.
+/// Identifies whether a Home/picker card opens a standalone session or a multi-session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CardTarget {
+    Session(SessionId),
+    Multi(MultiSessionId),
+}
+
+impl CardTarget {
+    pub fn session_id(self) -> Option<SessionId> {
+        match self {
+            CardTarget::Session(id) => Some(id),
+            CardTarget::Multi(_) => None,
+        }
+    }
+
+    pub fn multi_id(self) -> Option<MultiSessionId> {
+        match self {
+            CardTarget::Session(_) => None,
+            CardTarget::Multi(id) => Some(id),
+        }
+    }
+
+    pub fn uuid(self) -> Uuid {
+        match self {
+            CardTarget::Session(id) => id.0,
+            CardTarget::Multi(id) => id.0,
+        }
+    }
+}
+
+/// Home-grid view of a session or multi-session. `excerpt` is set by search when a message matched.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionCard {
-    pub id: SessionId,
+    pub target: CardTarget,
     pub workspace_id: WorkspaceId,
     pub title: String,
     pub preview_snippet: String,
@@ -50,9 +83,21 @@ pub struct SessionCard {
     pub updated_at: OffsetDateTime,
     pub origin: SessionOrigin,
     pub excerpt: Option<String>,
-    /// Provider-side id; matches running processes.
+    /// Provider-side id; matches running processes (standalone sessions only).
     pub provider_session_id: Option<String>,
     pub provider_id: ProviderId,
+    /// Ordered team roster for multi-session cards; empty for standalone sessions.
+    pub members: Vec<MultiMemberBadge>,
+}
+
+impl SessionCard {
+    pub fn session_id(&self) -> Option<SessionId> {
+        self.target.session_id()
+    }
+
+    pub fn multi_id(&self) -> Option<MultiSessionId> {
+        self.target.multi_id()
+    }
 }
 
 /// Slices `all` to the requested page; `page_size` of 0 is treated as 1.

@@ -8,12 +8,14 @@ use rusqlite::{Connection, OpenFlags};
 use time::format_description::well_known::Rfc3339;
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
-use xade_core::{Effort, ProviderId, QuotaKind, Role, SessionId, SessionOrigin, WorkspaceId};
+use xade_core::{
+    Effort, MultiSessionId, ProviderId, QuotaKind, Role, SessionId, SessionOrigin, WorkspaceId,
+};
 
 use crate::StoreError;
 
 /// Migrations in order; `PRAGMA user_version` is the count already applied.
-const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5];
+const MIGRATIONS: &[&str] = &[V1, V2, V3, V4, V5, V6];
 
 pub const SCHEMA_VERSION: u32 = MIGRATIONS.len() as u32;
 
@@ -35,6 +37,96 @@ UPDATE sessions SET sent_model_id = model_id, sent_effort = effort;
 /// The provider that wrote a message when it is not its session's (a fork's copied history).
 const V5: &str = "
 ALTER TABLE messages ADD COLUMN provider_id TEXT;
+";
+
+/// Multi-session teams, member links on sessions, broadcast attribution on messages, and team feed.
+const V6: &str = "
+CREATE TABLE multi_sessions (
+    id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    preview_snippet TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX multi_sessions_workspace_updated ON multi_sessions(workspace_id, updated_at DESC);
+CREATE INDEX multi_sessions_updated ON multi_sessions(updated_at DESC);
+
+ALTER TABLE sessions ADD COLUMN multi_session_id TEXT REFERENCES multi_sessions(id) ON DELETE CASCADE;
+ALTER TABLE sessions ADD COLUMN agent_handle TEXT;
+ALTER TABLE sessions ADD COLUMN member_order INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX sessions_multi ON sessions(multi_session_id) WHERE multi_session_id IS NOT NULL;
+CREATE UNIQUE INDEX sessions_multi_handle ON sessions(multi_session_id, agent_handle)
+    WHERE multi_session_id IS NOT NULL;
+
+ALTER TABLE messages ADD COLUMN sender_handle TEXT;
+
+CREATE TABLE team_messages (
+    id TEXT PRIMARY KEY,
+    multi_session_id TEXT NOT NULL REFERENCES multi_sessions(id) ON DELETE CASCADE,
+    seq INTEGER NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('user', 'broadcast')),
+    target_handle TEXT,
+    sender_handle TEXT,
+    sender_provider TEXT,
+    content_text TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    UNIQUE(multi_session_id, seq)
+);
+
+-- Keep member sessions out of search_index; multi-sessions are indexed via multi_sessions and team_messages.
+DROP TRIGGER sessions_search_ai;
+DROP TRIGGER sessions_search_au;
+DROP TRIGGER messages_search_ai;
+
+CREATE TRIGGER sessions_search_ai AFTER INSERT ON sessions
+WHEN new.multi_session_id IS NULL
+BEGIN
+    INSERT INTO search_index(text, session_id, source)
+    VALUES (new.title, new.id, 'title');
+END;
+
+CREATE TRIGGER sessions_search_au AFTER UPDATE OF title ON sessions
+WHEN new.multi_session_id IS NULL AND old.title <> new.title
+BEGIN
+    DELETE FROM search_index WHERE session_id = old.id AND source = 'title';
+    INSERT INTO search_index(text, session_id, source)
+    VALUES (new.title, new.id, 'title');
+END;
+
+CREATE TRIGGER messages_search_ai AFTER INSERT ON messages
+WHEN new.role IN ('user', 'assistant') AND new.content_text <> ''
+  AND EXISTS (SELECT 1 FROM sessions WHERE id = new.session_id AND multi_session_id IS NULL)
+BEGIN
+    INSERT INTO search_index(text, session_id, source)
+    VALUES (new.content_text, new.session_id, 'msg');
+END;
+
+CREATE TRIGGER multi_sessions_search_ai AFTER INSERT ON multi_sessions
+BEGIN
+    INSERT INTO search_index(text, session_id, source)
+    VALUES (new.title, new.id, 'multi_title');
+END;
+
+CREATE TRIGGER multi_sessions_search_au AFTER UPDATE OF title ON multi_sessions
+WHEN old.title <> new.title
+BEGIN
+    DELETE FROM search_index WHERE session_id = old.id AND source = 'multi_title';
+    INSERT INTO search_index(text, session_id, source)
+    VALUES (new.title, new.id, 'multi_title');
+END;
+
+CREATE TRIGGER multi_sessions_search_ad AFTER DELETE ON multi_sessions
+BEGIN
+    DELETE FROM search_index WHERE session_id = old.id;
+END;
+
+CREATE TRIGGER team_messages_search_ai AFTER INSERT ON team_messages
+WHEN new.content_text <> ''
+BEGIN
+    INSERT INTO search_index(text, session_id, source)
+    VALUES (new.content_text, new.multi_session_id, 'multi_msg');
+END;
 ";
 
 const V1: &str = "
@@ -209,6 +301,10 @@ pub(crate) fn session_id(idx: usize, s: &str) -> rusqlite::Result<SessionId> {
     parse_uuid(idx, s).map(SessionId)
 }
 
+pub(crate) fn multi_session_id(idx: usize, s: &str) -> rusqlite::Result<MultiSessionId> {
+    parse_uuid(idx, s).map(MultiSessionId)
+}
+
 pub(crate) fn workspace_id(idx: usize, s: &str) -> rusqlite::Result<WorkspaceId> {
     parse_uuid(idx, s).map(WorkspaceId)
 }
@@ -300,6 +396,10 @@ pub(crate) fn parse_quota_kind(idx: usize, s: &str) -> rusqlite::Result<QuotaKin
         "seven_day" => Ok(QuotaKind::SevenDay),
         other => Err(conversion_error(idx, UnknownValue(other.to_string()))),
     }
+}
+
+pub(crate) fn unknown_value(idx: usize, value: String) -> rusqlite::Error {
+    conversion_error(idx, UnknownValue(value))
 }
 
 pub(crate) fn to_i64(v: u64) -> i64 {

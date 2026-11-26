@@ -9,7 +9,7 @@ mod paste;
 pub(super) mod test_support;
 
 pub(crate) use controls::effort_choices;
-pub use mention_popup::insert_mentions;
+pub use mention_popup::{append_mentions, insert_mentions};
 pub use notes::set_attach_note;
 
 use egui::RichText;

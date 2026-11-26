@@ -184,6 +184,9 @@ impl ForkJob {
             .load_session(source)
             .await
             .map_err(|e| e.to_string())?;
+        if src.multi_session_id.is_some() {
+            return Err("multi-session members cannot be forked individually".into());
+        }
         if history.is_empty() {
             return Err("it has no messages yet".into());
         }
@@ -233,6 +236,8 @@ impl ForkJob {
             usage: UsageTotals::default(),
             created_at: now,
             updated_at: now,
+            multi_session_id: None,
+            agent_handle: None,
         };
         let count = history.len() as i64;
         let messages = history

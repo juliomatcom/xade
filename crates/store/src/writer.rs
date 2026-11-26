@@ -9,8 +9,8 @@ use std::thread;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use time::OffsetDateTime;
 use xade_core::{
-    panic_message, Effort, Message, QuotaWindow, Role, Session, SessionId, SessionOrigin,
-    UsageTotals, Workspace, WorkspaceId,
+    panic_message, Effort, Message, MultiSession, MultiSessionId, QuotaWindow, Role, Session,
+    SessionId, SessionOrigin, TeamMessage, TeamMessageKind, UsageTotals, Workspace, WorkspaceId,
 };
 
 use crate::schema::{self, fmt_ts, to_i64};
@@ -76,6 +76,20 @@ pub enum WriteOp {
     PruneThrowaway(mpsc::Sender<PruneCounts>),
     /// Deletes the session row; its messages and search rows go with it.
     DeleteSession(SessionId),
+    /// Inserts a multi-session and all its member sessions in one transaction.
+    InsertMultiSession {
+        multi: MultiSession,
+        members: Vec<Session>,
+    },
+    /// Appends a user or broadcast message to the shared Team feed and updates preview/timestamp.
+    InsertTeamMessage(TeamMessage),
+    /// Updates a multi-session's title and timestamp.
+    UpdateMultiSessionTitle {
+        id: MultiSessionId,
+        title: String,
+    },
+    /// Deletes the multi-session; member sessions, messages, team_messages and search rows cascade.
+    DeleteMultiSession(MultiSessionId),
     /// Replies once every earlier op has been applied.
     Flush(mpsc::Sender<()>),
     /// Panics the writer thread, to exercise its supervision. Debug builds only.
@@ -216,17 +230,29 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
                 params![id.0.to_string()],
             )?;
         }
-        WriteOp::InsertSession(s) => insert_session(&tx, &s)?,
+        WriteOp::InsertSession(s) => {
+            if s.multi_session_id.is_some() {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "InsertSession cannot insert a multi-session member".into(),
+                ));
+            }
+            insert_session(&tx, &s, 0)?;
+        }
         WriteOp::InsertSessionWithMessages {
             mut session,
             messages,
         } => {
+            if session.multi_session_id.is_some() {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "InsertSessionWithMessages cannot insert a multi-session member".into(),
+                ));
+            }
             if let Some(m) = messages.iter().rev().find(|m| {
                 matches!(m.role, Role::User | Role::Assistant) && !m.content_text.is_empty()
             }) {
                 session.preview_snippet = tail_chars(&m.content_text, PREVIEW_CHARS);
             }
-            insert_session(&tx, &session)?;
+            insert_session(&tx, &session, 0)?;
             insert_messages(&tx, &session.id.0.to_string(), messages)?;
         }
         WriteOp::MarkSent {
@@ -287,8 +313,9 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
         WriteOp::InsertMessage(m) => {
             tx.execute(
                 "INSERT INTO messages (id, session_id, seq, role, content_text, thinking_text,
-                    tool_name, tool_use_id, tool_payload_json, is_error, created_at, provider_id)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                    tool_name, tool_use_id, tool_payload_json, is_error, created_at, provider_id,
+                    sender_handle)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
                 params![
                     m.id.to_string(),
                     m.session_id.0.to_string(),
@@ -302,6 +329,7 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
                     m.is_error,
                     fmt_ts(m.created_at),
                     m.provider_id.map(schema::provider_str),
+                    m.sender_handle,
                 ],
             )?;
             let preview = matches!(m.role, Role::User | Role::Assistant)
@@ -365,7 +393,91 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
         }
         WriteOp::DeleteSession(id) => {
             tx.execute(
-                "DELETE FROM sessions WHERE id = ?1",
+                "DELETE FROM sessions WHERE id = ?1 AND multi_session_id IS NULL",
+                params![id.0.to_string()],
+            )?;
+        }
+        WriteOp::InsertMultiSession { multi, members } => {
+            if members.is_empty() {
+                return Err(rusqlite::Error::InvalidParameterName(
+                    "InsertMultiSession requires at least one member".into(),
+                ));
+            }
+            for member in &members {
+                if member.multi_session_id != Some(multi.id)
+                    || member.workspace_id != multi.workspace_id
+                    || member.origin != SessionOrigin::Xade
+                    || member.agent_handle.as_deref().is_none_or(str::is_empty)
+                {
+                    return Err(rusqlite::Error::InvalidParameterName(
+                        "multi-session member violates team invariants".into(),
+                    ));
+                }
+            }
+            tx.execute(
+                "INSERT INTO multi_sessions (id, workspace_id, title, preview_snippet,
+                    created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    multi.id.0.to_string(),
+                    multi.workspace_id.0.to_string(),
+                    multi.title,
+                    multi.preview_snippet,
+                    fmt_ts(multi.created_at),
+                    fmt_ts(multi.updated_at),
+                ],
+            )?;
+            for (idx, member) in members.iter().enumerate() {
+                insert_session(&tx, member, idx as i64)?;
+            }
+        }
+        WriteOp::InsertTeamMessage(tm) => {
+            let (kind, target_handle, sender_handle, sender_provider) = match &tm.kind {
+                TeamMessageKind::User { target } => ("user", target.as_deref(), None, None),
+                TeamMessageKind::Broadcast {
+                    sender_handle,
+                    sender_provider,
+                } => (
+                    "broadcast",
+                    None,
+                    Some(sender_handle.as_str()),
+                    Some(schema::provider_str(*sender_provider)),
+                ),
+            };
+            tx.execute(
+                "INSERT INTO team_messages (id, multi_session_id, seq, kind, target_handle,
+                    sender_handle, sender_provider, content_text, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    tm.id.to_string(),
+                    tm.multi_session_id.0.to_string(),
+                    tm.seq,
+                    kind,
+                    target_handle,
+                    sender_handle,
+                    sender_provider,
+                    tm.content_text,
+                    fmt_ts(tm.created_at),
+                ],
+            )?;
+            let preview = (!tm.content_text.trim().is_empty())
+                .then(|| tail_chars(&tm.content_text, PREVIEW_CHARS));
+            tx.execute(
+                "UPDATE multi_sessions SET preview_snippet = COALESCE(?2, preview_snippet),
+                    updated_at = ?3
+                 WHERE id = ?1",
+                params![tm.multi_session_id.0.to_string(), preview, now],
+            )?;
+        }
+        WriteOp::UpdateMultiSessionTitle { id, title } => {
+            tx.execute(
+                "UPDATE multi_sessions SET title = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id.0.to_string(), title, now],
+            )?;
+        }
+        WriteOp::DeleteMultiSession(id) => {
+            tx.execute(
+                "DELETE FROM multi_sessions WHERE id = ?1",
                 params![id.0.to_string()],
             )?;
         }
@@ -376,14 +488,15 @@ fn apply(conn: &mut Connection, op: WriteOp) -> rusqlite::Result<()> {
     tx.commit()
 }
 
-fn insert_session(tx: &Transaction, s: &Session) -> rusqlite::Result<()> {
+fn insert_session(tx: &Transaction, s: &Session, member_order: i64) -> rusqlite::Result<()> {
     tx.execute(
         "INSERT INTO sessions (id, workspace_id, provider_id, provider_session_id, title,
             preview_snippet, model_id, effort, auto_mode, context_tokens_used,
             context_window_max, input_tokens, output_tokens, cache_read_tokens, cost_usd,
-            created_at, updated_at, origin, sent_model_id, sent_effort)
+            created_at, updated_at, origin, sent_model_id, sent_effort,
+            multi_session_id, agent_handle, member_order)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17,
-            ?18, ?19, ?20)",
+            ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             s.id.0.to_string(),
             s.workspace_id.0.to_string(),
@@ -405,6 +518,9 @@ fn insert_session(tx: &Transaction, s: &Session) -> rusqlite::Result<()> {
             schema::origin_str(s.origin),
             s.sent_model_id,
             schema::effort_str(s.sent_effort),
+            s.multi_session_id.map(|id| id.0.to_string()),
+            s.agent_handle,
+            member_order,
         ],
     )?;
     Ok(())
@@ -417,8 +533,9 @@ fn insert_messages(
 ) -> rusqlite::Result<()> {
     let mut insert = tx.prepare(
         "INSERT INTO messages (id, session_id, seq, role, content_text, thinking_text,
-            tool_name, tool_use_id, tool_payload_json, is_error, created_at, provider_id)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            tool_name, tool_use_id, tool_payload_json, is_error, created_at, provider_id,
+            sender_handle)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )?;
     for m in messages {
         insert.execute(params![
@@ -434,6 +551,7 @@ fn insert_messages(
             m.is_error,
             fmt_ts(m.created_at),
             m.provider_id.map(schema::provider_str),
+            m.sender_handle,
         ])?;
     }
     Ok(())
@@ -459,7 +577,8 @@ fn prune_throwaway(tx: &Transaction) -> rusqlite::Result<PruneCounts> {
     let empty: Vec<(String, String)> = tx
         .prepare(
             "SELECT id, root_path FROM workspaces
-             WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE workspace_id = workspaces.id)",
+             WHERE NOT EXISTS (SELECT 1 FROM sessions WHERE workspace_id = workspaces.id)
+               AND NOT EXISTS (SELECT 1 FROM multi_sessions WHERE workspace_id = workspaces.id)",
         )?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;

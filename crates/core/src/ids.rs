@@ -7,6 +7,9 @@ pub struct WorkspaceId(pub Uuid);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub Uuid);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct MultiSessionId(pub Uuid);
+
 impl WorkspaceId {
     pub fn new() -> Self {
         Self(Uuid::new_v4())
@@ -26,6 +29,18 @@ impl SessionId {
 }
 
 impl Default for SessionId {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MultiSessionId {
+    pub fn new() -> Self {
+        Self(Uuid::new_v4())
+    }
+}
+
+impl Default for MultiSessionId {
     fn default() -> Self {
         Self::new()
     }

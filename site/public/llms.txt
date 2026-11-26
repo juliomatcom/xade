@@ -9,6 +9,7 @@
 
 ## Key facts
 - Runs multiple Claude Code and Antigravity sessions in side-by-side windows; sessions are saved locally (SQLite) and searchable.
+- Multi-Session: a team of models, from one or both providers, in one window and one working folder. The user messages all members or one with `#handle:`. Normal replies are shown only to the user; `<broadcast>` blocks reach the teammates. A Team feed plus a tab per member, Stop All, and a pause after 12 broadcast rounds in a row. Guide: https://github.com/juliomatcom/xade/blob/main/docs/multi-session.md
 - Forks a session to the other provider: the source agent writes a short state summary and the new one continues from it.
 - The top bar shows usage quota per provider: Claude 5-hour and weekly usage, and Antigravity 5-hour and weekly usage per model group.
 - Uses your existing CLI login, settings, CLAUDE.md files, MCP servers, skills and permission rules. No API keys to paste; Xade never reads your credentials.

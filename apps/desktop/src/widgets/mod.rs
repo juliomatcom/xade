@@ -7,6 +7,7 @@ pub mod diff_modal;
 pub mod file_picker;
 pub mod keymaps_modal;
 pub mod markdown;
+pub mod multi_modal;
 pub mod path_links;
 pub mod quit_modal;
 pub mod selection_menu;

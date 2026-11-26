@@ -1,7 +1,7 @@
-//! Confirm modal before deleting a session forever.
+//! Confirm modal before deleting a session or multi-session forever.
 
 use egui::RichText;
-use xade_core::{ProviderId, SessionId};
+use xade_core::{MultiSessionId, ProviderId, SessionId};
 use xade_runtime::ManagerCmd;
 
 use crate::app::App;
@@ -10,9 +10,15 @@ use crate::theme;
 /// Minimum width of the modal's content.
 const MIN_WIDTH: f32 = 480.0;
 
-/// A session waiting for the user to confirm its deletion.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PendingDeleteTarget {
+    Session(SessionId),
+    Multi(MultiSessionId),
+}
+
+/// A session or multi-session waiting for the user to confirm its deletion.
 pub struct PendingDelete {
-    pub id: SessionId,
+    pub target: PendingDeleteTarget,
     pub title: String,
     pub provider: ProviderId,
 }
@@ -30,21 +36,39 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
     let Some(p) = app.pending_delete.as_ref() else {
         return;
     };
+    let is_multi = matches!(p.target, PendingDeleteTarget::Multi(_));
     let title = if p.title.is_empty() {
-        "New session"
+        if is_multi {
+            "New Multi-Session"
+        } else {
+            "New session"
+        }
     } else {
         &p.title
     };
-    let body = format!(
-        "\u{201c}{title}\u{201d} will be removed from Xade and its {} will be deleted. This \
-         can't be undone.",
-        history(p.provider)
-    );
+    let (heading, body) = if is_multi {
+        (
+            "Delete multi-session forever?",
+            format!(
+                "\u{201c}{title}\u{201d} and all of its member sessions (plus their CLI \
+                 transcripts) will be deleted. This can't be undone."
+            ),
+        )
+    } else {
+        (
+            "Delete session forever?",
+            format!(
+                "\u{201c}{title}\u{201d} will be removed from Xade and its {} will be deleted. \
+                 This can't be undone.",
+                history(p.provider)
+            ),
+        )
+    };
     let (mut delete, mut cancel) = (false, false);
     let resp =
         crate::widgets::modal(ctx, egui::Id::unique("confirm_delete_session")).show(ctx, |ui| {
             ui.set_min_width(MIN_WIDTH);
-            ui.label(RichText::new("Delete session forever?").strong().size(18.0));
+            ui.label(RichText::new(heading).strong().size(18.0));
             ui.add_space(6.0);
             ui.label(body);
             ui.add_space(12.0);
@@ -60,9 +84,16 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         });
     if delete {
         if let Some(p) = app.pending_delete.take() {
-            let _ = app
-                .cmd_tx
-                .send(ManagerCmd::DeleteSession { session_id: p.id });
+            match p.target {
+                PendingDeleteTarget::Session(id) => {
+                    let _ = app
+                        .cmd_tx
+                        .send(ManagerCmd::DeleteSession { session_id: id });
+                }
+                PendingDeleteTarget::Multi(id) => {
+                    let _ = app.cmd_tx.send(ManagerCmd::DeleteMulti { multi_id: id });
+                }
+            }
         }
     } else if cancel || resp.should_close() {
         app.pending_delete = None;
@@ -87,7 +118,7 @@ mod tests {
         let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
         app.cmd_tx = tx;
         app.pending_delete = Some(PendingDelete {
-            id: SessionId::new(),
+            target: PendingDeleteTarget::Session(SessionId::new()),
             title: "Fix the parser".into(),
             provider: ProviderId::Claude,
         });

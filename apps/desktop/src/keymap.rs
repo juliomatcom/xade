@@ -13,11 +13,13 @@ pub const CHORD_TIMEOUT: Duration = Duration::from_millis(1500);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     NewSession,
+    NewMultiSession,
     NewFile,
     OpenFile,
     Save,
     SaveAs,
     OpenPicker,
+    SearchSessions,
     QuickOpen,
     Find,
     Send,
@@ -167,6 +169,13 @@ static DEFS: &[Def] = &[
         "cmd+t",
     ),
     row(
+        "new_multi_session",
+        Action::NewMultiSession,
+        Group::Sessions,
+        "New multi-session in the selected workspace",
+        "cmd+shift+t",
+    ),
+    row(
         "new_file",
         Action::NewFile,
         Group::Files,
@@ -200,6 +209,13 @@ static DEFS: &[Def] = &[
         Group::Sessions,
         "Open session picker",
         "cmd+shift+p",
+    ),
+    row(
+        "search_sessions",
+        Action::SearchSessions,
+        Group::Sessions,
+        "Fuzzy search sessions",
+        "cmd+shift+f",
     ),
     row(
         "quick_open",
@@ -758,6 +774,19 @@ mod tests {
     fn shift_variants_do_not_cross_fire() {
         let now = Instant::now();
         let mut c = Chord::default();
+        assert_eq!(press(&mut c, now, CMD, Key::F), Feed::Fired(Action::Find));
+        assert_eq!(
+            press(&mut c, now, CMD_SHIFT, Key::F),
+            Feed::Fired(Action::SearchSessions)
+        );
+        assert_eq!(
+            press(&mut c, now, CMD, Key::T),
+            Feed::Fired(Action::NewSession)
+        );
+        assert_eq!(
+            press(&mut c, now, CMD_SHIFT, Key::T),
+            Feed::Fired(Action::NewMultiSession)
+        );
         assert_eq!(press(&mut c, now, CMD, Key::H), Feed::Ignored);
         assert_eq!(
             press(&mut c, now, CMD_SHIFT, Key::H),

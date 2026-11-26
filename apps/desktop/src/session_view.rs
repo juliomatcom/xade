@@ -263,7 +263,7 @@ fn fork_strips(ui: &mut egui::Ui, vm: &SessionVm) -> bool {
     reload
 }
 
-fn status_dot(ui: &mut egui::Ui, status: &SessionStatus) {
+pub(crate) fn status_dot(ui: &mut egui::Ui, status: &SessionStatus) {
     let (color, tip) = match status {
         SessionStatus::Idle => (theme::text_muted(), "Idle".to_string()),
         SessionStatus::Streaming => (theme::accent(), "Streaming".to_string()),
@@ -285,7 +285,7 @@ fn status_dot(ui: &mut egui::Ui, status: &SessionStatus) {
 }
 
 /// Approve / Deny for tools that are not reviewed in the diff modal.
-fn banner(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
+pub(crate) fn banner(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     let Some(p) = vm.pending_permission.as_ref() else {
         return;
     };

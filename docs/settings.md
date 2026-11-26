@@ -27,7 +27,9 @@ The `shortcuts` object maps an action name to its keys: `"cmd+t"`, or two keys f
 | Key | Default | Action |
 |---|---|---|
 | `new_session` | `cmd+t` | New session in the selected workspace |
+| `new_multi_session` | `cmd+shift+t` | New multi-session in the selected workspace |
 | `open_picker` | `cmd+shift+p` | Open session picker |
+| `search_sessions` | `cmd+shift+f` | Fuzzy search sessions |
 | `close_window` | `cmd+w` | Close the focused window |
 
 **Files**
@@ -103,4 +105,6 @@ The `theme` object gives colors as `#rrggbb` (or `#rrggbbaa`) hex by key. Every 
 | `danger` | `#f85149` | Errors, failed tool calls and destructive buttons. |
 | `diff_del_bg` | `#4b1d22` | Removed lines in the diff view. |
 | `diff_add_bg` | `#1a3d2a` | Added lines in the diff view. |
+| `broadcast_bg` | `#141d29` | Model-to-model broadcast container fill in Multi-Session views. |
+| `broadcast_border` | `#2e4d70` | Model-to-model broadcast container border in Multi-Session views. |
 | `claude` | `#d97757` | The Claude origin badge and avatar tint. |

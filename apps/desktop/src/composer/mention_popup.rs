@@ -159,23 +159,29 @@ fn mention(cwd: &Path, path: &Path) -> String {
     mention::token(&path.strip_prefix(cwd).unwrap_or(path).to_string_lossy())
 }
 
-/// Appends a mention per attachable path to the input, separated by spaces. Files refused
-/// (binary, over the size limit, unreadable) are explained in a note above the input.
-pub fn insert_mentions(vm: &mut SessionVm, paths: &[PathBuf]) {
+/// Appends a mention per attachable path to `input`, separated by spaces. Returns a rejection
+/// notice when any path is refused (binary, over the size limit, unreadable).
+pub fn append_mentions(input: &mut String, cwd: &Path, paths: &[PathBuf]) -> Option<String> {
     let mut rejected = Vec::new();
     for path in paths {
         if let Err(why) = attach::check(path) {
             rejected.push((path.clone(), why));
             continue;
         }
-        if !vm.input.is_empty() && !vm.input.ends_with(char::is_whitespace) {
-            vm.input.push(' ');
+        if !input.is_empty() && !input.ends_with(char::is_whitespace) {
+            input.push(' ');
         }
-        vm.input.push_str(&mention(&vm.cwd, path));
-        vm.input.push(' ');
+        input.push_str(&mention(cwd, path));
+        input.push(' ');
     }
-    if !rejected.is_empty() {
-        set_attach_note(vm, attach::rejected_message(&rejected));
+    (!rejected.is_empty()).then(|| attach::rejected_message(&rejected))
+}
+
+/// Appends a mention per attachable path to the input, separated by spaces. Files refused
+/// (binary, over the size limit, unreadable) are explained in a note above the input.
+pub fn insert_mentions(vm: &mut SessionVm, paths: &[PathBuf]) {
+    if let Some(msg) = append_mentions(&mut vm.input, &vm.cwd, paths) {
+        set_attach_note(vm, msg);
     }
 }
 

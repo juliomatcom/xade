@@ -17,3 +17,5 @@
 - Deltas and session status are never stored; there is no attachments table yet.
 - Every Import skips sessions whose cwd is missing or under a temp root (`throwaway::is_throwaway_dir`), first running `WriteOp::PruneThrowaway`: deletes `claude_code` sessions in throwaway workspaces, then session-less throwaway workspaces.
 - `WriteOp::DeleteSession` removes the row (messages and search rows cascade); `ManagerCmd::DeleteSession` is Xade-origin only, closes the live session, deletes the CLI transcript first (provider error aborts, nothing deleted), so Import cannot resurrect it.
+- Multi-Sessions (V6): `multi_sessions` and `team_messages` tables link immutable member `sessions`; member rows are excluded from Home listing, `search_index`, `last_model_choice` and `last_provider` (only the parent and `team_messages` are listed and FTS-indexed), while `import_index` includes them so Import never duplicates them.
+- `WriteOp::DeleteSession` refuses multi-session member rows; `WriteOp::DeleteMultiSession` deletes the parent, member sessions, `team_messages` and search rows atomically.

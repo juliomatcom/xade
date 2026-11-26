@@ -10,13 +10,17 @@ const REPO = "https://github.com/juliomatcom/xade";
 const RELEASES = `${REPO}/releases/latest`;
 const INSTALL = `curl -fsSL https://raw.githubusercontent.com/juliomatcom/xade/main/scripts/install.sh | sh`;
 
-// Set to a hosted demo (e.g. "/demo.mp4") to replace the screenshot with a video.
-const VIDEO_SRC = "";
-
 const pillars = [
   ["All your subscriptions, one place", "Bring the plans you already pay for. Xade drives the agent CLIs you have installed and logged in, so there are no API keys to paste and nothing to set up again."],
   ["Hand work between providers", "Fork a session to the other provider when you hit a limit or want a second opinion. The new agent continues from a summary of the work, without leaving the workspace."],
   ["Cloud or local models", "One interface for hosted agents and models running on your own machine. Pick the right brain for each job."],
+];
+
+const team = [
+  ["Pick the team", "Mix models and providers, or run the same model twice. Each one gets a handle, like #opus-1 or #neon-1, with its own thinking level and Auto setting."],
+  ["Talk to all, or one", "A message goes to everyone. Start it with #handle: to brief just one, such as a lead who plans and hands off."],
+  ["They talk to each other", "A reply is for your eyes only. What a model marks as a broadcast reaches its teammates, so plans, API contracts and test results move without you copy-pasting."],
+  ["You stay in charge", "The Team feed shows every reply and broadcast, and each model's tab shows its tool calls and edits. Stop All halts everyone, and long model-to-model chains pause for you."],
 ];
 
 const features = [
@@ -87,6 +91,7 @@ export default function App() {
           <img src="/favicon.svg" alt="Xade logo" className="size-7" /> Xade
         </a>
         <nav aria-label="Main" className="flex items-center gap-5 text-sm font-medium text-white">
+          <a href="#multi-session" className="hidden transition hover:text-jade md:inline">Multi-Session</a>
           <a href="#why" className="hidden transition hover:text-jade sm:inline">Why Xade</a>
           <a href="#install" className="transition hover:text-jade">Install</a>
           <a href="#download" className="transition hover:text-jade">Download</a>
@@ -105,7 +110,7 @@ export default function App() {
             <span className="bg-gradient-to-r from-emerald-300 to-jade-deep bg-clip-text text-transparent">in one fast workspace.</span>
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-slate-400">
-            Xade is a native desktop app that runs your AI coding agents side by side. Use the subscriptions you already have, hand tasks between providers, and review every change before it lands. Native and built in Rust, so it stays fast however many sessions you run. Simple, opinionated, never boring.
+            Xade is a native desktop app that runs your AI coding agents side by side, or puts them on one team. Use the subscriptions you already have, hand tasks between providers, and review every change in a diff. Native and built in Rust, so it stays fast however many sessions you run. Simple, opinionated, never boring.
           </p>
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <a href="#download" className="rounded-lg bg-jade px-6 py-3 text-sm font-semibold text-ink transition hover:bg-emerald-300">Download Xade</a>
@@ -116,12 +121,38 @@ export default function App() {
           <p className="mt-4 text-sm text-slate-500">Free and open source · Powered by Rust · macOS and Linux · Pronounced "zade"</p>
 
           <figure className="mx-auto mt-14 max-w-6xl">
-            {VIDEO_SRC ? (
-              <video src={VIDEO_SRC} poster="/app.webp" autoPlay muted loop playsInline className="w-full rounded-2xl shadow-[0_30px_120px_-20px_rgb(16_185_129/0.3)]" aria-label="Xade running Claude, Codex and Google sessions side by side" />
-            ) : (
-              <Carousel />
-            )}
+            <Carousel />
           </figure>
+        </section>
+
+        <section id="multi-session" aria-labelledby="multi-session-title" className="scroll-mt-24 pb-24">
+          <div className="text-center">
+            <p className="font-mono text-sm uppercase tracking-widest text-jade">New: Multi-Session</p>
+            <h2 id="multi-session-title" className="mx-auto mt-3 max-w-3xl text-3xl font-semibold tracking-tight text-white sm:text-4xl">A team of models, working in one window</h2>
+            <p className="mx-auto mt-3 max-w-2xl text-slate-400">
+              Put several models on the same task in the same folder. One plans, others build and test, and they hand work to each other while you watch.
+            </p>
+          </div>
+          <div className="mt-12 grid items-center gap-8 lg:grid-cols-2">
+            <ol className="space-y-4">
+              {team.map(([t, d], n) => (
+                <li key={t} className="flex gap-4 rounded-xl border border-edge bg-slab/60 p-5">
+                  <span aria-hidden="true" className="font-mono text-sm leading-6 text-jade">{n + 1}</span>
+                  <div>
+                    <h3 className="font-semibold text-white">{t}</h3>
+                    <p className="mt-1 text-sm leading-relaxed text-slate-400">{d}</p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+            <figure>
+              <img src="/multi-session-new.webp" alt="Xade's New Multi-Session dialog with three members: #opus-1 and #sonnet-1 on Claude and #neon-1 on Antigravity" width={1620} height={940} loading="lazy" className="w-full rounded-xl border border-edge" />
+              <figcaption className="mt-3 text-center text-sm text-slate-500">
+                Open it with the Multi button, or Cmd+Shift+T (Ctrl+Shift+T on Linux). All members share one working folder.{" "}
+                <a href={`${REPO}/blob/main/docs/multi-session.md`} rel="noopener" className="underline hover:text-white">Read the guide</a>
+              </figcaption>
+            </figure>
+          </div>
         </section>
 
         <section aria-labelledby="speed" className="pb-24">
@@ -274,6 +305,7 @@ export default function App() {
             <nav aria-label="Product">
               <h2 className="text-sm font-semibold text-white">Product</h2>
               <ul className="mt-4 space-y-3 text-sm text-slate-400">
+                <li><a href="#multi-session" className="hover:text-white">Multi-Session</a></li>
                 <li><a href="#why" className="hover:text-white">Why Xade</a></li>
                 <li><a href="#install" className="hover:text-white">Install</a></li>
                 <li><a href="#download" className="hover:text-white">Download</a></li>

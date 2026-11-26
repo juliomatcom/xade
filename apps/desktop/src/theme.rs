@@ -135,10 +135,13 @@ palette! {
     danger = "#f85149";
     diff_del_bg = "#4b1d22";
     diff_add_bg = "#1a3d2a";
+    /// Model-to-model broadcast container fill and border in Multi-Session views.
+    broadcast_bg = "#141d29";
+    broadcast_border = "#2e4d70";
     claude = "#d97757";
 }
 
-const RADIUS: u8 = 6;
+const RADIUS: u8 = 3;
 
 /// Applied once at startup; dark only.
 pub fn apply(ctx: &egui::Context) {

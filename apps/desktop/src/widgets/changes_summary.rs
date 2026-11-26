@@ -197,6 +197,7 @@ mod tests {
             is_error: err,
             created_at: OffsetDateTime::now_utc(),
             provider_id: None,
+            sender_handle: None,
         }
     }
 

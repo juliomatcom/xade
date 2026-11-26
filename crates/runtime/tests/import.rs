@@ -180,7 +180,8 @@ async fn import_is_idempotent_and_groups_by_workspace() {
         .iter()
         .any(|w| w.id == second.workspace_id && w.root_path == elsewhere));
 
-    let (row, msgs) = h.reader.load_session(first.id).await.unwrap();
+    let first_id = first.session_id().unwrap();
+    let (row, msgs) = h.reader.load_session(first_id).await.unwrap();
     assert_eq!(row.origin, SessionOrigin::ClaudeCode);
     assert_eq!(row.provider_session_id.as_deref(), Some("a"));
     assert_eq!(
@@ -195,7 +196,7 @@ async fn import_is_idempotent_and_groups_by_workspace() {
     newer.messages.truncate(1);
     provider.import.lock().unwrap()[0] = newer;
     assert_eq!(import(&mut h).await, (0, 1));
-    let (row, msgs) = h.reader.load_session(first.id).await.unwrap();
+    let (row, msgs) = h.reader.load_session(first_id).await.unwrap();
     assert_eq!((row.title.as_str(), msgs.len()), ("first renamed", 1));
     assert_eq!(import(&mut h).await, (0, 0));
 }
@@ -249,8 +250,9 @@ async fn xade_sessions_and_live_sessions_are_never_overwritten() {
         .unwrap()
         .items
         .remove(0);
+    let cc_id = cc.session_id().unwrap();
     let spawned_before = provider.spawns.lock().unwrap().len();
-    h.tx.send(ManagerCmd::Open { session_id: cc.id }).unwrap();
+    h.tx.send(ManagerCmd::Open { session_id: cc_id }).unwrap();
     h.until_status(5, SessionStatus::Idle).await;
     assert_eq!(
         provider.spawns.lock().unwrap().len(),
@@ -260,15 +262,15 @@ async fn xade_sessions_and_live_sessions_are_never_overwritten() {
     provider.import.lock().unwrap()[1] = imported("cc", "cc newer", &h.cwd, 0);
     assert_eq!(import(&mut h).await, (0, 0), "live session is skipped");
     assert_eq!(
-        h.reader.load_session(cc.id).await.unwrap().0.title,
+        h.reader.load_session(cc_id).await.unwrap().0.title,
         "cc one"
     );
 
-    h.tx.send(ManagerCmd::Close { session_id: cc.id }).unwrap();
+    h.tx.send(ManagerCmd::Close { session_id: cc_id }).unwrap();
     h.until_status(5, SessionStatus::Closed).await;
     assert_eq!(import(&mut h).await, (0, 1));
     assert_eq!(
-        h.reader.load_session(cc.id).await.unwrap().0.title,
+        h.reader.load_session(cc_id).await.unwrap().0.title,
         "cc newer"
     );
 }
@@ -383,10 +385,11 @@ async fn delete_refuses_sessions_not_created_in_xade() {
         .items
         .remove(0);
 
-    h.tx.send(ManagerCmd::DeleteSession { session_id: cc.id })
+    let cc_id = cc.session_id().unwrap();
+    h.tx.send(ManagerCmd::DeleteSession { session_id: cc_id })
         .unwrap();
     h.until(5, |e| matches!(e.kind, AppEventKind::Error(_)))
         .await;
     assert!(provider.deleted.lock().unwrap().is_empty());
-    assert!(h.reader.load_session(cc.id).await.is_ok());
+    assert!(h.reader.load_session(cc_id).await.is_ok());
 }

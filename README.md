@@ -8,13 +8,14 @@ Xade is short for X-provider Agentic Development Environment (pronounced "zade")
 
 **It uses the agent clients you already have configured.** Xade drives your installed Claude Code (`claude`) and Antigravity (`agy`) CLIs as is: your login, settings, `CLAUDE.md` files, MCP servers, skills and permission rules all apply. There is nothing to set up again, no API keys to paste, and your existing Claude Code sessions can be imported and resumed.
 
-<!-- Screenshot / demo video coming soon -->
+<p align="center"><a href="https://xade.pro/"><img src="docs/images/multi-session.webp" alt="Xade demo: three models on one Multi-Session team plan, code and test a feature while a solo session runs beside them" width="100%"></a></p>
 
 **Simple. Opinionated. Really fast.** Xade does one thing well, makes the choices for you, and never trades speed for features. These three rules lead every change to the project.
 
 ## What it does
 
 - Run multiple Claude Code and Antigravity sessions in side-by-side windows, and fork a session to the other provider.
+- Start a [Multi-Session](docs/multi-session.md): a team of models in one window and one folder. Message all of them or one `#handle`, and they hand work to each other.
 - The top bar shows usage quota for each provider, with reset times on hover.
 - Select message text to copy or quote it into the prompt. Links in chat open in your default browser.
 - Sessions are saved locally and searchable. Typos are fine in titles.
@@ -87,6 +88,12 @@ Settings live in `settings.json` in the data folder; open it with Cmd+, (Ctrl+, 
 
 ```sh
 cargo test --workspace
+```
+
+The demo video and screenshots are recorded from the real app with scripted models. To record them again (needs ffmpeg and ImageMagick):
+
+```sh
+./scripts/record-demo.sh
 ```
 
 Project notes for contributors and AI agents live in `wiki-llm/`. Start at `wiki-llm/index.md`.

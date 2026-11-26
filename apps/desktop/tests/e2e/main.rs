@@ -11,5 +11,6 @@ mod chat;
 mod fake_provider;
 mod files;
 mod history;
+mod multi_session;
 mod support;
 mod workspace;

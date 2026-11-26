@@ -36,6 +36,8 @@ pub struct HomeState {
     pub scope: Option<WorkspaceId>,
     pub search: String,
     pub search_changed_at: Option<Instant>,
+    /// Focus the top-bar search input on the next frame (set by `Action::SearchSessions`).
+    pub focus_search: bool,
     /// Zero-based.
     pub page: u32,
     pub cards: Vec<SessionCard>,
@@ -57,9 +59,9 @@ pub struct HomeState {
     pub md_cache: std::cell::RefCell<egui_commonmark::CommonMarkCache>,
 }
 
-/// Room the session controls container, view toggle and right-hand cluster (buttons, quota
-/// meters) take; the top-bar test fails if they outgrow it.
-const TOP_BAR_RESERVED: f32 = 290.0 + 214.0 + 180.0;
+/// Room the view toggle and right-hand cluster (buttons, quota meters) take; the top-bar test
+/// fails if they outgrow it.
+const TOP_BAR_RESERVED: f32 = 214.0 + 180.0;
 
 /// The search field shrinks with the space left of `TOP_BAR_RESERVED`.
 fn search_width(available: f32) -> f32 {
@@ -110,6 +112,7 @@ fn view_toggle(app: &mut App, ui: &mut egui::Ui, area: egui::Rect) {
                 .clicked();
             if to_home {
                 app.view = View::Home;
+                app.refresh_cards();
             } else if to_ws && !app.open_windows.is_empty() {
                 app.view = View::Workspace;
             }
@@ -131,15 +134,23 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             app_menu(app, ui);
             scope_dropdown(app, ui);
-            let resp = ui.add(
-                egui::TextEdit::singleline(&mut app.home.search)
-                    .hint_text("Fuzzy search sessions")
-                    .desired_width(search_width(ui.available_width())),
-            );
+            session_controls(app, ui);
+            let resp = ui
+                .add(
+                    egui::TextEdit::singleline(&mut app.home.search)
+                        .hint_text("Fuzzy search sessions")
+                        .desired_width(search_width(ui.available_width())),
+                )
+                .on_hover_text(format!(
+                    "Fuzzy search sessions ({})",
+                    keymap::shortcut_text(Action::SearchSessions)
+                ));
+            if std::mem::take(&mut app.home.focus_search) {
+                resp.request_focus();
+            }
             if resp.changed() {
                 app.home.search_changed_at = Some(Instant::now());
             }
-            session_controls(app, ui);
             let left_end = ui.min_rect().right();
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 settings_button(app, ui);
@@ -290,6 +301,24 @@ fn session_controls(app: &mut App, ui: &mut egui::Ui) {
                     ));
                 if new.clicked() {
                     app.new_session();
+                }
+                let disabled_tip = if app.home.scope.is_none() {
+                    "Select a workspace in the sidebar first"
+                } else {
+                    "No provider is available"
+                };
+                let multi_btn = ui
+                    .add_enabled(
+                        enabled,
+                        egui::Button::new(icons::with(icons::MULTI, "Multi")),
+                    )
+                    .on_disabled_hover_text(disabled_tip)
+                    .on_hover_text(format!(
+                        "New multi-session ({})",
+                        keymap::shortcut_text(Action::NewMultiSession)
+                    ));
+                if multi_btn.clicked() {
+                    app.open_multi_create();
                 }
                 provider_dropdown(app, ui);
             });
@@ -804,6 +833,24 @@ enum CardClick {
 
 /// Side of the trash button in a card's bottom-right corner.
 const TRASH_SIZE: f32 = 22.0;
+/// Side of each CLI icon in a card's top-right corner, and gap between icons.
+const CLI_ICON_SIZE: f32 = 16.0;
+const CLI_ICON_GAP: f32 = 4.0;
+
+/// Unique CLI providers in use by `card`, in roster order for multi-sessions.
+fn card_cli_providers(card: &SessionCard) -> Vec<ProviderId> {
+    if card.multi_id().is_some() && !card.members.is_empty() {
+        let mut out = Vec::new();
+        for m in &card.members {
+            if !out.contains(&m.provider_id) {
+                out.push(m.provider_id);
+            }
+        }
+        out
+    } else {
+        vec![card.provider_id]
+    }
+}
 
 /// Draws one card inside `rect`, clipped to it; returns what was clicked.
 fn card_ui(
@@ -812,10 +859,11 @@ fn card_ui(
     card: &SessionCard,
     rect: egui::Rect,
 ) -> Option<CardClick> {
+    let card_uuid = card.target.uuid();
     let resp = ui
         .interact(
             rect,
-            ui.make_persistent_id(("card", card.id)),
+            ui.make_persistent_id(("card", card_uuid)),
             egui::Sense::click(),
         )
         .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -847,19 +895,31 @@ fn card_ui(
         );
         ui.interact(
             dot,
-            ui.make_persistent_id(("run_dot", card.id)),
+            ui.make_persistent_id(("run_dot", card_uuid)),
             egui::Sense::hover(),
         )
         .on_hover_text(running::tooltip(r));
         running::paint_dot(ui, dot.center(), 4.0, r.state);
     }
-    let status = app
-        .sessions
-        .get(&card.id)
-        .map_or(SessionStatus::Closed, |vm| vm.status.clone());
+    let status = match card.target {
+        xade_store::CardTarget::Session(id) => app
+            .sessions
+            .get(&id)
+            .map_or(SessionStatus::Closed, |vm| vm.status.clone()),
+        xade_store::CardTarget::Multi(mid) => app
+            .multi_sessions
+            .get(&mid)
+            .map_or(SessionStatus::Closed, |vm| {
+                vm.aggregate_status(&app.sessions)
+            }),
+    };
     let excerpt = card.excerpt.as_deref().unwrap_or(&card.preview_snippet);
     let title = if card.title.is_empty() {
-        "New session"
+        if card.multi_id().is_some() {
+            "New Multi-Session"
+        } else {
+            "New session"
+        }
     } else {
         &card.title
     };
@@ -870,18 +930,38 @@ fn card_ui(
         .size()
         .y;
 
-    // Top-down: title, badge row, excerpt; the time/status row is pinned to the bottom.
+    // Top-down: title (+ top-right CLI icons), badge row, excerpt; time/status pinned to bottom.
+    let cli_providers = card_cli_providers(card);
+    let icons_w = if cli_providers.is_empty() {
+        0.0
+    } else {
+        cli_providers.len() as f32 * CLI_ICON_SIZE
+            + cli_providers.len().saturating_sub(1) as f32 * CLI_ICON_GAP
+            + 6.0
+    };
+    let title_w = (inner.width() - icons_w).max(20.0);
     let title = clipped_text(
         &painter,
         title,
         egui::TextStyle::Body.resolve(ui.style()),
         ui.visuals().strong_text_color(),
-        inner.width(),
+        title_w,
         2,
     );
     let mut y = inner.top();
     painter.galley(egui::pos2(inner.left(), y), title.clone(), theme::text());
-    y += title.size().y + ROW_GAP;
+    let mut icon_right = inner.right();
+    for &pid in cli_providers.iter().rev() {
+        let icon_rect = egui::Rect::from_min_size(
+            egui::pos2(icon_right - CLI_ICON_SIZE, inner.top()),
+            egui::vec2(CLI_ICON_SIZE, CLI_ICON_SIZE),
+        );
+        if let Some(tex) = crate::conversation::cli_symbol(ui.ctx(), pid) {
+            egui::Image::new(&tex).paint_at(ui, icon_rect);
+        }
+        icon_right -= CLI_ICON_SIZE + CLI_ICON_GAP;
+    }
+    y += title.size().y.max(CLI_ICON_SIZE) + ROW_GAP;
 
     let badge_h = line_h + 4.0;
     // Only Xade-origin sessions can be deleted; the button sits in the bottom-right corner.
@@ -913,7 +993,7 @@ fn card_ui(
             markdown(
                 ui,
                 &mut app.home.md_cache.borrow_mut(),
-                ("card_md", card.id),
+                ("card_md", card_uuid),
                 excerpt,
             );
         });
@@ -935,20 +1015,48 @@ fn card_ui(
         );
     };
     row(ui, badges, &mut |ui| {
-        origin_badge(ui, card.origin);
-        ui.label(
-            RichText::new(app.provider_name(card.provider_id))
-                .small()
-                .color(provider_color(card.provider_id)),
-        );
-        ui.add(
-            egui::Label::new(
+        if card.multi_id().is_some() {
+            egui::Frame::new()
+                .fill(theme::bg_app())
+                .stroke(egui::Stroke::new(1.0, theme::accent()))
+                .corner_radius(3)
+                .inner_margin(egui::Margin::symmetric(5, 1))
+                .show(ui, |ui| {
+                    ui.label(RichText::new("Multi").small().color(theme::accent()));
+                });
+            ui.label(
                 RichText::new(app.workspace_name(card.workspace_id))
                     .small()
                     .color(theme::text_muted()),
-            )
-            .truncate(),
-        );
+            );
+            let handles = card
+                .members
+                .iter()
+                .map(|m| format!("#{}", m.handle))
+                .collect::<Vec<_>>()
+                .join(" \u{00B7} ");
+            if !handles.is_empty() {
+                ui.add(
+                    egui::Label::new(RichText::new(handles).small().color(theme::text()))
+                        .truncate(),
+                );
+            }
+        } else {
+            origin_badge(ui, card.origin);
+            ui.label(
+                RichText::new(app.provider_name(card.provider_id))
+                    .small()
+                    .color(provider_color(card.provider_id)),
+            );
+            ui.add(
+                egui::Label::new(
+                    RichText::new(app.workspace_name(card.workspace_id))
+                        .small()
+                        .color(theme::text_muted()),
+                )
+                .truncate(),
+            );
+        }
     });
     row(ui, bottom, &mut |ui| {
         ui.label(
@@ -956,7 +1064,7 @@ fn card_ui(
                 .small()
                 .color(theme::text_muted()),
         );
-        if running.is_none() {
+        if running.is_none() && card.multi_id().is_none() {
             ui.label(running::cache_text(card.updated_at));
         }
         let (text, color) = status_badge(&status);
@@ -973,7 +1081,7 @@ fn card_ui(
         // Added after the card so it takes the click before the tile's open handler.
         let tr = ui.interact(
             trash,
-            ui.make_persistent_id(("trash", card.id)),
+            ui.make_persistent_id(("trash", card_uuid)),
             egui::Sense::click(),
         );
         let (color, tip) = match running {
@@ -1247,10 +1355,15 @@ mod tests {
         let open = find(icons::OPEN_SESSION);
         let new = find("New Session");
         let provider = find("Claude");
+        let search = find("Fuzzy search sessions");
         let home = find("Home");
         assert!(open.right() < new.left(), "{open:?} vs {new:?}");
         assert!(new.right() < provider.left(), "{new:?} vs {provider:?}");
-        assert!(provider.right() < home.left(), "{provider:?} vs {home:?}");
+        assert!(
+            provider.right() < search.left(),
+            "{provider:?} vs {search:?}"
+        );
+        assert!(search.right() < home.left(), "{search:?} vs {home:?}");
         assert!(
             frames.iter().any(|f| f.contains_rect(open)
                 && f.contains_rect(new)
@@ -1260,9 +1373,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn search_sessions_shortcut_switches_to_home_and_focuses_search() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let (mut app, ctx, dir) = home_app(&rt, false);
+        app.view = View::Workspace;
+        app.run_action(Action::SearchSessions);
+        assert!(app.view == View::Home);
+        assert!(app.home.focus_search);
+        let frame = |events: Vec<egui::Event>| egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1600.0, 760.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        ctx.run_ui(frame(Vec::new()), |ui| top_bar(&mut app, ui))
+            .textures_delta
+            .clear();
+        assert!(!app.home.focus_search);
+        ctx.run_ui(frame(vec![egui::Event::Text("abc".into())]), |ui| {
+            top_bar(&mut app, ui)
+        })
+        .textures_delta
+        .clear();
+        assert_eq!(app.home.search, "abc");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn test_card(provider_session_id: Option<&str>, age_secs: i64) -> SessionCard {
         SessionCard {
-            id: xade_core::SessionId::new(),
+            target: xade_store::CardTarget::Session(xade_core::SessionId::new()),
             workspace_id: xade_core::WorkspaceId::new(),
             title: "t".into(),
             preview_snippet: String::new(),
@@ -1272,6 +1416,7 @@ mod tests {
             model_id: String::new(),
             provider_session_id: provider_session_id.map(Into::into),
             provider_id: ProviderId::Claude,
+            members: Vec::new(),
         }
     }
 
@@ -1380,7 +1525,7 @@ mod tests {
         let p = app.pending_open.take().unwrap();
         assert_eq!(
             (p.id, p.location.as_str(), p.background),
-            (idle.id, "VS Code", true)
+            (idle.session_id().unwrap(), "VS Code", true)
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1469,7 +1614,11 @@ mod tests {
         let (click, _) = click_card(&app, &ctx, &xade, Some(c));
         assert_eq!(click, Some(CardClick::Delete));
         app.request_delete(&xade);
-        assert_eq!(app.pending_delete.as_ref().map(|p| p.id), Some(xade.id));
+        assert_eq!(
+            app.pending_delete.as_ref().map(|p| p.target),
+            xade.session_id()
+                .map(crate::widgets::delete_modal::PendingDeleteTarget::Session)
+        );
         assert!(app.open_windows.is_empty() && cmds.try_recv().is_err());
         // A click elsewhere on the card still opens it.
         let (click, _) = click_card(&app, &ctx, &xade, Some(card_rect.center()));
@@ -1749,5 +1898,59 @@ mod tests {
             full.textures_delta.clear();
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn card_cli_providers_deduplicates_multi_members_in_roster_order() {
+        let now = OffsetDateTime::now_utc();
+        let ws = WorkspaceId::new();
+        let single = SessionCard {
+            target: xade_store::CardTarget::Session(xade_core::SessionId::new()),
+            workspace_id: ws,
+            provider_id: ProviderId::Antigravity,
+            provider_session_id: None,
+            model_id: "gemini-4-neon".into(),
+            origin: SessionOrigin::Xade,
+            title: "Solo".into(),
+            preview_snippet: String::new(),
+            excerpt: None,
+            updated_at: now,
+            members: Vec::new(),
+        };
+        assert_eq!(card_cli_providers(&single), vec![ProviderId::Antigravity]);
+
+        let multi = SessionCard {
+            target: xade_store::CardTarget::Multi(xade_core::MultiSessionId::new()),
+            workspace_id: ws,
+            provider_id: ProviderId::Claude,
+            provider_session_id: None,
+            model_id: String::new(),
+            origin: SessionOrigin::Xade,
+            title: "Team".into(),
+            preview_snippet: String::new(),
+            excerpt: None,
+            updated_at: now,
+            members: vec![
+                xade_core::MultiMemberBadge {
+                    handle: "opus-1".into(),
+                    provider_id: ProviderId::Claude,
+                    model_id: "claude-opus-4-6".into(),
+                },
+                xade_core::MultiMemberBadge {
+                    handle: "sonnet-1".into(),
+                    provider_id: ProviderId::Claude,
+                    model_id: "claude-sonnet-4-6".into(),
+                },
+                xade_core::MultiMemberBadge {
+                    handle: "neon-1".into(),
+                    provider_id: ProviderId::Antigravity,
+                    model_id: "gemini-4-neon".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            card_cli_providers(&multi),
+            vec![ProviderId::Claude, ProviderId::Antigravity]
+        );
     }
 }

@@ -5,11 +5,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 
-use xade_core::SessionId;
+use xade_core::{MultiSessionId, SessionId};
 
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub enum Saved {
     Session(SessionId),
+    MultiSession(MultiSessionId),
     File(PathBuf),
 }
 
@@ -26,6 +27,7 @@ pub fn load(path: &Path) -> Vec<Saved> {
     text.lines()
         .filter_map(|line| match line.split_once(' ')? {
             ("session", id) => Some(Saved::Session(SessionId(id.parse().ok()?))),
+            ("multi", id) => Some(Saved::MultiSession(MultiSessionId(id.parse().ok()?))),
             ("file", p) => Some(Saved::File(PathBuf::from(p))),
             _ => None,
         })
@@ -58,6 +60,7 @@ pub fn save(path: &Path, windows: &[Saved]) -> std::io::Result<()> {
     for w in windows {
         match w {
             Saved::Session(id) => text.push_str(&format!("session {}\n", id.0)),
+            Saved::MultiSession(id) => text.push_str(&format!("multi {}\n", id.0)),
             Saved::File(p) => {
                 // A path with a line break cannot be stored on one line.
                 let p = p.to_string_lossy();
@@ -83,6 +86,7 @@ mod tests {
         assert!(load(&file).is_empty());
         let list = vec![
             Saved::Session(SessionId(uuid::Uuid::new_v4())),
+            Saved::MultiSession(MultiSessionId(uuid::Uuid::new_v4())),
             Saved::File(PathBuf::from("/tmp/a b.rs")),
         ];
         save(&file, &list).unwrap();

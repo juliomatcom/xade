@@ -3,6 +3,7 @@
 //! thing.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
@@ -13,6 +14,7 @@ use xade_core::{
 
 pub struct FakeProvider {
     history: Vec<ImportedSession>,
+    next_id: AtomicU64,
 }
 
 impl FakeProvider {
@@ -44,7 +46,10 @@ impl FakeProvider {
                     .collect(),
             })
             .collect();
-        FakeProvider { history }
+        FakeProvider {
+            history,
+            next_id: AtomicU64::new(1),
+        }
     }
 }
 
@@ -76,10 +81,10 @@ impl AgentProvider for FakeProvider {
         self.history.clone()
     }
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
-        let psid = cfg
-            .resume
-            .clone()
-            .unwrap_or_else(|| "fake-session".to_string());
+        let psid = cfg.resume.clone().unwrap_or_else(|| {
+            let n = self.next_id.fetch_add(1, Ordering::Relaxed);
+            format!("fake-session-{n}")
+        });
         let model_id = cfg.model_id.clone();
         let (commands, mut cmd_rx) = mpsc::unbounded_channel();
         let (ev_tx, events) = mpsc::unbounded_channel();
@@ -91,9 +96,15 @@ impl AgentProvider for FakeProvider {
                             provider_session_id: psid.clone(),
                             model_id: model_id.clone(),
                         });
-                        let _ = ev_tx.send(ProviderEvent::AssistantText {
-                            text: format!("Echo: {text}"),
-                        });
+                        let reply = if text.contains("[Team broadcast |") {
+                            "Received team broadcast!".to_string()
+                        } else if text.contains("TRIGGER_BROADCAST") {
+                            "Private note to user.\n<broadcast>Plan ready from teammate</broadcast>"
+                                .to_string()
+                        } else {
+                            format!("Echo: {text}")
+                        };
+                        let _ = ev_tx.send(ProviderEvent::AssistantText { text: reply });
                         let _ = ev_tx.send(ProviderEvent::TurnComplete {
                             usage: UsageTotals::default(),
                             is_error: false,

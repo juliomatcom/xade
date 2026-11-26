@@ -85,6 +85,7 @@ mod tests {
             is_error: false,
             created_at: OffsetDateTime::now_utc(),
             provider_id: None,
+            sender_handle: None,
         }
     }
 

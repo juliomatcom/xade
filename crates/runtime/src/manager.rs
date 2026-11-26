@@ -1,6 +1,6 @@
 //! Routes `ManagerCmd`s to session actors; owns the map of live sessions.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
@@ -12,13 +12,19 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 use uuid::Uuid;
 use xade_core::{
-    panic_message, AgentProvider, Effort, ImportedSession, Message, ProviderId, Role, Session,
-    SessionId, SessionOrigin, SessionStatus, SpawnConfig, UsageTotals, WorkspaceId,
+    assign_handles, extract_broadcasts, panic_message, parse_user_target, AgentProvider, Delivery,
+    Effort, ImportedSession, Message, MultiMemberSpec, MultiSession, MultiSessionId, ProviderId,
+    Role, Session, SessionId, SessionOrigin, SessionStatus, SpawnConfig, TeamMessage,
+    TeamMessageKind, UsageTotals, WorkspaceId,
 };
 use xade_store::{throwaway, StoreReader, WriteOp, WriterHandle};
 
 use crate::fork::{ForkJob, Throwaways};
 use crate::handoff;
+use crate::multi::{
+    team_preamble, MemberSignal, PendingBroadcast, PendingUserMsg, TeamMember, TeamState,
+    MAX_BROADCAST_HOPS,
+};
 use crate::session_actor::{Actor, ActorCmd};
 use crate::transcript::transcript;
 use crate::{flush, AppEvent, AppEventKind, ManagerCmd};
@@ -31,6 +37,17 @@ pub struct SessionManager {
     live: HashMap<SessionId, UnboundedSender<ActorCmd>>,
     /// Opened sessions whose provider process starts on their first `Send`.
     dormant: HashMap<SessionId, Dormant>,
+    /// Open multi-session teams.
+    teams: HashMap<MultiSessionId, TeamState>,
+    /// Fast lookup from member `SessionId` to its owning `MultiSessionId`.
+    member_to_team: HashMap<SessionId, MultiSessionId>,
+    /// Member actors currently shutting down after `CloseMulti`; awaited if reopened quickly.
+    closing_members: HashMap<SessionId, UnboundedSender<ActorCmd>>,
+    /// Monotonic generation stamped onto every opened/created `TeamState` so stale signals from
+    /// closing actors can never poison a newly reopened instance.
+    next_team_gen: u64,
+    /// Signals sent from multi-session member actors back into this manager loop.
+    team_tx: UnboundedSender<MemberSignal>,
     tasks: Vec<JoinHandle<()>>,
     /// Parsed histories coming back from the blocking import tasks.
     import_tx: UnboundedSender<Vec<(ProviderId, Vec<ImportedSession>)>>,
@@ -49,9 +66,11 @@ struct Dormant {
     cwd: std::path::PathBuf,
     provider: Arc<dyn AgentProvider>,
     next_seq: i64,
-    /// Set while the provider has not stored a session id yet but the history is not empty: a
-    /// fork's first prompt carries it. Derived on every open, never stored.
+    /// Set while the provider has not stored a session id yet: a fork's history or a team member's
+    /// initial instructions.
     handoff: Option<String>,
+    /// Set for members of a multi-session so waking attaches coordinator signals + generation.
+    team: Option<(UnboundedSender<MemberSignal>, u64)>,
 }
 
 impl SessionManager {
@@ -83,6 +102,7 @@ impl SessionManager {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (events, event_rx) = mpsc::unbounded_channel();
         let (import_tx, import_rx) = mpsc::unbounded_channel();
+        let (team_tx, team_rx) = mpsc::unbounded_channel();
         let supervisor_events = events.clone();
         // Snapshot conversations an earlier run left: hidden from imports until deleted.
         let leftovers = forks_dir.as_deref().map(handoff::read_markers);
@@ -103,18 +123,24 @@ impl SessionManager {
             events,
             live: HashMap::new(),
             dormant: HashMap::new(),
+            teams: HashMap::new(),
+            member_to_team: HashMap::new(),
+            closing_members: HashMap::new(),
+            next_team_gen: 1,
+            team_tx,
             tasks: Vec::new(),
             import_tx,
             forks_dir,
             throwaways,
             fork_cancel: watch::channel(false).0,
         };
-        let task = tokio::spawn(manager.run(cmd_rx, import_rx));
+        let task = tokio::spawn(manager.run(cmd_rx, import_rx, team_rx));
         tokio::spawn(supervise(
             task,
             "The session manager",
             None,
             supervisor_events,
+            None,
         ));
         (cmd_tx, event_rx)
     }
@@ -123,6 +149,7 @@ impl SessionManager {
         mut self,
         mut rx: UnboundedReceiver<ManagerCmd>,
         mut imports: UnboundedReceiver<Vec<(ProviderId, Vec<ImportedSession>)>>,
+        mut team_signals: UnboundedReceiver<MemberSignal>,
     ) {
         loop {
             let cmd = tokio::select! {
@@ -130,9 +157,13 @@ impl SessionManager {
                     Some(c) => c,
                     None => break,
                 },
-                // `self` holds a sender, so this never yields `None`.
+                // `self` holds senders for both channels, so neither yields `None`.
                 Some(batches) = imports.recv() => {
                     self.apply_import(batches).await;
+                    continue;
+                }
+                Some(sig) = team_signals.recv() => {
+                    self.on_member_signal(sig);
                     continue;
                 }
             };
@@ -162,6 +193,8 @@ impl SessionManager {
                         usage: UsageTotals::default(),
                         created_at: now,
                         updated_at: now,
+                        multi_session_id: None,
+                        agent_handle: None,
                     };
                     self.create(session, cwd).await;
                 }
@@ -172,10 +205,38 @@ impl SessionManager {
                     delivery,
                     context,
                 } => {
+                    if self.member_to_team.contains_key(&session_id) {
+                        self.emit(
+                            Some(session_id),
+                            AppEventKind::Error(
+                                "Send messages to a multi-session via SendMulti.".into(),
+                            ),
+                        );
+                        continue;
+                    }
                     self.forward(session_id, ActorCmd::Send(text, delivery, context));
                 }
                 ManagerCmd::Interrupt { session_id } => {
-                    self.forward(session_id, ActorCmd::Interrupt);
+                    let mut should_forward = true;
+                    if let Some(&multi_id) = self.member_to_team.get(&session_id) {
+                        if let Some(team) = self.teams.get_mut(&multi_id) {
+                            if let Some(m) = team.member_mut(session_id) {
+                                m.queued_user.clear();
+                                m.queued_broadcasts.clear();
+                                m.interrupt_epoch += 1;
+                                let busy = matches!(
+                                    m.status,
+                                    SessionStatus::Streaming | SessionStatus::NeedsApproval
+                                );
+                                m.suppress_broadcasts = busy;
+                                should_forward = busy
+                                    && self.live.get(&session_id).is_some_and(|tx| !tx.is_closed());
+                            }
+                        }
+                    }
+                    if should_forward {
+                        self.forward(session_id, ActorCmd::Interrupt);
+                    }
                 }
                 ManagerCmd::RespondPermission {
                     session_id,
@@ -201,12 +262,18 @@ impl SessionManager {
                     self.forward(session_id, ActorCmd::SetEffort(effort));
                 }
                 ManagerCmd::Rename { session_id, title } => {
+                    if self.member_to_team.contains_key(&session_id) {
+                        continue;
+                    }
                     let title = title.trim().to_string();
                     if !title.is_empty() {
                         self.forward(session_id, ActorCmd::Rename(title));
                     }
                 }
                 ManagerCmd::Close { session_id } => {
+                    if self.member_to_team.contains_key(&session_id) {
+                        continue;
+                    }
                     if self.dormant.remove(&session_id).is_some() {
                         self.emit(
                             Some(session_id),
@@ -225,8 +292,31 @@ impl SessionManager {
                     resume_prompt,
                 } => self.fork(session_id, provider, handoff_prompt, resume_prompt),
                 ManagerCmd::Import => self.start_import(),
+                ManagerCmd::CreateMulti {
+                    workspace_id,
+                    cwd,
+                    title,
+                    members,
+                } => self.create_multi(workspace_id, cwd, title, members).await,
+                ManagerCmd::OpenMulti { multi_id } => self.open_multi(multi_id).await,
+                ManagerCmd::SendMulti {
+                    multi_id,
+                    text,
+                    steer,
+                    context,
+                } => self.send_multi(multi_id, text, steer, context),
+                ManagerCmd::InterruptMultiAll { multi_id } => self.interrupt_multi_all(multi_id),
+                ManagerCmd::ResumeMultiBroadcasts { multi_id } => {
+                    self.resume_multi_broadcasts(multi_id)
+                }
+                ManagerCmd::RenameMulti { multi_id, title } => self.rename_multi(multi_id, title),
+                ManagerCmd::CloseMulti { multi_id } => self.close_multi(multi_id),
+                ManagerCmd::DeleteMulti { multi_id } => self.delete_multi(multi_id).await,
                 ManagerCmd::ShutdownAll(done) => {
                     let _ = self.fork_cancel.send(true);
+                    self.teams.clear();
+                    self.member_to_team.clear();
+                    self.dormant.clear();
                     for (_, tx) in self.live.drain() {
                         let _ = tx.send(ActorCmd::Close);
                     }
@@ -245,10 +335,18 @@ impl SessionManager {
         let _ = self.events.send(AppEvent { session_id, kind });
     }
 
+    fn write(&self, op: WriteOp) {
+        if let Err(e) = self.writer.send(op) {
+            tracing::error!(error = %e, "store write dropped");
+        }
+    }
+
     fn forward(&mut self, id: SessionId, cmd: ActorCmd) {
         if self.dormant.contains_key(&id) {
             match cmd {
-                ActorCmd::Send(..) => {
+                ActorCmd::Send(..)
+                | ActorCmd::SendTeamUser { .. }
+                | ActorCmd::SendBroadcast { .. } => {
                     if !self.wake(id) {
                         return;
                     }
@@ -265,6 +363,7 @@ impl SessionManager {
         }
         let sent = self.live.get(&id).map(|tx| tx.send(cmd).is_ok());
         if sent != Some(true) {
+            self.live.remove(&id);
             self.emit(
                 Some(id),
                 AppEventKind::Error("session is not running".into()),
@@ -295,15 +394,21 @@ impl SessionManager {
                     handle,
                     d.next_seq,
                 )
-                .with_handoff(d.handoff);
+                .with_handoff(d.handoff)
+                .with_team(d.team);
                 self.start_actor(actor);
                 true
             }
             Err(e) => {
-                self.emit(
-                    Some(id),
-                    AppEventKind::Status(SessionStatus::Error(e.to_string())),
-                );
+                let err = SessionStatus::Error(e.to_string());
+                if let Some(&multi_id) = self.member_to_team.get(&id) {
+                    if let Some(team) = self.teams.get_mut(&multi_id) {
+                        if let Some(m) = team.member_mut(id) {
+                            m.status = err.clone();
+                        }
+                    }
+                }
+                self.emit(Some(id), AppEventKind::Status(err));
                 false
             }
         }
@@ -338,6 +443,9 @@ impl SessionManager {
                     *auto_mode = Some(on);
                 }
                 ActorCmd::SetModel(m) => {
+                    if d.session.multi_session_id.is_some() {
+                        return;
+                    }
                     d.session.model_id = m.clone();
                     *model_id = Some(m);
                 }
@@ -363,6 +471,9 @@ impl SessionManager {
 
     fn start_actor(&mut self, actor: Actor) {
         let id = actor.id();
+        let team_panic = actor
+            .team_meta()
+            .map(|(mid, generation)| (mid, generation, self.team_tx.clone()));
         let (tx, rx) = mpsc::unbounded_channel();
         self.live.insert(id, tx);
         self.tasks.retain(|t| !t.is_finished());
@@ -372,6 +483,7 @@ impl SessionManager {
             "A session",
             Some(id),
             self.events.clone(),
+            team_panic,
         )));
     }
 
@@ -526,6 +638,12 @@ impl SessionManager {
                 "Only sessions created in Xade can be deleted here.".into(),
             );
         }
+        if session.multi_session_id.is_some() {
+            return fail(
+                self,
+                "Delete the multi-session instead of an individual team member.".into(),
+            );
+        }
         self.dormant.remove(&id);
         if let Some(tx) = self.live.remove(&id) {
             let _ = tx.send(ActorCmd::Close);
@@ -594,6 +712,7 @@ impl SessionManager {
             "A fork",
             None,
             self.events.clone(),
+            None,
         )));
     }
 
@@ -606,6 +725,14 @@ impl SessionManager {
             Ok(x) => x,
             Err(e) => return self.emit(Some(id), AppEventKind::Error(e.to_string())),
         };
+        if session.multi_session_id.is_some() {
+            return self.emit(
+                Some(id),
+                AppEventKind::Error(
+                    "Open the multi-session instead of an individual member.".into(),
+                ),
+            );
+        }
         let cwd = match self.reader.list_workspaces().await {
             Ok(ws) => ws
                 .into_iter()
@@ -654,6 +781,7 @@ impl SessionManager {
                         provider,
                         next_seq,
                         handoff,
+                        team: None,
                     },
                 );
                 self.emit(Some(id), AppEventKind::Status(SessionStatus::Idle));
@@ -667,6 +795,892 @@ impl SessionManager {
                 AppEventKind::Status(SessionStatus::Error("unknown provider".into())),
             ),
         }
+    }
+
+    // ---- multi-session coordination ----------------------------------------------------------
+
+    async fn create_multi(
+        &mut self,
+        workspace_id: WorkspaceId,
+        cwd: PathBuf,
+        title: String,
+        specs: Vec<MultiMemberSpec>,
+    ) {
+        if specs.is_empty() {
+            return self.emit(
+                None,
+                AppEventKind::Error("A multi-session needs at least one model.".into()),
+            );
+        }
+        let mut resolved = Vec::with_capacity(specs.len());
+        for spec in specs {
+            let Some(provider) = self.provider(spec.provider_id) else {
+                return self.emit(None, AppEventKind::Error("unknown provider".into()));
+            };
+            resolved.push((spec, provider));
+        }
+        let now = OffsetDateTime::now_utc();
+        let multi_id = MultiSessionId::new();
+        let multi = MultiSession {
+            id: multi_id,
+            workspace_id,
+            title: title.trim().to_string(),
+            preview_snippet: String::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let model_ids: Vec<&str> = resolved.iter().map(|(s, _)| s.model_id.as_str()).collect();
+        let handles = assign_handles(&model_ids);
+        let roster: Vec<(String, ProviderId, String)> = handles
+            .iter()
+            .zip(resolved.iter())
+            .map(|(h, (spec, _))| (h.clone(), spec.provider_id, spec.model_id.clone()))
+            .collect();
+
+        let mut sessions = Vec::with_capacity(resolved.len());
+        let mut team_members = Vec::with_capacity(resolved.len());
+        for ((spec, _), handle) in resolved.iter().zip(handles.iter()) {
+            let sid = SessionId::new();
+            sessions.push(Session {
+                id: sid,
+                workspace_id,
+                provider_id: spec.provider_id,
+                provider_session_id: None,
+                origin: SessionOrigin::Xade,
+                title: handle.clone(),
+                preview_snippet: String::new(),
+                model_id: spec.model_id.clone(),
+                effort: spec.effort,
+                sent_model_id: String::new(),
+                sent_effort: spec.effort,
+                auto_mode: spec.auto_mode,
+                usage: UsageTotals::default(),
+                created_at: now,
+                updated_at: now,
+                multi_session_id: Some(multi_id),
+                agent_handle: Some(handle.clone()),
+            });
+            team_members.push(TeamMember {
+                session_id: sid,
+                handle: handle.clone(),
+                provider_id: spec.provider_id,
+                status: SessionStatus::Idle,
+                dispatch_seq: 0,
+                interrupt_epoch: 0,
+                suppress_broadcasts: false,
+                queued_user: VecDeque::new(),
+                queued_broadcasts: VecDeque::new(),
+            });
+        }
+
+        self.write(WriteOp::TouchWorkspace(workspace_id));
+        if let Err(e) = self.writer.send(WriteOp::InsertMultiSession {
+            multi: multi.clone(),
+            members: sessions.clone(),
+        }) {
+            return self.emit(
+                None,
+                AppEventKind::Error(format!("Could not create the multi-session: {e}")),
+            );
+        }
+        flush(&self.writer).await;
+        // Confirm SQLite committed the transaction (StoreWriter logs and drops failed SQL ops).
+        if let Err(e) = self.reader.load_multi_session(multi_id).await {
+            return self.emit(
+                None,
+                AppEventKind::Error(format!("Could not save the multi-session: {e}")),
+            );
+        }
+
+        let generation = self.next_team_gen;
+        self.next_team_gen += 1;
+
+        for ((session, (_, provider)), handle) in sessions.iter().zip(resolved).zip(handles.iter())
+        {
+            self.member_to_team.insert(session.id, multi_id);
+            self.dormant.insert(
+                session.id,
+                Dormant {
+                    session: session.clone(),
+                    cwd: cwd.clone(),
+                    provider,
+                    next_seq: 1,
+                    handoff: Some(team_preamble(handle, &roster)),
+                    team: Some((self.team_tx.clone(), generation)),
+                },
+            );
+        }
+        self.teams.insert(
+            multi_id,
+            TeamState {
+                multi: multi.clone(),
+                generation,
+                members: team_members,
+                next_team_seq: 1,
+                consecutive_hops: 0,
+                broadcasts_paused: false,
+            },
+        );
+        let member_ids: Vec<SessionId> = sessions.iter().map(|s| s.id).collect();
+        self.emit(
+            None,
+            AppEventKind::MultiCreated {
+                multi,
+                members: sessions,
+            },
+        );
+        for sid in member_ids {
+            self.emit(Some(sid), AppEventKind::Status(SessionStatus::Idle));
+        }
+    }
+
+    async fn open_multi(&mut self, multi_id: MultiSessionId) {
+        if self.teams.contains_key(&multi_id) {
+            return;
+        }
+        let fail = |this: &Self, message: String| {
+            this.emit(None, AppEventKind::MultiOpenFailed { multi_id, message });
+        };
+        // Flush earlier writes and wait for any closing member actors from a recent CloseMulti
+        // so `--resume` never overlaps with an exiting child and `provider_session_id`/`next_seq`
+        // are up to date.
+        flush(&self.writer).await;
+        let pre = match self.reader.load_multi_session(multi_id).await {
+            Ok(x) => x,
+            Err(e) => return fail(self, e.to_string()),
+        };
+        let mut waited_closing = false;
+        for (s, _) in &pre.members {
+            if let Some(tx) = self.closing_members.remove(&s.id) {
+                waited_closing = true;
+                if timeout(Duration::from_secs(10), tx.closed()).await.is_err() {
+                    self.closing_members.insert(s.id, tx);
+                    return fail(
+                        self,
+                        "Could not open the multi-session: previous instance is still closing."
+                            .into(),
+                    );
+                }
+            }
+        }
+        let loaded = if waited_closing {
+            flush(&self.writer).await;
+            match self.reader.load_multi_session(multi_id).await {
+                Ok(x) => x,
+                Err(e) => return fail(self, e.to_string()),
+            }
+        } else {
+            pre
+        };
+        let cwd = match self.reader.list_workspaces().await {
+            Ok(ws) => ws
+                .into_iter()
+                .find(|w| w.id == loaded.multi.workspace_id)
+                .map(|w| w.root_path),
+            Err(e) => return fail(self, e.to_string()),
+        };
+        let Some(cwd) = cwd else {
+            return fail(self, "workspace not found".into());
+        };
+        let next_team_seq = match self.reader.max_team_seq(multi_id).await {
+            Ok(seq) => seq + 1,
+            Err(e) => return fail(self, format!("Could not open the multi-session: {e}")),
+        };
+        let roster: Vec<(String, ProviderId, String)> = loaded
+            .members
+            .iter()
+            .map(|(s, _)| {
+                (
+                    s.agent_handle.clone().unwrap_or_default(),
+                    s.provider_id,
+                    s.model_id.clone(),
+                )
+            })
+            .collect();
+
+        let generation = self.next_team_gen;
+        self.next_team_gen += 1;
+
+        let mut team_members = Vec::with_capacity(loaded.members.len());
+        let mut status_events = Vec::with_capacity(loaded.members.len());
+        for (session, msgs) in &loaded.members {
+            let handle = session.agent_handle.clone().unwrap_or_default();
+            let next_seq = msgs.last().map_or(1, |m| m.seq + 1);
+            let handoff = if session.provider_session_id.is_none() {
+                let preamble = team_preamble(&handle, &roster);
+                let history = transcript(msgs);
+                if history.is_empty() {
+                    Some(preamble)
+                } else {
+                    Some(format!("{preamble}\n\n{history}"))
+                }
+            } else {
+                None
+            };
+            self.member_to_team.insert(session.id, multi_id);
+            let status = match self.provider(session.provider_id) {
+                Some(provider) => {
+                    self.dormant.insert(
+                        session.id,
+                        Dormant {
+                            session: session.clone(),
+                            cwd: cwd.clone(),
+                            provider,
+                            next_seq,
+                            handoff,
+                            team: Some((self.team_tx.clone(), generation)),
+                        },
+                    );
+                    SessionStatus::Idle
+                }
+                None => SessionStatus::Error("unknown provider".into()),
+            };
+            status_events.push((session.id, status.clone()));
+            team_members.push(TeamMember {
+                session_id: session.id,
+                handle,
+                provider_id: session.provider_id,
+                status,
+                dispatch_seq: 0,
+                interrupt_epoch: 0,
+                suppress_broadcasts: false,
+                queued_user: VecDeque::new(),
+                queued_broadcasts: VecDeque::new(),
+            });
+        }
+        self.write(WriteOp::TouchWorkspace(loaded.multi.workspace_id));
+        self.teams.insert(
+            multi_id,
+            TeamState {
+                multi: loaded.multi.clone(),
+                generation,
+                members: team_members,
+                next_team_seq,
+                consecutive_hops: 0,
+                broadcasts_paused: false,
+            },
+        );
+        self.emit(
+            None,
+            AppEventKind::MultiOpened {
+                multi: loaded.multi,
+                members: loaded.members,
+                team_messages: loaded.team_messages,
+            },
+        );
+        for (sid, status) in status_events {
+            self.emit(Some(sid), AppEventKind::Status(status));
+        }
+    }
+
+    fn send_multi(
+        &mut self,
+        multi_id: MultiSessionId,
+        text: String,
+        steer: bool,
+        context: Option<String>,
+    ) {
+        let (body, target, targets, renamed, tm, unpaused) = {
+            let Some(team) = self.teams.get_mut(&multi_id) else {
+                return self.emit(
+                    None,
+                    AppEventKind::Error("multi-session is not open".into()),
+                );
+            };
+            let handles = team.handles();
+            let (target, body) = parse_user_target(&text, &handles);
+            if body.is_empty() {
+                return;
+            }
+            let body = body.to_string();
+
+            let renamed = if team.multi.title.is_empty() {
+                let derived = Session::derive_title(&body);
+                if !derived.is_empty() {
+                    team.multi.title = derived.clone();
+                    Some(derived)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let tm = TeamMessage {
+                id: Uuid::new_v4(),
+                multi_session_id: multi_id,
+                seq: team.next_team_seq,
+                kind: TeamMessageKind::User {
+                    target: target.clone(),
+                },
+                content_text: body.clone(),
+                created_at: OffsetDateTime::now_utc(),
+            };
+            team.next_team_seq += 1;
+
+            // Fresh user input resets the agent-to-agent hop counter.
+            team.consecutive_hops = 0;
+            let unpaused = std::mem::replace(&mut team.broadcasts_paused, false);
+
+            let targets: Vec<SessionId> = team
+                .members
+                .iter()
+                .filter(|m| target.as_deref().is_none_or(|t| t == m.handle))
+                .map(|m| m.session_id)
+                .collect();
+            (body, target, targets, renamed, tm, unpaused)
+        };
+
+        if let Some(title) = renamed {
+            self.write(WriteOp::UpdateMultiSessionTitle {
+                id: multi_id,
+                title: title.clone(),
+            });
+            self.emit(None, AppEventKind::MultiRenamed { multi_id, title });
+        }
+        self.write(WriteOp::InsertTeamMessage(tm.clone()));
+        self.emit(
+            None,
+            AppEventKind::MultiTeamMessage {
+                multi_id,
+                message: tm,
+            },
+        );
+        if unpaused {
+            self.emit(
+                None,
+                AppEventKind::MultiBroadcastPaused {
+                    multi_id,
+                    paused: false,
+                    hops: 0,
+                },
+            );
+        }
+
+        let mut delivered_any = false;
+        for sid in &targets {
+            let action = {
+                let Some(team) = self.teams.get_mut(&multi_id) else {
+                    break;
+                };
+                let Some(member) = team.member_mut(*sid) else {
+                    continue;
+                };
+                match &member.status {
+                    SessionStatus::Idle => {
+                        // Optimistically mark Streaming and bump dispatch_seq so broadcasts queue
+                        // and any stale Idle from an earlier turn is ignored.
+                        member.status = SessionStatus::Streaming;
+                        member.dispatch_seq += 1;
+                        member.suppress_broadcasts = false;
+                        delivered_any = true;
+                        Some((None, member.dispatch_seq, member.interrupt_epoch))
+                    }
+                    SessionStatus::Streaming if steer => {
+                        member.dispatch_seq += 1;
+                        member.suppress_broadcasts = false;
+                        delivered_any = true;
+                        Some((
+                            Some(Delivery::Steered),
+                            member.dispatch_seq,
+                            member.interrupt_epoch,
+                        ))
+                    }
+                    SessionStatus::Starting
+                    | SessionStatus::Streaming
+                    | SessionStatus::NeedsApproval => {
+                        member.queued_user.push_back(PendingUserMsg {
+                            text: body.clone(),
+                            context: context.clone(),
+                        });
+                        delivered_any = true;
+                        None
+                    }
+                    SessionStatus::Error(_) | SessionStatus::Closed => None,
+                }
+            };
+            if let Some((delivery, dispatch_seq, epoch)) = action {
+                self.forward(
+                    *sid,
+                    ActorCmd::SendTeamUser {
+                        text: body.clone(),
+                        delivery,
+                        context: context.clone(),
+                        dispatch_seq,
+                        epoch,
+                    },
+                );
+            }
+        }
+        if !delivered_any {
+            let err_sid = (targets.len() == 1).then(|| targets[0]);
+            self.emit(
+                err_sid,
+                AppEventKind::Error(if target.is_some() {
+                    "member session is not running".into()
+                } else {
+                    "no active team members available".into()
+                }),
+            );
+        }
+
+        // If this user turn unpaused broadcasts, drain any non-target Idle members that still
+        // hold queued broadcasts so nothing is left stranded.
+        if unpaused {
+            let stranded: Vec<SessionId> = self
+                .teams
+                .get(&multi_id)
+                .map(|t| {
+                    t.members
+                        .iter()
+                        .filter(|m| {
+                            m.status == SessionStatus::Idle && !m.queued_broadcasts.is_empty()
+                        })
+                        .map(|m| m.session_id)
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.drain_wave(multi_id, &stranded);
+        }
+    }
+
+    fn on_member_signal(&mut self, sig: MemberSignal) {
+        match sig {
+            MemberSignal::Status {
+                multi_id,
+                generation,
+                session_id,
+                dispatch_seq,
+                status,
+            } => {
+                let should_drain = {
+                    let Some(team) = self.teams.get_mut(&multi_id) else {
+                        return;
+                    };
+                    if team.generation != generation {
+                        return;
+                    }
+                    let Some(member) = team.member_mut(session_id) else {
+                        return;
+                    };
+                    // Ignore a stale `Idle` from an earlier turn when a newer prompt/steer is
+                    // already in flight to this actor.
+                    if status == SessionStatus::Idle && dispatch_seq < member.dispatch_seq {
+                        return;
+                    }
+                    member.status = status.clone();
+                    if status == SessionStatus::Idle {
+                        member.suppress_broadcasts = false;
+                        true
+                    } else {
+                        if matches!(status, SessionStatus::Error(_) | SessionStatus::Closed) {
+                            self.live.remove(&session_id);
+                        }
+                        false
+                    }
+                };
+                if should_drain {
+                    self.drain_member(multi_id, session_id);
+                }
+            }
+            MemberSignal::AssistantText {
+                multi_id,
+                generation,
+                session_id,
+                text,
+            } => {
+                let broadcasts = extract_broadcasts(&text);
+                if broadcasts.is_empty() {
+                    return;
+                }
+                let Some((sender_handle, sender_provider)) = self
+                    .teams
+                    .get(&multi_id)
+                    .filter(|t| t.generation == generation)
+                    .and_then(|t| t.member(session_id))
+                    .filter(|m| !m.suppress_broadcasts)
+                    .map(|m| (m.handle.clone(), m.provider_id))
+                else {
+                    return;
+                };
+
+                let mut to_emit = Vec::with_capacity(broadcasts.len());
+                let mut recipients = Vec::new();
+                let mut hit_cap = None;
+                if let Some(team) = self.teams.get_mut(&multi_id) {
+                    for content in &broadcasts {
+                        let tm = TeamMessage {
+                            id: Uuid::new_v4(),
+                            multi_session_id: multi_id,
+                            seq: team.next_team_seq,
+                            kind: TeamMessageKind::Broadcast {
+                                sender_handle: sender_handle.clone(),
+                                sender_provider,
+                            },
+                            content_text: content.clone(),
+                            created_at: OffsetDateTime::now_utc(),
+                        };
+                        team.next_team_seq += 1;
+                        to_emit.push(tm);
+                    }
+                    let mut queued_any = false;
+                    for m in &mut team.members {
+                        if m.session_id == session_id
+                            || matches!(m.status, SessionStatus::Error(_) | SessionStatus::Closed)
+                        {
+                            continue;
+                        }
+                        queued_any = true;
+                        for content in &broadcasts {
+                            m.queued_broadcasts.push_back(PendingBroadcast {
+                                sender_handle: sender_handle.clone(),
+                                content: content.clone(),
+                            });
+                        }
+                        if m.status == SessionStatus::Idle {
+                            recipients.push(m.session_id);
+                        }
+                    }
+                    if queued_any && !team.broadcasts_paused {
+                        if team.consecutive_hops >= MAX_BROADCAST_HOPS {
+                            team.broadcasts_paused = true;
+                            hit_cap = Some(team.consecutive_hops);
+                        } else {
+                            team.consecutive_hops += 1;
+                        }
+                    }
+                }
+                for tm in to_emit {
+                    self.write(WriteOp::InsertTeamMessage(tm.clone()));
+                    self.emit(
+                        None,
+                        AppEventKind::MultiTeamMessage {
+                            multi_id,
+                            message: tm,
+                        },
+                    );
+                }
+                if let Some(hops) = hit_cap {
+                    self.emit(
+                        None,
+                        AppEventKind::MultiBroadcastPaused {
+                            multi_id,
+                            paused: true,
+                            hops,
+                        },
+                    );
+                    return;
+                }
+                if self
+                    .teams
+                    .get(&multi_id)
+                    .is_some_and(|t| !t.broadcasts_paused)
+                {
+                    self.drain_wave(multi_id, &recipients);
+                }
+            }
+            MemberSignal::BroadcastDeferred {
+                multi_id,
+                generation,
+                session_id,
+                epoch,
+                batch,
+            } => {
+                if let Some(team) = self.teams.get_mut(&multi_id) {
+                    if team.generation != generation {
+                        return;
+                    }
+                    if let Some(member) = team.member_mut(session_id) {
+                        if epoch < member.interrupt_epoch {
+                            return;
+                        }
+                        for item in batch.into_iter().rev() {
+                            member.queued_broadcasts.push_front(item);
+                        }
+                    }
+                }
+            }
+            MemberSignal::UserDeferred {
+                multi_id,
+                generation,
+                session_id,
+                epoch,
+                msg,
+            } => {
+                if let Some(team) = self.teams.get_mut(&multi_id) {
+                    if team.generation != generation {
+                        return;
+                    }
+                    if let Some(member) = team.member_mut(session_id) {
+                        if epoch < member.interrupt_epoch {
+                            return;
+                        }
+                        member.queued_user.push_front(msg);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Drains a wave of `Idle` recipients, marking them `Streaming` before snapshotting the team
+    /// status header so teammates in the same wave see accurate statuses.
+    fn drain_wave(&mut self, multi_id: MultiSessionId, session_ids: &[SessionId]) {
+        enum Next {
+            User {
+                sid: SessionId,
+                msg: PendingUserMsg,
+                dispatch_seq: u64,
+                epoch: u64,
+            },
+            Broadcast {
+                sid: SessionId,
+                batch: Vec<PendingBroadcast>,
+                dispatch_seq: u64,
+                epoch: u64,
+            },
+        }
+        let (planned, status_summary) = {
+            let Some(team) = self.teams.get_mut(&multi_id) else {
+                return;
+            };
+            let paused = team.broadcasts_paused;
+            let mut planned = Vec::new();
+            for &sid in session_ids {
+                let Some(member) = team.member_mut(sid) else {
+                    continue;
+                };
+                if member.status != SessionStatus::Idle {
+                    continue;
+                }
+                if let Some(msg) = member.queued_user.pop_front() {
+                    member.status = SessionStatus::Streaming;
+                    member.dispatch_seq += 1;
+                    member.suppress_broadcasts = false;
+                    planned.push(Next::User {
+                        sid,
+                        msg,
+                        dispatch_seq: member.dispatch_seq,
+                        epoch: member.interrupt_epoch,
+                    });
+                } else if !paused && !member.queued_broadcasts.is_empty() {
+                    let batch: Vec<PendingBroadcast> = member.queued_broadcasts.drain(..).collect();
+                    member.status = SessionStatus::Streaming;
+                    member.dispatch_seq += 1;
+                    member.suppress_broadcasts = false;
+                    planned.push(Next::Broadcast {
+                        sid,
+                        batch,
+                        dispatch_seq: member.dispatch_seq,
+                        epoch: member.interrupt_epoch,
+                    });
+                }
+            }
+            (planned, team.status_summary())
+        };
+        for item in planned {
+            match item {
+                Next::User {
+                    sid,
+                    msg,
+                    dispatch_seq,
+                    epoch,
+                } => {
+                    self.forward(
+                        sid,
+                        ActorCmd::SendTeamUser {
+                            text: msg.text,
+                            delivery: Some(Delivery::Queued),
+                            context: msg.context,
+                            dispatch_seq,
+                            epoch,
+                        },
+                    );
+                }
+                Next::Broadcast {
+                    sid,
+                    batch,
+                    dispatch_seq,
+                    epoch,
+                } => {
+                    self.forward(
+                        sid,
+                        ActorCmd::SendBroadcast {
+                            batch,
+                            status_summary: status_summary.clone(),
+                            dispatch_seq,
+                            epoch,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    fn drain_member(&mut self, multi_id: MultiSessionId, session_id: SessionId) {
+        self.drain_wave(multi_id, &[session_id]);
+    }
+
+    fn interrupt_multi_all(&mut self, multi_id: MultiSessionId) {
+        let Some(team) = self.teams.get_mut(&multi_id) else {
+            return;
+        };
+        let mut to_interrupt = Vec::new();
+        for m in &mut team.members {
+            m.queued_user.clear();
+            m.queued_broadcasts.clear();
+            m.interrupt_epoch += 1;
+            let busy = matches!(
+                m.status,
+                SessionStatus::Streaming | SessionStatus::NeedsApproval
+            );
+            m.suppress_broadcasts = busy;
+            if busy {
+                to_interrupt.push(m.session_id);
+            }
+        }
+        team.consecutive_hops = 0;
+        let was_paused = std::mem::replace(&mut team.broadcasts_paused, false);
+        if was_paused {
+            self.emit(
+                None,
+                AppEventKind::MultiBroadcastPaused {
+                    multi_id,
+                    paused: false,
+                    hops: 0,
+                },
+            );
+        }
+        for sid in to_interrupt {
+            if self.live.get(&sid).is_some_and(|tx| !tx.is_closed()) {
+                self.forward(sid, ActorCmd::Interrupt);
+            } else {
+                self.live.remove(&sid);
+            }
+        }
+    }
+
+    fn resume_multi_broadcasts(&mut self, multi_id: MultiSessionId) {
+        let (was_paused, idle_members): (bool, Vec<SessionId>) = {
+            let Some(team) = self.teams.get_mut(&multi_id) else {
+                return;
+            };
+            team.consecutive_hops = 0;
+            let was_paused = std::mem::replace(&mut team.broadcasts_paused, false);
+            let idle = team
+                .members
+                .iter()
+                .filter(|m| m.status == SessionStatus::Idle && !m.queued_broadcasts.is_empty())
+                .map(|m| m.session_id)
+                .collect();
+            (was_paused, idle)
+        };
+        if was_paused {
+            self.emit(
+                None,
+                AppEventKind::MultiBroadcastPaused {
+                    multi_id,
+                    paused: false,
+                    hops: 0,
+                },
+            );
+        }
+        self.drain_wave(multi_id, &idle_members);
+    }
+
+    fn rename_multi(&mut self, multi_id: MultiSessionId, title: String) {
+        let title = title.trim().to_string();
+        if title.is_empty() {
+            return;
+        }
+        if let Some(team) = self.teams.get_mut(&multi_id) {
+            team.multi.title.clone_from(&title);
+        }
+        self.write(WriteOp::UpdateMultiSessionTitle {
+            id: multi_id,
+            title: title.clone(),
+        });
+        self.emit(None, AppEventKind::MultiRenamed { multi_id, title });
+    }
+
+    fn close_multi(&mut self, multi_id: MultiSessionId) {
+        let Some(team) = self.teams.remove(&multi_id) else {
+            return;
+        };
+        for m in team.members {
+            self.member_to_team.remove(&m.session_id);
+            if self.dormant.remove(&m.session_id).is_some() {
+                self.emit(
+                    Some(m.session_id),
+                    AppEventKind::Status(SessionStatus::Closed),
+                );
+            }
+            if let Some(tx) = self.live.remove(&m.session_id) {
+                if !tx.is_closed() {
+                    let _ = tx.send(ActorCmd::Close);
+                    self.closing_members.insert(m.session_id, tx);
+                }
+            }
+        }
+        self.emit(None, AppEventKind::MultiClosed { multi_id });
+    }
+
+    async fn delete_multi(&mut self, multi_id: MultiSessionId) {
+        let fail = |this: &Self, msg: String| this.emit(None, AppEventKind::Error(msg));
+        let loaded = match self.reader.load_multi_session(multi_id).await {
+            Ok(x) => x,
+            Err(e) => return fail(self, format!("Could not delete the multi-session: {e}")),
+        };
+        let member_ids: Vec<SessionId> = loaded.members.iter().map(|(s, _)| s.id).collect();
+        // Close the open team cleanly first so UI & manager maps stay consistent even if a
+        // subsequent transcript delete fails.
+        if self.teams.contains_key(&multi_id) {
+            self.close_multi(multi_id);
+        }
+        let mut waited_live = false;
+        for &sid in &member_ids {
+            if let Some(tx) = self.closing_members.remove(&sid) {
+                waited_live = true;
+                if timeout(Duration::from_secs(10), tx.closed()).await.is_err() {
+                    self.closing_members.insert(sid, tx);
+                    return fail(
+                        self,
+                        "Could not delete the multi-session: a member did not stop in time.".into(),
+                    );
+                }
+            }
+        }
+        let members = if waited_live {
+            flush(&self.writer).await;
+            match self.reader.load_multi_session(multi_id).await {
+                Ok(x) => x.members,
+                Err(e) => return fail(self, format!("Could not delete the multi-session: {e}")),
+            }
+        } else {
+            loaded.members
+        };
+        for (session, _) in &members {
+            if let (Some(psid), Some(provider)) = (
+                session.provider_session_id.clone(),
+                self.provider(session.provider_id),
+            ) {
+                let done =
+                    tokio::task::spawn_blocking(move || provider.delete_session(&psid)).await;
+                match done {
+                    Ok(Ok(())) => {}
+                    Ok(Err(e)) => {
+                        return fail(self, format!("Could not delete a member transcript: {e}"))
+                    }
+                    Err(e) => {
+                        return fail(self, format!("Could not delete a member transcript: {e}"))
+                    }
+                }
+            }
+        }
+        if let Err(e) = self.writer.send(WriteOp::DeleteMultiSession(multi_id)) {
+            return fail(self, format!("Could not delete the multi-session: {e}"));
+        }
+        flush(&self.writer).await;
+        self.emit(None, AppEventKind::MultiDeleted { multi_id });
     }
 }
 
@@ -709,6 +1723,7 @@ async fn supervise(
     what: &'static str,
     session_id: Option<SessionId>,
     events: UnboundedSender<AppEvent>,
+    team_panic: Option<(MultiSessionId, u64, UnboundedSender<MemberSignal>)>,
 ) {
     let Err(e) = task.await else { return };
     if !e.is_panic() {
@@ -716,12 +1731,21 @@ async fn supervise(
     }
     let msg = panic_message(&*e.into_panic());
     tracing::error!(what, %msg, "task panicked");
-    if session_id.is_some() {
+    if let Some(sid) = session_id {
         let status = SessionStatus::Error(format!("session crashed: {msg}"));
         let _ = events.send(AppEvent {
-            session_id,
-            kind: AppEventKind::Status(status),
+            session_id: Some(sid),
+            kind: AppEventKind::Status(status.clone()),
         });
+        if let Some((multi_id, generation, tx)) = team_panic {
+            let _ = tx.send(MemberSignal::Status {
+                multi_id,
+                generation,
+                session_id: sid,
+                dispatch_seq: u64::MAX,
+                status,
+            });
+        }
     }
     let kind = AppEventKind::Error(format!("{what} crashed: {msg}"));
     let _ = events.send(AppEvent {
@@ -761,6 +1785,7 @@ fn imported_rows(
             is_error: m.is_error,
             created_at: m.created_at,
             provider_id: None,
+            sender_handle: None,
         })
         .collect();
     let session = Session {
@@ -783,6 +1808,8 @@ fn imported_rows(
         usage: imp.usage,
         created_at: imp.created_at,
         updated_at: imp.updated_at,
+        multi_session_id: None,
+        agent_handle: None,
     };
     (session, messages, imp.cwd)
 }
@@ -796,7 +1823,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let id = SessionId::new();
         let task = tokio::spawn(async { panic!("boom") });
-        supervise(task, "A session", Some(id), tx.clone()).await;
+        supervise(task, "A session", Some(id), tx.clone(), None).await;
         let first = rx.recv().await.expect("status event");
         assert_eq!(first.session_id, Some(id));
         assert!(
@@ -807,7 +1834,7 @@ mod tests {
             matches!(second.kind, AppEventKind::Error(m) if m.contains("A session crashed: boom"))
         );
         // A task that ends normally says nothing.
-        supervise(tokio::spawn(async {}), "A session", Some(id), tx).await;
+        supervise(tokio::spawn(async {}), "A session", Some(id), tx, None).await;
         assert!(rx.try_recv().is_err());
     }
 }

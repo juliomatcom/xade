@@ -14,11 +14,28 @@ use xade_core::{
 };
 use xade_store::{WriteOp, WriterHandle};
 
+use crate::multi::{format_broadcast_prompt, MemberSignal, PendingBroadcast, PendingUserMsg};
 use crate::{AppEvent, AppEventKind};
 
 pub(crate) enum ActorCmd {
     /// Text, delivery, and context the provider gets in front of the text.
     Send(String, Option<Delivery>, Option<String>),
+    /// Team user prompt tagged with manager dispatch sequence and interrupt epoch so races with
+    /// `NeedsApproval` or stale `Idle` signals never drop or reorder prompts.
+    SendTeamUser {
+        text: String,
+        delivery: Option<Delivery>,
+        context: Option<String>,
+        dispatch_seq: u64,
+        epoch: u64,
+    },
+    /// One or more coalesced team broadcasts. Never steers: deferred back if the actor is not Idle.
+    SendBroadcast {
+        batch: Vec<PendingBroadcast>,
+        status_summary: String,
+        dispatch_seq: u64,
+        epoch: u64,
+    },
     Interrupt,
     Respond {
         request_id: String,
@@ -54,6 +71,11 @@ pub(crate) struct Actor {
     unstored: bool,
     /// The row was just inserted and `SessionStored` is still to be sent.
     announce_stored: bool,
+    /// When this session belongs to a multi-session, signals status and assistant text back to
+    /// `SessionManager` for broadcast routing and queue draining.
+    team: Option<(UnboundedSender<MemberSignal>, u64)>,
+    /// Latest team dispatch sequence received by this actor (echoed on `Status` signals).
+    dispatch_seq: u64,
 }
 
 impl Actor {
@@ -82,6 +104,8 @@ impl Actor {
             handoff_sent: None,
             unstored: false,
             announce_stored: false,
+            team: None,
+            dispatch_seq: 0,
         }
     }
 
@@ -91,14 +115,26 @@ impl Actor {
         self
     }
 
-    /// Text the provider gets in front of the first prompt (a fork's history).
+    /// Text the provider gets in front of the first prompt (a fork's history or team preamble).
     pub(crate) fn with_handoff(mut self, handoff: Option<String>) -> Self {
         self.handoff = handoff;
         self
     }
 
+    /// Attaches the multi-session coordinator channel and open generation.
+    pub(crate) fn with_team(mut self, team: Option<(UnboundedSender<MemberSignal>, u64)>) -> Self {
+        self.team = team;
+        self
+    }
+
     pub(crate) fn id(&self) -> SessionId {
         self.session.id
+    }
+
+    pub(crate) fn team_meta(&self) -> Option<(xade_core::MultiSessionId, u64)> {
+        let mid = self.session.multi_session_id?;
+        let (_, generation) = self.team.as_ref()?;
+        Some((mid, *generation))
     }
 
     pub(crate) async fn run(mut self, mut cmds: UnboundedReceiver<ActorCmd>) {
@@ -136,7 +172,18 @@ impl Actor {
 
     fn set_status(&mut self, status: SessionStatus) {
         self.status = status.clone();
-        self.emit(AppEventKind::Status(status));
+        self.emit(AppEventKind::Status(status.clone()));
+        if let (Some((tx, generation)), Some(multi_id)) =
+            (&self.team, self.session.multi_session_id)
+        {
+            let _ = tx.send(MemberSignal::Status {
+                multi_id,
+                generation: *generation,
+                session_id: self.session.id,
+                dispatch_seq: self.dispatch_seq,
+                status,
+            });
+        }
     }
 
     fn write(&self, op: WriteOp) {
@@ -172,6 +219,7 @@ impl Actor {
             is_error: false,
             created_at: OffsetDateTime::now_utc(),
             provider_id: None,
+            sender_handle: None,
         };
         self.next_seq += 1;
         m
@@ -202,48 +250,68 @@ impl Actor {
                     self.emit(AppEventKind::Error("session is busy".into()));
                     return true;
                 }
-                if self.session.title.is_empty() {
-                    let title = Session::derive_title(&text);
-                    if !title.is_empty() {
-                        self.session.title = title.clone();
-                        let mut op = self.update();
-                        if let WriteOp::UpdateSession { title: t, .. } = &mut op {
-                            *t = Some(title);
+                self.dispatch_user_send(text, delivery, context);
+            }
+            ActorCmd::SendTeamUser {
+                text,
+                delivery,
+                context,
+                dispatch_seq,
+                epoch,
+            } => {
+                self.dispatch_seq = dispatch_seq;
+                if !matches!(self.status, SessionStatus::Idle | SessionStatus::Streaming) {
+                    if self.status == SessionStatus::NeedsApproval {
+                        if let (Some((tx, generation)), Some(multi_id)) =
+                            (&self.team, self.session.multi_session_id)
+                        {
+                            let _ = tx.send(MemberSignal::UserDeferred {
+                                multi_id,
+                                generation: *generation,
+                                session_id: self.session.id,
+                                epoch,
+                                msg: PendingUserMsg { text, context },
+                            });
                         }
-                        self.write(op);
+                    } else {
+                        self.emit(AppEventKind::Error("session is busy".into()));
                     }
+                    return true;
                 }
-                let mut msg = self.insert_message(Role::User, text.clone());
-                msg.tool_name = delivery.map(|d| d.tag().to_string());
+                self.dispatch_user_send(text, delivery, context);
+            }
+            ActorCmd::SendBroadcast {
+                batch,
+                status_summary,
+                dispatch_seq,
+                epoch,
+            } => {
+                self.dispatch_seq = dispatch_seq;
+                // Broadcasts strictly queue and never steer: if a turn started before this arrived,
+                // hand the batch back to the manager to re-queue at the front.
+                if self.status != SessionStatus::Idle {
+                    if let (Some((tx, generation)), Some(multi_id)) =
+                        (&self.team, self.session.multi_session_id)
+                    {
+                        let _ = tx.send(MemberSignal::BroadcastDeferred {
+                            multi_id,
+                            generation: *generation,
+                            session_id: self.session.id,
+                            epoch,
+                            batch,
+                        });
+                    }
+                    return true;
+                }
+                let (sender_handle, display_text, prompt_text) =
+                    format_broadcast_prompt(&batch, &status_summary);
+                let mut msg = self.insert_message(Role::User, display_text);
+                msg.sender_handle = Some(sender_handle);
+                self.emit(AppEventKind::MemberMessage(msg.clone()));
                 self.store_message(msg);
-                if self.session.sent_model_id != self.session.model_id
-                    || self.session.sent_effort != self.session.effort
-                {
-                    self.session
-                        .sent_model_id
-                        .clone_from(&self.session.model_id);
-                    self.session.sent_effort = self.session.effort;
-                    self.write(WriteOp::MarkSent {
-                        id: self.session.id,
-                        model_id: self.session.model_id.clone(),
-                        effort: self.session.effort,
-                    });
-                }
-                if self.status != SessionStatus::Streaming {
-                    self.set_status(SessionStatus::Streaming);
-                }
-                let handoff = self.handoff.take();
-                if handoff.is_some() {
-                    self.handoff_sent.clone_from(&handoff);
-                }
-                let prompt = match (handoff, context) {
-                    (None, None) => text,
-                    (handoff, context) => [handoff, context, Some(text)]
-                        .into_iter()
-                        .flatten()
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                };
+                self.mark_sent_if_changed();
+                self.set_status(SessionStatus::Streaming);
+                let prompt = self.build_prompt(None, prompt_text);
                 self.command(SessionCommand::SendPrompt(prompt));
             }
             ActorCmd::Interrupt => self.command(SessionCommand::Interrupt),
@@ -262,6 +330,9 @@ impl Actor {
             }
             ActorCmd::SetAutoMode(on) => self.set_auto(on),
             ActorCmd::SetModel(m) => {
+                if self.session.multi_session_id.is_some() {
+                    return true;
+                }
                 // Stored at once: the respawn may wait for the turn to end, and closing the
                 // window before then must not lose the choice.
                 let mut op = self.update();
@@ -297,6 +368,68 @@ impl Actor {
             }
         }
         true
+    }
+
+    fn dispatch_user_send(
+        &mut self,
+        text: String,
+        delivery: Option<Delivery>,
+        context: Option<String>,
+    ) {
+        if self.session.title.is_empty() && self.session.multi_session_id.is_none() {
+            let title = Session::derive_title(&text);
+            if !title.is_empty() {
+                self.session.title = title.clone();
+                let mut op = self.update();
+                if let WriteOp::UpdateSession { title: t, .. } = &mut op {
+                    *t = Some(title);
+                }
+                self.write(op);
+            }
+        }
+        let mut msg = self.insert_message(Role::User, text.clone());
+        msg.tool_name = delivery.map(|d| d.tag().to_string());
+        if self.session.multi_session_id.is_some() {
+            self.emit(AppEventKind::MemberMessage(msg.clone()));
+        }
+        self.store_message(msg);
+        self.mark_sent_if_changed();
+        if self.status != SessionStatus::Streaming {
+            self.set_status(SessionStatus::Streaming);
+        }
+        let prompt = self.build_prompt(context, text);
+        self.command(SessionCommand::SendPrompt(prompt));
+    }
+
+    fn mark_sent_if_changed(&mut self) {
+        if self.session.sent_model_id != self.session.model_id
+            || self.session.sent_effort != self.session.effort
+        {
+            self.session
+                .sent_model_id
+                .clone_from(&self.session.model_id);
+            self.session.sent_effort = self.session.effort;
+            self.write(WriteOp::MarkSent {
+                id: self.session.id,
+                model_id: self.session.model_id.clone(),
+                effort: self.session.effort,
+            });
+        }
+    }
+
+    fn build_prompt(&mut self, context: Option<String>, text: String) -> String {
+        let handoff = self.handoff.take();
+        if handoff.is_some() {
+            self.handoff_sent.clone_from(&handoff);
+        }
+        match (handoff, context) {
+            (None, None) => text,
+            (handoff, context) => [handoff, context, Some(text)]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
     }
 
     fn set_auto(&mut self, on: bool) {
@@ -363,6 +496,16 @@ impl Actor {
             ProviderEvent::AssistantText { text } => {
                 let m = self.insert_message(Role::Assistant, text.clone());
                 self.store_message(m);
+                if let (Some((tx, generation)), Some(multi_id)) =
+                    (&self.team, self.session.multi_session_id)
+                {
+                    let _ = tx.send(MemberSignal::AssistantText {
+                        multi_id,
+                        generation: *generation,
+                        session_id: self.session.id,
+                        text: text.clone(),
+                    });
+                }
             }
             ProviderEvent::ToolUse {
                 tool_use_id,
@@ -403,8 +546,14 @@ impl Actor {
                 });
                 self.session.usage.accumulate(usage);
                 self.emit(AppEventKind::Provider(ev));
+                // Apply pending model/effort respawn BEFORE advertising `Idle`, so the manager
+                // does not dispatch queued team work into a shutting-down child.
+                self.status = SessionStatus::Idle;
+                if !self.apply_pending().await {
+                    return false;
+                }
                 self.set_status(SessionStatus::Idle);
-                return self.apply_pending().await;
+                return true;
             }
             ProviderEvent::Error(msg) => {
                 tracing::warn!(session = %self.session.id.0, %msg, "provider error");
