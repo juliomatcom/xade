@@ -112,6 +112,7 @@ fn view_toggle(app: &mut App, ui: &mut egui::Ui, area: egui::Rect) {
                 .clicked();
             if to_home {
                 app.view = View::Home;
+                app.refresh_cards();
             } else if to_ws && !app.open_windows.is_empty() {
                 app.view = View::Workspace;
             }
@@ -832,6 +833,24 @@ enum CardClick {
 
 /// Side of the trash button in a card's bottom-right corner.
 const TRASH_SIZE: f32 = 22.0;
+/// Side of each CLI icon in a card's top-right corner, and gap between icons.
+const CLI_ICON_SIZE: f32 = 16.0;
+const CLI_ICON_GAP: f32 = 4.0;
+
+/// Unique CLI providers in use by `card`, in roster order for multi-sessions.
+fn card_cli_providers(card: &SessionCard) -> Vec<ProviderId> {
+    if card.multi_id().is_some() && !card.members.is_empty() {
+        let mut out = Vec::new();
+        for m in &card.members {
+            if !out.contains(&m.provider_id) {
+                out.push(m.provider_id);
+            }
+        }
+        out
+    } else {
+        vec![card.provider_id]
+    }
+}
 
 /// Draws one card inside `rect`, clipped to it; returns what was clicked.
 fn card_ui(
@@ -911,18 +930,38 @@ fn card_ui(
         .size()
         .y;
 
-    // Top-down: title, badge row, excerpt; the time/status row is pinned to the bottom.
+    // Top-down: title (+ top-right CLI icons), badge row, excerpt; time/status pinned to bottom.
+    let cli_providers = card_cli_providers(card);
+    let icons_w = if cli_providers.is_empty() {
+        0.0
+    } else {
+        cli_providers.len() as f32 * CLI_ICON_SIZE
+            + cli_providers.len().saturating_sub(1) as f32 * CLI_ICON_GAP
+            + 6.0
+    };
+    let title_w = (inner.width() - icons_w).max(20.0);
     let title = clipped_text(
         &painter,
         title,
         egui::TextStyle::Body.resolve(ui.style()),
         ui.visuals().strong_text_color(),
-        inner.width(),
+        title_w,
         2,
     );
     let mut y = inner.top();
     painter.galley(egui::pos2(inner.left(), y), title.clone(), theme::text());
-    y += title.size().y + ROW_GAP;
+    let mut icon_right = inner.right();
+    for &pid in cli_providers.iter().rev() {
+        let icon_rect = egui::Rect::from_min_size(
+            egui::pos2(icon_right - CLI_ICON_SIZE, inner.top()),
+            egui::vec2(CLI_ICON_SIZE, CLI_ICON_SIZE),
+        );
+        if let Some(tex) = crate::conversation::cli_symbol(ui.ctx(), pid) {
+            egui::Image::new(&tex).paint_at(ui, icon_rect);
+        }
+        icon_right -= CLI_ICON_SIZE + CLI_ICON_GAP;
+    }
+    y += title.size().y.max(CLI_ICON_SIZE) + ROW_GAP;
 
     let badge_h = line_h + 4.0;
     // Only Xade-origin sessions can be deleted; the button sits in the bottom-right corner.
@@ -1859,5 +1898,59 @@ mod tests {
             full.textures_delta.clear();
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn card_cli_providers_deduplicates_multi_members_in_roster_order() {
+        let now = OffsetDateTime::now_utc();
+        let ws = WorkspaceId::new();
+        let single = SessionCard {
+            target: xade_store::CardTarget::Session(xade_core::SessionId::new()),
+            workspace_id: ws,
+            provider_id: ProviderId::Antigravity,
+            provider_session_id: None,
+            model_id: "gemini-4-neon".into(),
+            origin: SessionOrigin::Xade,
+            title: "Solo".into(),
+            preview_snippet: String::new(),
+            excerpt: None,
+            updated_at: now,
+            members: Vec::new(),
+        };
+        assert_eq!(card_cli_providers(&single), vec![ProviderId::Antigravity]);
+
+        let multi = SessionCard {
+            target: xade_store::CardTarget::Multi(xade_core::MultiSessionId::new()),
+            workspace_id: ws,
+            provider_id: ProviderId::Claude,
+            provider_session_id: None,
+            model_id: String::new(),
+            origin: SessionOrigin::Xade,
+            title: "Team".into(),
+            preview_snippet: String::new(),
+            excerpt: None,
+            updated_at: now,
+            members: vec![
+                xade_core::MultiMemberBadge {
+                    handle: "opus-1".into(),
+                    provider_id: ProviderId::Claude,
+                    model_id: "claude-opus-4-6".into(),
+                },
+                xade_core::MultiMemberBadge {
+                    handle: "sonnet-1".into(),
+                    provider_id: ProviderId::Claude,
+                    model_id: "claude-sonnet-4-6".into(),
+                },
+                xade_core::MultiMemberBadge {
+                    handle: "neon-1".into(),
+                    provider_id: ProviderId::Antigravity,
+                    model_id: "gemini-4-neon".into(),
+                },
+            ],
+        };
+        assert_eq!(
+            card_cli_providers(&multi),
+            vec![ProviderId::Claude, ProviderId::Antigravity]
+        );
     }
 }

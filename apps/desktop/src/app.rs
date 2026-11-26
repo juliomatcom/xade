@@ -818,8 +818,13 @@ impl App {
             self.home.search.trim().to_string(),
             self.home.page,
         );
-        let (reader, bridge) = (self.reader.clone(), self.bridge.clone());
+        let (writer, reader, bridge) = (
+            self.writer.clone(),
+            self.reader.clone(),
+            self.bridge.clone(),
+        );
         self.rt.spawn(async move {
+            xade_runtime::flush(&writer).await;
             let res = if query.is_empty() {
                 reader
                     .list_sessions(scope, origin, page, home::PAGE_SIZE)
@@ -2060,6 +2065,7 @@ impl App {
             Action::ToggleView => {
                 if in_workspace {
                     self.view = View::Home;
+                    self.refresh_cards();
                 } else if !self.open_windows.is_empty() {
                     self.view = View::Workspace;
                 }
