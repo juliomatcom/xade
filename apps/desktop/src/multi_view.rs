@@ -333,7 +333,7 @@ fn tab_item(
     body: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let mut prepared = egui::Frame::new()
-        .corner_radius(6)
+        .corner_radius(3)
         .inner_margin(egui::Margin::symmetric(8, 4))
         .begin(ui);
     prepared
@@ -464,12 +464,31 @@ fn member_subbar(ui: &mut egui::Ui, member: &mut SessionVm, env: &Env) {
                         effort,
                     });
                 }
-                let mut auto = member.session.auto_mode;
-                if ui.checkbox(&mut auto, "Auto").changed() {
-                    member.session.auto_mode = auto;
+                let on = member.session.auto_mode;
+                let (auto_text, fill, fg, stroke) = if on {
+                    (
+                        icons::with(icons::AUTO, "Auto: ON"),
+                        theme::ok_bg(),
+                        theme::ok(),
+                        theme::ok(),
+                    )
+                } else {
+                    (
+                        icons::with(icons::AUTO, "Auto: OFF"),
+                        theme::bg_hover(),
+                        theme::text(),
+                        theme::border(),
+                    )
+                };
+                let pill = egui::Button::new(RichText::new(auto_text).small().color(fg))
+                    .fill(fill)
+                    .stroke(egui::Stroke::new(1.0, stroke))
+                    .corner_radius(3);
+                if ui.add(pill).clicked() {
+                    member.session.auto_mode = !on;
                     let _ = env.cmd_tx.send(ManagerCmd::SetAutoMode {
                         session_id: member.session.id,
-                        on: auto,
+                        on: member.session.auto_mode,
                     });
                 }
                 let u = &member.session.usage;

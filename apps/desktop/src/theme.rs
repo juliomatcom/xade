@@ -141,7 +141,7 @@ palette! {
     claude = "#d97757";
 }
 
-const RADIUS: u8 = 6;
+const RADIUS: u8 = 3;
 
 /// Applied once at startup; dark only.
 pub fn apply(ctx: &egui::Context) {
