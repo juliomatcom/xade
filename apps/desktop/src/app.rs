@@ -494,6 +494,7 @@ impl App {
         app.refresh_cards();
         app.load_saved_quota();
         app.load_last_provider();
+        editor::warm_syntax(&app.rt);
         if let Some(root) = initial_workspace {
             app.open_folder(root);
         } else {

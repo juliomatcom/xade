@@ -27,6 +27,17 @@ pub static SYNTAX: LazyLock<SyntectSettings> = LazyLock::new(|| SyntectSettings 
     ..SyntectSettings::default()
 });
 
+/// Loads `SYNTAX` on a background worker once per process so the first opened editor or diff
+/// modal never stalls a frame.
+pub fn warm_syntax(rt: &tokio::runtime::Handle) {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        rt.spawn_blocking(|| {
+            LazyLock::force(&SYNTAX);
+        });
+    });
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct EditorId(pub u32);
 
