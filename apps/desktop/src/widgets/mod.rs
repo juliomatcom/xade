@@ -10,6 +10,7 @@ pub mod markdown;
 pub mod multi_modal;
 pub mod path_links;
 pub mod quit_modal;
+pub mod scroll_nav;
 pub mod selection_menu;
 pub mod session_picker;
 pub mod status_modal;

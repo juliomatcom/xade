@@ -12,6 +12,7 @@ use crate::theme;
 use crate::widgets::changes_summary;
 use crate::widgets::markdown::markdown;
 use crate::widgets::path_links::PathLinks;
+use crate::widgets::scroll_nav;
 use crate::widgets::tool_card::{self, CardStatus};
 
 /// Draws the transcript; returns a file path the user clicked.
@@ -73,205 +74,195 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
         (result, status)
     };
     let scroll_id = ("conversation", session_id);
-    egui::ScrollArea::vertical()
-        .id_salt(scroll_id)
-        .stick_to_bottom(true)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
-            egui::Frame::new()
-                .inner_margin(egui::Margin::same(10))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    let mut turn_start = 0;
-                    for (i, m) in messages.iter().enumerate() {
-                        if m.role == Role::User {
-                            turn_start = i;
-                        }
-                        let run = runs.iter().find(|(a, b)| (*a..=*b).contains(&i));
-                        // A group is drawn once, with its first call.
-                        let draw = run.is_none_or(|(a, _)| *a == i);
-                        if draw {
-                            let shapes_before = ui
-                                .ctx()
-                                .graphics(|g| g.get(ui.layer_id()).map_or(0, |l| l.next_idx().0));
-                            let rect = row(ui, |ui| match m.role {
-                                _ if run.is_some() => {
-                                    let (a, b) = *run.unwrap_or(&(i, i));
-                                    let calls: Vec<tool_card::GroupCall> = messages[a..=b]
-                                        .iter()
-                                        .filter(|c| c.role == Role::ToolCall)
-                                        .map(|call| {
-                                            let (result, status) = outcome(call);
-                                            tool_card::GroupCall {
-                                                call,
-                                                result,
-                                                status,
-                                            }
-                                        })
-                                        .collect();
-                                    tool_card::group(ui, md_cache, &calls);
+    let nav_id = ui.make_persistent_id(scroll_id);
+    let nav = scroll_nav::take(ui.ctx(), nav_id);
+    let out = nav.area(scroll_id).show(ui, |ui| {
+        let content_top = ui.cursor().min;
+        egui::Frame::new()
+            .inner_margin(egui::Margin::same(10))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                let mut turn_start = 0;
+                for (i, m) in messages.iter().enumerate() {
+                    if m.role == Role::User {
+                        turn_start = i;
+                    }
+                    let run = runs.iter().find(|(a, b)| (*a..=*b).contains(&i));
+                    // A group is drawn once, with its first call.
+                    let draw = run.is_none_or(|(a, _)| *a == i);
+                    if draw {
+                        let shapes_before = ui
+                            .ctx()
+                            .graphics(|g| g.get(ui.layer_id()).map_or(0, |l| l.next_idx().0));
+                        let rect = row(ui, |ui| match m.role {
+                            _ if run.is_some() => {
+                                let (a, b) = *run.unwrap_or(&(i, i));
+                                let calls: Vec<tool_card::GroupCall> = messages[a..=b]
+                                    .iter()
+                                    .filter(|c| c.role == Role::ToolCall)
+                                    .map(|call| {
+                                        let (result, status) = outcome(call);
+                                        tool_card::GroupCall {
+                                            call,
+                                            result,
+                                            status,
+                                        }
+                                    })
+                                    .collect();
+                                tool_card::group(ui, md_cache, &calls);
+                            }
+                            Role::User => {
+                                let clicked = with_time(ui, m, |ui| {
+                                    user_bubble(ui, md_cache, path_links, cwd, m)
+                                });
+                                open = open.take().or(clicked);
+                            }
+                            Role::Assistant => {
+                                let id = m.id;
+                                let text = &m.content_text;
+                                let is_multi = vm_multi;
+                                let clicked = with_time(ui, m, |ui| {
+                                    assistant(ui, avatar_provider(m, provider), |ui| {
+                                        if is_multi {
+                                            render_multi_assistant(
+                                                ui, md_cache, path_links, cwd, id, text,
+                                            )
+                                        } else {
+                                            path_links.markdown(ui, md_cache, cwd, id, text)
+                                        }
+                                    })
+                                });
+                                open = open.take().or(clicked);
+                            }
+                            Role::ToolCall => {
+                                let (result, card_status) = outcome(m);
+                                let awaiting = pending_permission.as_ref().is_some_and(|p| {
+                                    m.tool_use_id.as_deref() == Some(&*p.tool_use_id)
+                                });
+                                if tool_card::show(ui, md_cache, m, result, card_status, awaiting) {
+                                    review = m.tool_use_id.clone();
                                 }
-                                Role::User => {
-                                    let clicked = with_time(ui, m, |ui| {
-                                        user_bubble(ui, md_cache, path_links, cwd, m)
-                                    });
-                                    open = open.take().or(clicked);
-                                }
-                                Role::Assistant => {
-                                    let id = m.id;
-                                    let text = &m.content_text;
-                                    let is_multi = vm_multi;
-                                    let clicked = with_time(ui, m, |ui| {
-                                        assistant(ui, avatar_provider(m, provider), |ui| {
-                                            if is_multi {
-                                                render_multi_assistant(
-                                                    ui, md_cache, path_links, cwd, id, text,
-                                                )
-                                            } else {
-                                                path_links.markdown(ui, md_cache, cwd, id, text)
-                                            }
-                                        })
-                                    });
-                                    open = open.take().or(clicked);
-                                }
-                                Role::ToolCall => {
-                                    let (result, card_status) = outcome(m);
-                                    let awaiting = pending_permission.as_ref().is_some_and(|p| {
-                                        m.tool_use_id.as_deref() == Some(&*p.tool_use_id)
-                                    });
-                                    if tool_card::show(
-                                        ui,
-                                        md_cache,
-                                        m,
-                                        result,
-                                        card_status,
-                                        awaiting,
-                                    ) {
-                                        review = m.tool_use_id.clone();
-                                    }
-                                }
-                                Role::System => {
-                                    ui.label(
-                                        RichText::new(&m.content_text).color(theme::text_muted()),
-                                    );
-                                }
-                                Role::ToolResult => {}
-                            });
-                            if let Some(mark) = &find_mark {
-                                // Only the current message is tinted, not every one that matches.
-                                if mark.matches.get(mark.current) == Some(&i) {
-                                    ui.painter().rect_filled(
-                                        rect.expand(3.0),
-                                        4.0,
-                                        theme::find_block(),
-                                    );
-                                    let nth =
-                                        mark.current - mark.matches.partition_point(|&x| x < i);
-                                    crate::find::paint_message_words(
-                                        ui,
-                                        shapes_before,
-                                        &mark.query,
-                                        nth,
-                                    );
-                                    if jump {
-                                        ui.scroll_to_rect(rect, Some(egui::Align::Center));
-                                    }
+                            }
+                            Role::System => {
+                                ui.label(RichText::new(&m.content_text).color(theme::text_muted()));
+                            }
+                            Role::ToolResult => {}
+                        });
+                        if let Some(mark) = &find_mark {
+                            // Only the current message is tinted, not every one that matches.
+                            if mark.matches.get(mark.current) == Some(&i) {
+                                ui.painter().rect_filled(
+                                    rect.expand(3.0),
+                                    4.0,
+                                    theme::find_block(),
+                                );
+                                let nth = mark.current - mark.matches.partition_point(|&x| x < i);
+                                crate::find::paint_message_words(
+                                    ui,
+                                    shapes_before,
+                                    &mark.query,
+                                    nth,
+                                );
+                                if jump {
+                                    ui.scroll_to_rect(rect, Some(egui::Align::Center));
                                 }
                             }
                         }
-                        // Results draw nothing; cards of one run sit close together.
-                        let next_call = messages[i + 1..]
-                            .iter()
-                            .find(|n| n.role != Role::ToolResult)
-                            .is_some_and(|n| n.role == Role::ToolCall);
-                        let end = run.map_or(i, |(_, b)| *b);
-                        if i == end && (run.is_some() || m.role != Role::ToolResult) {
-                            ui.add_space(if m.role == Role::ToolCall && next_call {
-                                2.0
-                            } else {
-                                6.0
+                    }
+                    // Results draw nothing; cards of one run sit close together.
+                    let next_call = messages[i + 1..]
+                        .iter()
+                        .find(|n| n.role != Role::ToolResult)
+                        .is_some_and(|n| n.role == Role::ToolCall);
+                    let end = run.map_or(i, |(_, b)| *b);
+                    if i == end && (run.is_some() || m.role != Role::ToolResult) {
+                        ui.add_space(if m.role == Role::ToolCall && next_call {
+                            2.0
+                        } else {
+                            6.0
+                        });
+                    }
+                    // A finished turn ends before the next user message, or at the last one once idle.
+                    let ends = messages.get(i + 1).map_or(!busy, |n| n.role == Role::User);
+                    if ends {
+                        // What the working tree shows (Bash edits included) beats what the
+                        // edit tools reported; the latter is all a reopened session has.
+                        let tree = turn_files.get(&m.id).filter(|c| !c.files.is_empty());
+                        if let Some(c) = tree {
+                            let list: Vec<changes_summary::FileChange> = c
+                                .files
+                                .iter()
+                                .map(changes_summary::FileChange::from)
+                                .collect();
+                            let source = changes_summary::Source::Tree;
+                            row(ui, |ui| {
+                                if let Some(n) = changes_summary::show(ui, m.id, cwd, &list, source)
+                                {
+                                    turn_review = Some((m.id, n));
+                                }
                             });
-                        }
-                        // A finished turn ends before the next user message, or at the last one once idle.
-                        let ends = messages.get(i + 1).map_or(!busy, |n| n.role == Role::User);
-                        if ends {
-                            // What the working tree shows (Bash edits included) beats what the
-                            // edit tools reported; the latter is all a reopened session has.
-                            let tree = turn_files.get(&m.id).filter(|c| !c.files.is_empty());
-                            if let Some(c) = tree {
-                                let list: Vec<changes_summary::FileChange> = c
-                                    .files
-                                    .iter()
-                                    .map(changes_summary::FileChange::from)
-                                    .collect();
-                                let source = changes_summary::Source::Tree;
+                            ui.add_space(6.0);
+                        } else {
+                            let files = changes.get(&messages[turn_start..=i], cwd);
+                            if !files.is_empty() {
                                 row(ui, |ui| {
-                                    if let Some(n) =
-                                        changes_summary::show(ui, m.id, cwd, &list, source)
-                                    {
-                                        turn_review = Some((m.id, n));
+                                    if let Some(n) = changes_summary::show(
+                                        ui,
+                                        m.id,
+                                        cwd,
+                                        files,
+                                        changes_summary::Source::Edits,
+                                    ) {
+                                        changes_review = Some(files[n].calls.clone());
                                     }
                                 });
                                 ui.add_space(6.0);
-                            } else {
-                                let files = changes.get(&messages[turn_start..=i], cwd);
-                                if !files.is_empty() {
-                                    row(ui, |ui| {
-                                        if let Some(n) = changes_summary::show(
-                                            ui,
-                                            m.id,
-                                            cwd,
-                                            files,
-                                            changes_summary::Source::Edits,
-                                        ) {
-                                            changes_review = Some(files[n].calls.clone());
-                                        }
-                                    });
-                                    ui.add_space(6.0);
-                                }
                             }
                         }
                     }
-                    if !live_text.is_empty() {
-                        assistant(ui, provider, |ui| {
-                            markdown(ui, md_cache, "live", live_text);
-                            None
-                        });
-                    }
-                    if let (Some(n), true) = (*thinking_tokens, live_text.is_empty()) {
-                        ui.horizontal(|ui| {
-                            ui.add(egui::Spinner::new().size(12.0));
-                            ui.label(
-                                RichText::new(format!("Thinking… ~{n} tokens"))
-                                    .color(theme::text_muted()),
-                            );
-                        });
-                    }
-                    // When the model last answered; from the stored timestamp, so it survives a
-                    // restart. Hidden while a turn runs.
-                    let last_reply = messages.iter().rev().find(|m| m.role == Role::Assistant);
-                    if let (Some(m), false) = (last_reply, busy) {
+                }
+                if !live_text.is_empty() {
+                    assistant(ui, provider, |ui| {
+                        markdown(ui, md_cache, "live", live_text);
+                        None
+                    });
+                }
+                if let (Some(n), true) = (*thinking_tokens, live_text.is_empty()) {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Spinner::new().size(12.0));
                         ui.label(
-                            RichText::new(format!(
-                                "Last reply {}",
-                                crate::home::relative_time(m.created_at)
-                            ))
-                            .small()
-                            .color(theme::text_muted()),
-                        )
-                        .on_hover_text(m.created_at.to_string());
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_secs(30));
-                    }
-                    if let Some(e) = error {
-                        ui.label(RichText::new(&*e).color(theme::danger()));
-                    }
-                });
-            // After a send: land on the end, which also re-arms `stick_to_bottom`.
-            if std::mem::take(scroll_to_end) {
-                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
-            }
-        });
+                            RichText::new(format!("Thinking… ~{n} tokens"))
+                                .color(theme::text_muted()),
+                        );
+                    });
+                }
+                // When the model last answered; from the stored timestamp, so it survives a
+                // restart. Hidden while a turn runs.
+                let last_reply = messages.iter().rev().find(|m| m.role == Role::Assistant);
+                if let (Some(m), false) = (last_reply, busy) {
+                    ui.label(
+                        RichText::new(format!(
+                            "Last reply {}",
+                            crate::home::relative_time(m.created_at)
+                        ))
+                        .small()
+                        .color(theme::text_muted()),
+                    )
+                    .on_hover_text(m.created_at.to_string());
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_secs(30));
+                }
+                if let Some(e) = error {
+                    ui.label(RichText::new(&*e).color(theme::danger()));
+                }
+            });
+        // After a send: land on the end, which also re-arms `stick_to_bottom`.
+        nav.jump_top(ui, content_top);
+        if std::mem::take(scroll_to_end) || nav.bottom {
+            ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
+        }
+    });
+    scroll_nav::show(ui, &out, nav_id);
     if let Some(id) = review {
         vm.open_diff(&id);
     }

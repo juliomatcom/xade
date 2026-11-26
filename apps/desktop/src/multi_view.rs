@@ -17,6 +17,7 @@ use crate::keymap::{self, Action};
 use crate::session_view::{self, ViewOut};
 use crate::widgets::markdown::markdown;
 use crate::widgets::path_links::PathLinks;
+use crate::widgets::scroll_nav;
 use crate::workspace::Env;
 use crate::{chrome, conversation, icons, theme};
 
@@ -645,11 +646,11 @@ fn team_feed(
             .is_some_and(|m| !m.live_text.is_empty() || m.thinking_tokens.is_some())
     });
     let mut open_file = None;
-    egui::ScrollArea::vertical()
-        .id_salt(("team_feed", vm.multi.id))
-        .stick_to_bottom(true)
-        .auto_shrink([false, false])
-        .show(ui, |ui| {
+    let feed_id = ("team_feed", vm.multi.id);
+    let nav_id = ui.make_persistent_id(feed_id);
+    let nav = scroll_nav::take(ui.ctx(), nav_id);
+    let out = nav.area(feed_id).show(ui, |ui| {
+            let content_top = ui.cursor().min;
             egui::Frame::new()
                 .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
@@ -733,7 +734,8 @@ fn team_feed(
                         ui.add_space(8.0);
                     }
                 });
-            if std::mem::take(&mut vm.scroll_to_end) {
+            nav.jump_top(ui, content_top);
+            if std::mem::take(&mut vm.scroll_to_end) || nav.bottom {
                 // Unanimated: output arriving mid-animation would end `stick_to_bottom`.
                 ui.scroll_to_cursor_animation(
                     Some(egui::Align::BOTTOM),
@@ -741,6 +743,7 @@ fn team_feed(
                 );
             }
         });
+    scroll_nav::show(ui, &out, nav_id);
     open_file
 }
 
