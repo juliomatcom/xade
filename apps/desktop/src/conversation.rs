@@ -443,8 +443,8 @@ fn render_multi_assistant(
             xade_core::TextSegment::Plain(body) => links.markdown(ui, cache, cwd, seg_id, body),
             xade_core::TextSegment::Broadcast(body) => {
                 egui::Frame::new()
-                    .fill(theme::bg_raised())
-                    .stroke(egui::Stroke::new(1.0, theme::accent()))
+                    .fill(theme::broadcast_bg())
+                    .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
                     .corner_radius(6)
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
@@ -453,7 +453,7 @@ fn render_multi_assistant(
                             RichText::new("Broadcast to team")
                                 .small()
                                 .strong()
-                                .color(theme::accent()),
+                                .color(theme::text_muted()),
                         );
                         links.markdown(ui, cache, cwd, seg_id, body)
                     })

@@ -135,6 +135,9 @@ palette! {
     danger = "#f85149";
     diff_del_bg = "#4b1d22";
     diff_add_bg = "#1a3d2a";
+    /// Model-to-model broadcast container fill and border in Multi-Session views.
+    broadcast_bg = "#141d29";
+    broadcast_border = "#2e4d70";
     claude = "#d97757";
 }
 

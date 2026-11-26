@@ -777,11 +777,11 @@ fn combined_entry_row(
             sender_handle,
             sender_provider,
         } => {
-            // Distinct tinted + accent-bordered container so model-to-model messages stand out
-            // clearly from regular assistant responses to the user.
+            // Subtle bluish container so model-to-model messages stand out cleanly from regular
+            // assistant replies while blending with the window background.
             egui::Frame::new()
-                .fill(theme::ok_bg())
-                .stroke(egui::Stroke::new(1.5, theme::accent()))
+                .fill(theme::broadcast_bg())
+                .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
                 .corner_radius(8)
                 .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
@@ -799,18 +799,18 @@ fn combined_entry_row(
                                 RichText::new(format!("#{sender_handle} \u{2192} Team"))
                                     .small()
                                     .strong()
-                                    .color(theme::accent()),
+                                    .color(theme::text()),
                             );
                             egui::Frame::new()
                                 .fill(theme::bg_app())
-                                .stroke(egui::Stroke::new(1.0, theme::accent()))
+                                .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
                                 .corner_radius(4)
                                 .inner_margin(egui::Margin::symmetric(5, 1))
                                 .show(ui, |ui| {
                                     ui.label(
                                         RichText::new("Model-to-model")
                                             .small()
-                                            .color(theme::accent()),
+                                            .color(theme::text_muted()),
                                     );
                                 });
                         });
