@@ -27,6 +27,7 @@ The `shortcuts` object maps an action name to its keys: `"cmd+t"`, or two keys f
 | Key | Default | Action |
 |---|---|---|
 | `new_session` | `cmd+t` | New session in the selected workspace |
+| `new_multi_session` | `cmd+shift+t` | New multi-session in the selected workspace |
 | `open_picker` | `cmd+shift+p` | Open session picker |
 | `search_sessions` | `cmd+shift+f` | Fuzzy search sessions |
 | `close_window` | `cmd+w` | Close the focused window |

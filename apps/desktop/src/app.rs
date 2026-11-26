@@ -1964,6 +1964,15 @@ impl App {
                     self.new_session();
                 }
             }
+            Action::NewMultiSession => {
+                if self.home.scope.is_none() {
+                    self.warn("Select a workspace in the sidebar first.");
+                } else if self.selectable_providers().is_empty() {
+                    self.warn("No provider is available.");
+                } else {
+                    self.open_multi_create();
+                }
+            }
             Action::NewFile => self.new_editor(),
             Action::OpenFile => self.open_file_dialog(),
             Action::Save | Action::SaveAs => {

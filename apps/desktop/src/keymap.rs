@@ -13,6 +13,7 @@ pub const CHORD_TIMEOUT: Duration = Duration::from_millis(1500);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Action {
     NewSession,
+    NewMultiSession,
     NewFile,
     OpenFile,
     Save,
@@ -166,6 +167,13 @@ static DEFS: &[Def] = &[
         Group::Sessions,
         "New session in the selected workspace",
         "cmd+t",
+    ),
+    row(
+        "new_multi_session",
+        Action::NewMultiSession,
+        Group::Sessions,
+        "New multi-session in the selected workspace",
+        "cmd+shift+t",
     ),
     row(
         "new_file",
@@ -770,6 +778,14 @@ mod tests {
         assert_eq!(
             press(&mut c, now, CMD_SHIFT, Key::F),
             Feed::Fired(Action::SearchSessions)
+        );
+        assert_eq!(
+            press(&mut c, now, CMD, Key::T),
+            Feed::Fired(Action::NewSession)
+        );
+        assert_eq!(
+            press(&mut c, now, CMD_SHIFT, Key::T),
+            Feed::Fired(Action::NewMultiSession)
         );
         assert_eq!(press(&mut c, now, CMD, Key::H), Feed::Ignored);
         assert_eq!(

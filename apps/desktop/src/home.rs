@@ -309,10 +309,13 @@ fn session_controls(app: &mut App, ui: &mut egui::Ui) {
                 let multi_btn = ui
                     .add_enabled(
                         enabled,
-                        egui::Button::new(icons::with(icons::FORK, "Multi")),
+                        egui::Button::new(icons::with(icons::MULTI, "Multi")),
                     )
                     .on_disabled_hover_text(disabled_tip)
-                    .on_hover_text("New Multi-Session (multiple models working together)");
+                    .on_hover_text(format!(
+                        "New multi-session ({})",
+                        keymap::shortcut_text(Action::NewMultiSession)
+                    ));
                 if multi_btn.clicked() {
                     app.open_multi_create();
                 }

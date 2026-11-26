@@ -36,6 +36,7 @@ pub const BUG: &str = "\u{1F41B}";
 pub const TRASH: &str = "\u{1F5D1}";
 pub const EXIT: &str = CLOSE;
 pub const FORK: &str = "\u{1F500}";
+pub const MULTI: &str = "\u{1F465}";
 pub const FOLDER: &str = ADD_DIR;
 pub const FOLDER_OPEN: &str = OPEN_SESSION;
 pub const FILE: &str = "\u{1F4C4}";
@@ -86,6 +87,7 @@ mod tests {
             BUG,
             TRASH,
             FORK,
+            MULTI,
             EXIT,
             FILE,
             COLLAPSED,
