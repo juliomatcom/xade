@@ -28,16 +28,19 @@ fn create_multi_session_send_targeted_broadcast_and_persist_card() {
     x.write_where("Team", "#fake-model-1: TRIGGER_BROADCAST");
     x.press(Modifiers::COMMAND, Key::Enter);
 
-    // Team feed receives the broadcast, while private assistant prose stays off the Team tab.
-    x.wait_for("broadcast in the Team feed", |ui| {
-        ui.query_by_label_contains("Plan ready from teammate")
+    // Combined Team view shows all responses together (#fake-model-1's reply, its distinct
+    // model-to-model broadcast container, and #fake-model-2's reply to that broadcast).
+    x.wait_for("combined responses and broadcast in the Team view", |ui| {
+        ui.query_by_label_contains("Private note to user.")
             .is_some()
+            && ui
+                .query_by_label_contains("Plan ready from teammate")
+                .is_some()
+            && ui.query_by_label("Model-to-model").is_some()
+            && ui
+                .query_by_label_contains("Received team broadcast!")
+                .is_some()
     });
-    assert!(
-        x.ui.query_by_label_contains("Private note to user.")
-            .is_none(),
-        "normal assistant prose must not leak into the Team feed"
-    );
 
     // Click the #fake-model-1 tab (on the same row as the "Team" tab) and check that its private
     // note is shown in its own transcript.

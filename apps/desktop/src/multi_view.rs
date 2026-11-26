@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use egui::{Key, Modifiers, RichText};
 use egui_commonmark::CommonMarkCache;
 use xade_core::{
-    parse_user_target, Effort, MultiSession, SessionId, SessionStatus, TeamMessage, TeamMessageKind,
+    parse_user_target, split_broadcast_segments, Effort, MultiSession, ProviderId, Role, SessionId,
+    SessionStatus, TeamMessage, TeamMessageKind, TextSegment,
 };
 use xade_runtime::ManagerCmd;
 
@@ -14,11 +15,15 @@ use crate::app::SessionVm;
 use crate::config::SendMode;
 use crate::keymap::{self, Action};
 use crate::session_view::{self, ViewOut};
+use crate::widgets::markdown::markdown;
 use crate::widgets::path_links::PathLinks;
 use crate::workspace::Env;
 use crate::{chrome, conversation, icons, theme};
 
-const INPUT_MAX_HEIGHT: f32 = 140.0;
+/// Matches standalone `composer.rs` input sizing and button geometry.
+const INPUT_MIN_ROWS: usize = 2;
+const INPUT_MAX_ROWS: usize = 10;
+const BUTTON_SIZE: f32 = 48.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum MultiTab {
@@ -123,7 +128,7 @@ pub fn show(
         })
     });
     let agg_status = vm.aggregate_status(members);
-    header(ui, vm, env, &agg_status, any_busy, maximized, &mut out);
+    header(ui, vm, env, &agg_status, maximized, &mut out);
     if vm.collapsed {
         return out;
     }
@@ -153,7 +158,7 @@ pub fn show(
                     session_view::banner(ui, member, env);
                 }
             }
-            unified_composer(ui, vm, &handles, members, env);
+            unified_composer(ui, vm, &handles, members, any_busy, env);
         });
 
     egui::CentralPanel::default()
@@ -161,7 +166,7 @@ pub fn show(
         .show(ui, |ui| match vm.active_tab {
             MultiTab::Team => {
                 approval_jump_strip(ui, vm, members);
-                out.open_file = team_feed(ui, vm, &handles);
+                out.open_file = team_feed(ui, vm, members, &handles);
             }
             MultiTab::Member(sid) => {
                 if let Some(member) = members.get_mut(&sid) {
@@ -241,7 +246,6 @@ fn header(
     vm: &mut MultiSessionVm,
     env: &Env,
     agg_status: &SessionStatus,
-    any_busy: bool,
     maximized: bool,
     out: &mut ViewOut,
 ) {
@@ -272,18 +276,6 @@ fn header(
             if !cwd.is_empty() {
                 ui.label(RichText::new(cwd).small().color(theme::text_muted()))
                     .on_hover_text(vm.cwd.display().to_string());
-            }
-            if any_busy
-                && ui
-                    .small_button(
-                        RichText::new(icons::with(icons::STOP, "Stop All")).color(theme::danger()),
-                    )
-                    .on_hover_text("Stop all running models and clear queued broadcasts")
-                    .clicked()
-            {
-                let _ = env.cmd_tx.send(ManagerCmd::InterruptMultiAll {
-                    multi_id: vm.multi.id,
-                });
             }
             renamed = multi_title_label(ui, vm, &title);
         },
@@ -482,7 +474,121 @@ fn effort_name(e: Effort) -> &'static str {
     }
 }
 
-fn team_feed(ui: &mut egui::Ui, vm: &mut MultiSessionVm, handles: &[String]) -> Option<PathBuf> {
+enum CombinedKind {
+    User {
+        target: Option<String>,
+    },
+    MemberReply {
+        handle: String,
+        provider: ProviderId,
+    },
+    Broadcast {
+        sender_handle: String,
+        sender_provider: ProviderId,
+    },
+}
+
+struct CombinedEntry {
+    id: uuid::Uuid,
+    created_at: time::OffsetDateTime,
+    kind_rank: u8,
+    order_key: (usize, i64, usize),
+    kind: CombinedKind,
+    text: String,
+}
+
+fn collect_combined_feed(
+    vm: &MultiSessionVm,
+    members: &HashMap<SessionId, SessionVm>,
+) -> Vec<CombinedEntry> {
+    let mut entries = Vec::new();
+    for tm in &vm.team_messages {
+        let (kind_rank, kind) = match &tm.kind {
+            TeamMessageKind::User { target } => (
+                0,
+                CombinedKind::User {
+                    target: target.clone(),
+                },
+            ),
+            TeamMessageKind::Broadcast {
+                sender_handle,
+                sender_provider,
+            } => (
+                2,
+                CombinedKind::Broadcast {
+                    sender_handle: sender_handle.clone(),
+                    sender_provider: *sender_provider,
+                },
+            ),
+        };
+        entries.push(CombinedEntry {
+            id: tm.id,
+            created_at: tm.created_at,
+            kind_rank,
+            order_key: (0, tm.seq, 0),
+            kind,
+            text: tm.content_text.clone(),
+        });
+    }
+    for (member_idx, sid) in vm.member_ids.iter().enumerate() {
+        let Some(member) = members.get(sid) else {
+            continue;
+        };
+        let handle = member
+            .session
+            .agent_handle
+            .as_deref()
+            .unwrap_or("agent")
+            .to_string();
+        let default_provider = member.session.provider_id;
+        for msg in &member.messages {
+            if msg.role != Role::Assistant {
+                continue;
+            }
+            let provider = msg.provider_id.unwrap_or(default_provider);
+            let segs = split_broadcast_segments(&msg.content_text);
+            for (seg_idx, seg) in segs.into_iter().enumerate() {
+                if let TextSegment::Plain(body) = seg {
+                    if body.trim().is_empty() {
+                        continue;
+                    }
+                    let id = uuid::Uuid::from_u128(msg.id.as_u128().wrapping_add(seg_idx as u128));
+                    entries.push(CombinedEntry {
+                        id,
+                        created_at: msg.created_at,
+                        kind_rank: 1,
+                        order_key: (member_idx, msg.seq, seg_idx),
+                        kind: CombinedKind::MemberReply {
+                            handle: handle.clone(),
+                            provider,
+                        },
+                        text: body,
+                    });
+                }
+            }
+        }
+    }
+    entries.sort_by(|a, b| {
+        a.created_at
+            .cmp(&b.created_at)
+            .then_with(|| a.kind_rank.cmp(&b.kind_rank))
+            .then_with(|| a.order_key.cmp(&b.order_key))
+    });
+    entries
+}
+
+fn team_feed(
+    ui: &mut egui::Ui,
+    vm: &mut MultiSessionVm,
+    members: &HashMap<SessionId, SessionVm>,
+    handles: &[String],
+) -> Option<PathBuf> {
+    let entries = collect_combined_feed(vm, members);
+    let any_live = vm.member_ids.iter().any(|sid| {
+        members
+            .get(sid)
+            .is_some_and(|m| !m.live_text.is_empty() || m.thinking_tokens.is_some())
+    });
     let mut open_file = None;
     egui::ScrollArea::vertical()
         .id_salt(("team_feed", vm.multi.id))
@@ -493,7 +599,7 @@ fn team_feed(ui: &mut egui::Ui, vm: &mut MultiSessionVm, handles: &[String]) -> 
                 .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
-                    if vm.team_messages.is_empty() {
+                    if entries.is_empty() && !any_live {
                         let roster = handles
                             .iter()
                             .map(|h| format!("#{h}"))
@@ -506,17 +612,69 @@ fn team_feed(ui: &mut egui::Ui, vm: &mut MultiSessionVm, handles: &[String]) -> 
                             .color(theme::text_muted()),
                         );
                     }
-                    for tm in &vm.team_messages {
-                        let clicked = team_message_row(
+                    for entry in &entries {
+                        let clicked = combined_entry_row(
                             ui,
                             &mut vm.md_cache,
                             &mut vm.path_links,
                             &vm.cwd,
-                            tm,
+                            entry,
                         );
                         if open_file.is_none() {
                             open_file = clicked;
                         }
+                        ui.add_space(8.0);
+                    }
+                    // Show live streaming output or thinking state for busy members at the bottom.
+                    for sid in &vm.member_ids {
+                        let Some(member) = members.get(sid) else {
+                            continue;
+                        };
+                        if member.live_text.is_empty() && member.thinking_tokens.is_none() {
+                            continue;
+                        }
+                        let handle = member.session.agent_handle.as_deref().unwrap_or("agent");
+                        let provider = member.session.provider_id;
+                        ui.horizontal_top(|ui| {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(20.0, 20.0),
+                                egui::Sense::hover(),
+                            );
+                            if let Some(tex) = conversation::cli_symbol(ui.ctx(), provider) {
+                                egui::Image::new(&tex).paint_at(ui, rect);
+                            }
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(format!("#{handle}"))
+                                            .small()
+                                            .strong()
+                                            .color(theme::text()),
+                                    );
+                                    ui.label(
+                                        RichText::new("responding…")
+                                            .small()
+                                            .color(theme::text_muted()),
+                                    );
+                                });
+                                if !member.live_text.is_empty() {
+                                    markdown(
+                                        ui,
+                                        &mut vm.md_cache,
+                                        ("team_live", *sid),
+                                        &member.live_text,
+                                    );
+                                } else if let Some(n) = member.thinking_tokens {
+                                    ui.horizontal(|ui| {
+                                        ui.add(egui::Spinner::new().size(12.0));
+                                        ui.label(
+                                            RichText::new(format!("Thinking… ~{n} tokens"))
+                                                .color(theme::text_muted()),
+                                        );
+                                    });
+                                }
+                            });
+                        });
                         ui.add_space(8.0);
                     }
                 });
@@ -527,15 +685,15 @@ fn team_feed(ui: &mut egui::Ui, vm: &mut MultiSessionVm, handles: &[String]) -> 
     open_file
 }
 
-fn team_message_row(
+fn combined_entry_row(
     ui: &mut egui::Ui,
     cache: &mut CommonMarkCache,
     links: &mut PathLinks,
     cwd: &std::path::Path,
-    tm: &TeamMessage,
+    entry: &CombinedEntry,
 ) -> Option<PathBuf> {
-    match &tm.kind {
-        TeamMessageKind::User { target } => {
+    match &entry.kind {
+        CombinedKind::User { target } => {
             let indent = ui.available_width() * 0.15;
             ui.horizontal_top(|ui| {
                 ui.add_space(indent);
@@ -551,7 +709,7 @@ fn team_message_row(
                                 .as_deref()
                                 .map_or_else(|| "To: All".to_string(), |h| format!("To: #{h}"));
                             ui.label(RichText::new(to).small().strong().color(theme::accent()));
-                            links.markdown(ui, cache, cwd, tm.id, &tm.content_text)
+                            links.markdown(ui, cache, cwd, entry.id, &entry.text)
                         })
                         .inner
                     })
@@ -559,15 +717,37 @@ fn team_message_row(
             })
             .inner
         }
-        TeamMessageKind::Broadcast {
+        CombinedKind::MemberReply { handle, provider } => {
+            ui.horizontal_top(|ui| {
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+                if let Some(tex) = conversation::cli_symbol(ui.ctx(), *provider) {
+                    egui::Image::new(&tex).paint_at(ui, rect);
+                }
+                ui.vertical(|ui| {
+                    ui.label(
+                        RichText::new(format!("#{handle}"))
+                            .small()
+                            .strong()
+                            .color(theme::text()),
+                    );
+                    links.markdown(ui, cache, cwd, entry.id, &entry.text)
+                })
+                .inner
+            })
+            .inner
+        }
+        CombinedKind::Broadcast {
             sender_handle,
             sender_provider,
         } => {
+            // Distinct tinted + accent-bordered container so model-to-model messages stand out
+            // clearly from regular assistant responses to the user.
             egui::Frame::new()
-                .fill(theme::bg_raised())
-                .stroke(egui::Stroke::new(1.0, theme::accent()))
+                .fill(theme::ok_bg())
+                .stroke(egui::Stroke::new(1.5, theme::accent()))
                 .corner_radius(8)
-                .inner_margin(egui::Margin::same(8))
+                .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
                     ui.vertical(|ui| {
@@ -580,18 +760,26 @@ fn team_message_row(
                                 );
                             }
                             ui.label(
-                                RichText::new(format!("#{sender_handle}"))
+                                RichText::new(format!("#{sender_handle} \u{2192} Team"))
                                     .small()
                                     .strong()
                                     .color(theme::accent()),
                             );
-                            ui.label(
-                                RichText::new("broadcast")
-                                    .small()
-                                    .color(theme::text_muted()),
-                            );
+                            egui::Frame::new()
+                                .fill(theme::bg_app())
+                                .stroke(egui::Stroke::new(1.0, theme::accent()))
+                                .corner_radius(4)
+                                .inner_margin(egui::Margin::symmetric(5, 1))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new("Model-to-model")
+                                            .small()
+                                            .color(theme::accent()),
+                                    );
+                                });
                         });
-                        links.markdown(ui, cache, cwd, tm.id, &tm.content_text)
+                        ui.add_space(4.0);
+                        links.markdown(ui, cache, cwd, entry.id, &entry.text)
                     })
                     .inner
                 })
@@ -605,6 +793,7 @@ fn unified_composer(
     vm: &mut MultiSessionVm,
     handles: &[String],
     members: &HashMap<SessionId, SessionVm>,
+    any_busy: bool,
     env: &Env,
 ) {
     let (parsed_target, _) = parse_user_target(&vm.input, handles);
@@ -638,32 +827,6 @@ fn unified_composer(
             SessionStatus::Error(_) | SessionStatus::Closed => {}
         }
     }
-
-    // Quick target pills: clicking sets or clears the leading `#handle: ` prefix.
-    ui.horizontal_wrapped(|ui| {
-        ui.label(RichText::new("To:").small().color(theme::text_muted()));
-        let is_all = parsed_target.is_none();
-        if ui
-            .selectable_label(is_all, RichText::new("All").small())
-            .clicked()
-        {
-            strip_target_prefix(&mut vm.input, handles);
-            vm.handle_popup_dismissed = false;
-            vm.focus_input = true;
-        }
-        for h in handles {
-            let sel = parsed_target.as_deref() == Some(h.as_str());
-            if ui
-                .selectable_label(sel, RichText::new(format!("#{h}")).small())
-                .clicked()
-            {
-                set_target_prefix(&mut vm.input, handles, h);
-                vm.handle_popup_dismissed = false;
-                vm.focus_input = true;
-            }
-        }
-    });
-    ui.add_space(4.0);
 
     // `#` handle autocomplete popup: keep visible while pointer is over the popup so clicks land
     // before focus leaves `edit_id`; keyboard navigation stays strictly gated on `input_focused`.
@@ -739,6 +902,12 @@ fn unified_composer(
     } else {
         None
     };
+    let hotkey_other = pressed == Some(Action::SendOther);
+    let mut do_send = pressed.is_some();
+    let mut steer = match env.send_mode {
+        SendMode::Steer => !hotkey_other,
+        SendMode::Queue => hotkey_other,
+    };
 
     if std::mem::take(&mut vm.focus_input) {
         let ctx = ui.ctx();
@@ -764,90 +933,170 @@ fn unified_composer(
     };
 
     let hint = format!(
-        "Message all models, or #handle: message ({} to send)",
-        keymap::shortcut_text(Action::Send)
-    );
-    let edit_changed = egui::ScrollArea::vertical()
-        .id_salt(("multi_input_scroll", vm.multi.id))
-        .max_height(INPUT_MAX_HEIGHT)
-        .show(ui, |ui| {
-            ui.add(
-                egui::TextEdit::multiline(&mut vm.input)
-                    .id(edit_id)
-                    .desired_rows(2)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(hint)
-                    .layouter(&mut layouter),
-            )
-            .changed()
-        })
-        .inner;
-    if edit_changed {
-        vm.handle_popup_dismissed = false;
-    }
-
-    let hotkey_other = pressed == Some(Action::SendOther);
-    let mut do_send = pressed.is_some();
-    let mut steer = match env.send_mode {
-        SendMode::Steer => !hotkey_other,
-        SendMode::Queue => hotkey_other,
-    };
-
-    ui.add_space(4.0);
-    ui.horizontal(|ui| {
-        let has_body = !parse_user_target(&vm.input, handles).1.is_empty();
-        let can_send = has_body && target_alive;
-        let primary_label = if target_busy && env.send_mode == SendMode::Steer {
-            icons::with(icons::SEND, "Steer")
-        } else if target_busy {
-            icons::with(icons::SEND, "Queue")
-        } else {
-            icons::with(icons::SEND, "Send")
-        };
-        if ui
-            .add_enabled(
-                can_send,
-                egui::Button::new(RichText::new(primary_label).color(theme::text()))
-                    .fill(theme::accent()),
-            )
-            .on_disabled_hover_text(if !target_alive {
-                "Target model is not running"
-            } else {
-                "Type a message to send"
-            })
-            .clicked()
-        {
-            do_send = true;
-            steer = env.send_mode == SendMode::Steer;
-        }
+        "Message all models or #handle: ({} to {})",
+        keymap::shortcut_text(Action::Send),
         if target_busy {
-            let (alt_label, alt_steer, alt_tip) = match env.send_mode {
-                SendMode::Queue => (
-                    "Steer",
-                    true,
-                    format!(
-                        "Send immediately into running turn ({})",
-                        keymap::shortcut_text(Action::SendOther)
-                    ),
-                ),
-                SendMode::Steer => (
-                    "Queue",
-                    false,
-                    format!(
-                        "Queue until running turn finishes ({})",
-                        keymap::shortcut_text(Action::SendOther)
-                    ),
-                ),
-            };
+            "queue or steer"
+        } else {
+            "send"
+        }
+    );
+    let has_body = !parse_user_target(&vm.input, handles).1.is_empty();
+    let can_send = has_body && target_alive;
+
+    // Input box matching standalone `composer.rs`: same min/max rows, frame, and right-aligned
+    // 48x48 Send button + Stop All button.
+    let input_box = egui::Frame::new()
+        .fill(theme::bg_hover())
+        .stroke(egui::Stroke::new(1.5, theme::border_strong()))
+        .corner_radius(8)
+        .inner_margin(egui::Margin::same(6))
+        .show(ui, |ui| {
+            ui.horizontal_top(|ui| {
+                let w = (ui.available_width() - if any_busy { 156.0 } else { 64.0 }).max(40.0);
+                let max_h = INPUT_MAX_ROWS as f32 * ui.text_style_height(&egui::TextStyle::Body);
+                let input_h = ui
+                    .allocate_ui(egui::vec2(w, max_h), |ui| {
+                        egui::ScrollArea::vertical()
+                            .id_salt(("multi_input_scroll", vm.multi.id))
+                            .max_height(max_h)
+                            .auto_shrink([false, true])
+                            .show(ui, |ui| {
+                                if ui
+                                    .add(
+                                        egui::TextEdit::multiline(&mut vm.input)
+                                            .id(edit_id)
+                                            .frame(egui::Frame::NONE)
+                                            .desired_width(f32::INFINITY)
+                                            .desired_rows(INPUT_MIN_ROWS)
+                                            .layouter(&mut layouter)
+                                            .hint_text(hint),
+                                    )
+                                    .changed()
+                                {
+                                    vm.handle_popup_dismissed = false;
+                                }
+                            });
+                    })
+                    .response
+                    .rect
+                    .height();
+                let pad = ((input_h - BUTTON_SIZE) / 2.0).max(0.0);
+                ui.vertical(|ui| {
+                    ui.add_space(pad);
+                    ui.horizontal(|ui| {
+                        let btn = egui::Button::new(
+                            RichText::new(icons::SEND).size(26.0).color(theme::text()),
+                        )
+                        .fill(theme::accent())
+                        .min_size(egui::vec2(BUTTON_SIZE, BUTTON_SIZE));
+                        let mut resp = ui.add_enabled(can_send, btn).on_disabled_hover_text(
+                            if !target_alive {
+                                "Target model is not running"
+                            } else {
+                                "Type a message to send"
+                            },
+                        );
+                        if target_busy {
+                            resp = resp.on_hover_text(match env.send_mode {
+                                SendMode::Queue => format!(
+                                    "Queue: sent when the turn ends ({} to steer)",
+                                    keymap::shortcut_text(Action::SendOther)
+                                ),
+                                SendMode::Steer => format!(
+                                    "Steer: sent into the running turn ({} to queue)",
+                                    keymap::shortcut_text(Action::SendOther)
+                                ),
+                            });
+                        }
+                        if resp.clicked() {
+                            do_send = true;
+                            steer = env.send_mode == SendMode::Steer;
+                        }
+                        if any_busy {
+                            let stop = egui::Button::new(
+                                RichText::new(icons::with(icons::STOP, "Stop All"))
+                                    .color(theme::text()),
+                            )
+                            .fill(theme::danger())
+                            .min_size(egui::vec2(0.0, BUTTON_SIZE));
+                            if ui
+                                .add(stop)
+                                .on_hover_text(
+                                    "Stop all running models and clear queued broadcasts",
+                                )
+                                .clicked()
+                            {
+                                let _ = env.cmd_tx.send(ManagerCmd::InterruptMultiAll {
+                                    multi_id: vm.multi.id,
+                                });
+                            }
+                        }
+                    });
+                });
+            });
+        });
+
+    // Quick target pills sit directly under the input box (same row position as standalone
+    // composer controls).
+    let box_width = input_box.response.rect.width();
+    ui.add_space(4.0);
+    ui.scope(|ui| {
+        ui.set_max_width(box_width);
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("To:").small().color(theme::text_muted()));
+            let is_all = parsed_target.is_none();
             if ui
-                .add_enabled(can_send, egui::Button::new(alt_label))
-                .on_hover_text(alt_tip)
+                .selectable_label(is_all, RichText::new("All").small())
                 .clicked()
             {
-                do_send = true;
-                steer = alt_steer;
+                strip_target_prefix(&mut vm.input, handles);
+                vm.handle_popup_dismissed = false;
+                vm.focus_input = true;
             }
-        }
+            for h in handles {
+                let sel = parsed_target.as_deref() == Some(h.as_str());
+                if ui
+                    .selectable_label(sel, RichText::new(format!("#{h}")).small())
+                    .clicked()
+                {
+                    set_target_prefix(&mut vm.input, handles, h);
+                    vm.handle_popup_dismissed = false;
+                    vm.focus_input = true;
+                }
+            }
+            if target_busy {
+                let (alt_label, alt_steer, alt_tip) = match env.send_mode {
+                    SendMode::Queue => (
+                        "Steer",
+                        true,
+                        format!(
+                            "Send immediately into running turn ({})",
+                            keymap::shortcut_text(Action::SendOther)
+                        ),
+                    ),
+                    SendMode::Steer => (
+                        "Queue",
+                        false,
+                        format!(
+                            "Queue until running turn finishes ({})",
+                            keymap::shortcut_text(Action::SendOther)
+                        ),
+                    ),
+                };
+                if ui
+                    .add_enabled(
+                        can_send,
+                        egui::Button::new(RichText::new(alt_label).small()),
+                    )
+                    .on_hover_text(alt_tip)
+                    .clicked()
+                {
+                    do_send = true;
+                    steer = alt_steer;
+                }
+            }
+        });
     });
 
     if do_send && target_alive {
