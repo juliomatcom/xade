@@ -77,7 +77,9 @@ pub fn show<R>(ui: &egui::Ui, out: &egui::scroll_area::ScrollAreaOutput<R>, nav_
         let rect = Rect::from_min_size(corner - Vec2::splat(DIAMETER), Vec2::splat(DIAMETER));
         let id = out.id.with(("scroll_nav", is_up));
         let resp = ui
-            .interact(rect, id, Sense::click())
+            // Senses drags too: egui hands a click-only widget's drag to what is behind it, and a
+            // press that wanders over chat text would select it and open the Copy / Quote popup.
+            .interact(rect, id, Sense::click_and_drag())
             .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(if is_up {
                 "Scroll to top"
@@ -143,6 +145,8 @@ mod tests {
         inner: Rect,
         offset: f32,
         frames: u32,
+        /// `TextSelectionSettled` outputs seen, which open the Copy / Quote popup.
+        settled: usize,
     }
 
     impl Rig {
@@ -152,6 +156,7 @@ mod tests {
                 inner: Rect::NOTHING,
                 offset: 0.0,
                 frames: 0,
+                settled: 0,
             }
         }
 
@@ -174,7 +179,9 @@ mod tests {
                         let nav = take(ui.ctx(), nav_id);
                         let out = nav.area("chat").show(ui, |ui| {
                             let top = ui.cursor().min;
-                            ui.allocate_space(Vec2::new(100.0, 2000.0));
+                            for _ in 0..100 {
+                                ui.label("words to select in a chat message ".repeat(12));
+                            }
                             nav.jump_top(ui, top);
                             if nav.bottom {
                                 ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
@@ -185,6 +192,12 @@ mod tests {
                         offset = out.state.clamped_offset().y;
                     });
             });
+            self.settled += out
+                .platform_output
+                .commands
+                .iter()
+                .filter(|c| matches!(c, egui::OutputCommand::TextSelectionSettled(_)))
+                .count();
             out.drop_without_applying_deltas();
             self.inner = inner;
             self.offset = offset;
@@ -230,5 +243,57 @@ mod tests {
         // At the top only "down" is drawn, in the lowest slot.
         rig.click(rig.arrow(0.0));
         assert_eq!(rig.offset, bottom, "down jumps back to the bottom");
+    }
+
+    #[test]
+    fn pressing_an_arrow_never_selects_the_chat_text_under_it() {
+        let mut rig = Rig::new();
+        for _ in 0..4 {
+            rig.pass(vec![]);
+        }
+        let pos = rig.arrow(0.0);
+        // A double-click selects a word of the label beneath, as does a short drag.
+        rig.click(pos);
+        rig.click(pos);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let moved = pos + Vec2::new(-14.0, 0.0);
+        rig.pass(vec![egui::Event::PointerMoved(pos), button(pos, true)]);
+        rig.pass(vec![egui::Event::PointerMoved(moved)]);
+        rig.pass(vec![button(moved, false)]);
+        for _ in 0..5 {
+            rig.pass(vec![]);
+        }
+        assert_eq!(
+            rig.settled, 0,
+            "an arrow press must not open the selection popup"
+        );
+    }
+
+    #[test]
+    fn control_dragging_over_text_settles_a_selection() {
+        let mut rig = Rig::new();
+        for _ in 0..4 {
+            rig.pass(vec![]);
+        }
+        let a = egui::pos2(rig.inner.left() + 20.0, rig.inner.top() + 40.0);
+        let b = a + Vec2::new(120.0, 30.0);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        rig.pass(vec![egui::Event::PointerMoved(a), button(a, true)]);
+        rig.pass(vec![egui::Event::PointerMoved(b)]);
+        rig.pass(vec![button(b, false)]);
+        for _ in 0..5 {
+            rig.pass(vec![]);
+        }
+        assert!(rig.settled > 0, "settled={}", rig.settled);
     }
 }
