@@ -492,7 +492,6 @@ impl SessionManager {
             Ok(h) => h,
             Err(e) => return self.emit(None, AppEventKind::Error(e.to_string())),
         };
-        let _ = self.writer.send(WriteOp::InsertSession(session.clone()));
         let _ = self
             .writer
             .send(WriteOp::TouchWorkspace(session.workspace_id));
@@ -507,7 +506,8 @@ impl SessionManager {
             self.events.clone(),
             handle,
             1,
-        );
+        )
+        .unstored();
         self.start_actor(actor);
         self.emit(Some(id), AppEventKind::Status(SessionStatus::Idle));
     }

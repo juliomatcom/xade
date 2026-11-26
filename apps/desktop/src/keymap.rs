@@ -278,7 +278,7 @@ static DEFS: &[Def] = &[
         Action::Retile,
         Group::Layout,
         "Re-tile windows",
-        "cmd+k cmd+t",
+        "cmd+r",
     ),
     row(
         "toggle_sidebar",

@@ -417,7 +417,7 @@ fn assistant(
 ) -> Option<PathBuf> {
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
-        if let Some(tex) = provider_symbol(ui.ctx(), provider) {
+        if let Some(tex) = cli_symbol(ui.ctx(), provider) {
             egui::Image::new(&tex).paint_at(ui, rect);
         }
         ui.vertical(body).inner
@@ -425,26 +425,40 @@ fn assistant(
     .inner
 }
 
-/// The Claude symbol (`assets/claude-symbol.svg`, CC0, rendered to PNG at 4x the avatar).
-const CLAUDE_SYMBOL: &[u8] = include_bytes!("../../../assets/claude-symbol.png");
-
-/// The Google "G" (`assets/google-symbol.svg`, public domain and trademarked per Wikimedia
-/// Commons, file Google_"G"_logo.svg), Antigravity's symbol, rendered like the Claude one.
+// 80x80 PNGs (4x the avatar) pre-rendered from the unmodified SVG beside each in `assets/`; the
+// marks are their owners' trademarks (sources: wiki-llm/ui.md).
+const ANTHROPIC_SYMBOL: &[u8] = include_bytes!("../../../assets/anthropic-symbol.png");
 const GOOGLE_SYMBOL: &[u8] = include_bytes!("../../../assets/google-symbol.png");
+const CLAUDE_CODE_SYMBOL: &[u8] = include_bytes!("../../../assets/claude-code-symbol.png");
+const ANTIGRAVITY_SYMBOL: &[u8] = include_bytes!("../../../assets/antigravity-symbol.png");
 
-/// The provider's symbol as a texture, decoded and uploaded on first use (one per provider).
-pub(crate) fn provider_symbol(
+/// The logo of the company behind a provider, for window headers and the top bar.
+pub(crate) fn company_symbol(
     ctx: &egui::Context,
     provider: ProviderId,
 ) -> Option<egui::TextureHandle> {
-    let id = egui::Id::unique(("provider_symbol_texture", provider));
+    let (name, png) = match provider {
+        ProviderId::Claude => ("anthropic_symbol", ANTHROPIC_SYMBOL),
+        ProviderId::Antigravity => ("google_symbol", GOOGLE_SYMBOL),
+    };
+    symbol(ctx, name, png)
+}
+
+/// The logo of a provider's CLI, the avatar of its messages.
+pub(crate) fn cli_symbol(ctx: &egui::Context, provider: ProviderId) -> Option<egui::TextureHandle> {
+    let (name, png) = match provider {
+        ProviderId::Claude => ("claude_code_symbol", CLAUDE_CODE_SYMBOL),
+        ProviderId::Antigravity => ("antigravity_symbol", ANTIGRAVITY_SYMBOL),
+    };
+    symbol(ctx, name, png)
+}
+
+/// A symbol as a texture, decoded and uploaded on first use.
+fn symbol(ctx: &egui::Context, name: &'static str, png: &[u8]) -> Option<egui::TextureHandle> {
+    let id = egui::Id::unique(("symbol_texture", name));
     if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return Some(tex);
     }
-    let (name, png) = match provider {
-        ProviderId::Claude => ("claude_symbol", CLAUDE_SYMBOL),
-        ProviderId::Antigravity => ("google_symbol", GOOGLE_SYMBOL),
-    };
     let icon = eframe::icon_data::from_png_bytes(png)
         .map_err(|e| tracing::warn!("{name} not loaded: {e}"))
         .ok()?;
@@ -462,17 +476,23 @@ mod symbol_tests {
     use xade_core::ProviderId;
 
     #[test]
-    fn every_provider_symbol_decodes_into_its_own_cached_texture() {
+    fn every_company_and_cli_symbol_decodes_into_its_own_cached_texture() {
         let ctx = egui::Context::default();
-        let mut ids = Vec::new();
+        let mut ids = std::collections::HashSet::new();
         for p in [ProviderId::Claude, ProviderId::Antigravity] {
-            let tex = super::provider_symbol(&ctx, p).expect("symbol");
-            assert_eq!(tex.size(), [80, 80]);
-            let again = super::provider_symbol(&ctx, p).expect("cached second call");
-            assert_eq!(tex.id(), again.id(), "cached, not reloaded");
-            ids.push(tex.id());
+            for load in [super::company_symbol, super::cli_symbol] {
+                let tex = load(&ctx, p).expect("symbol");
+                assert_eq!(tex.size(), [80, 80]);
+                let again = load(&ctx, p).expect("cached second call");
+                assert_eq!(tex.id(), again.id(), "cached, not reloaded");
+                ids.insert(tex.id());
+            }
         }
-        assert_ne!(ids[0], ids[1], "one texture per provider");
+        assert_eq!(
+            ids.len(),
+            4,
+            "company and CLI logos differ for every provider"
+        );
     }
 }
 

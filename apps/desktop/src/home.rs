@@ -159,7 +159,10 @@ pub fn top_bar(app: &mut App, ui: &mut egui::Ui) {
                         can_tile,
                         egui::Button::new(icons::with(icons::TILE, "Tile")),
                     )
-                    .on_hover_text("Re-tile windows into a grid")
+                    .on_hover_text(format!(
+                        "Re-tile windows into a grid ({})",
+                        keymap::shortcut_text(Action::Retile)
+                    ))
                     .clicked()
                 {
                     app.tiling.retile();
@@ -400,7 +403,7 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[Qu
     );
     let painter = ui.painter();
     let mid = rect.center().y;
-    if let Some(tex) = crate::conversation::provider_symbol(ui.ctx(), provider) {
+    if let Some(tex) = crate::conversation::company_symbol(ui.ctx(), provider) {
         let r = egui::Rect::from_center_size(
             egui::pos2(rect.left() + QUOTA_SYMBOL / 2.0, mid),
             egui::vec2(QUOTA_SYMBOL, QUOTA_SYMBOL),

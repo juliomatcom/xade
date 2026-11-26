@@ -56,7 +56,7 @@ The `shortcuts` object maps an action name to its keys: `"cmd+t"`, or two keys f
 | `next_window` | `ctrl+tab` | Next window |
 | `prev_window` | `ctrl+shift+tab` | Previous window |
 | `maximize` | `cmd+k cmd+m` | Maximize / restore the focused window |
-| `retile` | `cmd+k cmd+t` | Re-tile windows |
+| `retile` | `cmd+r` | Re-tile windows (the top bar's Tile button) |
 | `toggle_sidebar` | `cmd+b` | Toggle the sidebar |
 | `focus_window_1` … `focus_window_9` | `cmd+1` … `cmd+9` | Focus window 1-9 |
 

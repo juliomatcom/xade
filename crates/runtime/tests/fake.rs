@@ -455,6 +455,60 @@ async fn context_goes_to_the_provider_but_not_into_the_transcript() {
     assert_eq!(user.content_text, "fix it");
 }
 
+#[tokio::test]
+async fn a_session_is_stored_only_once_a_message_is_sent() {
+    let dir = tempfile::tempdir().unwrap();
+    let provider = Arc::new(FakeProvider::default());
+    let mut h = common::start(dir.path(), provider.clone()).await;
+
+    // Configured but never written in: nothing is stored, closed or not.
+    let empty = create(&mut h, ProviderId::Claude).await;
+    rename(&h, empty, "never used");
+    close(&mut h, empty).await;
+    xade_runtime::flush(&h.writer).await;
+    let page = h.reader.list_sessions(None, None, 0, 24).await.unwrap();
+    assert_eq!(page.total, 0);
+
+    // What was chosen before the first message is in the row it creates.
+    let id = create(&mut h, ProviderId::Claude).await;
+    rename(&h, id, "chosen");
+    h.tx.send(ManagerCmd::SetAutoMode {
+        session_id: id,
+        on: false,
+    })
+    .unwrap();
+    h.tx.send(ManagerCmd::SetModel {
+        session_id: id,
+        model_id: "opus".into(),
+    })
+    .unwrap();
+    h.tx.send(ManagerCmd::SetEffort {
+        session_id: id,
+        effort: Effort::High,
+    })
+    .unwrap();
+    h.tx.send(ManagerCmd::Send {
+        session_id: id,
+        text: "hello".into(),
+        delivery: None,
+        context: None,
+    })
+    .unwrap();
+    // The row is readable by the time the UI hears of it, with no flush of ours.
+    h.until(5, |e| matches!(e.kind, AppEventKind::SessionStored))
+        .await;
+    let (row, msgs) = h.reader.load_session(id).await.unwrap();
+    assert_eq!(
+        (row.title.as_str(), row.model_id.as_str(), row.effort),
+        ("chosen", "opus", Effort::High)
+    );
+    assert!(!row.auto_mode);
+    assert_eq!(row.sent_model_id, "opus");
+    assert_eq!(msgs[0].content_text, "hello");
+    let page = h.reader.list_sessions(None, None, 0, 24).await.unwrap();
+    assert_eq!(page.total, 1);
+}
+
 // ----- fork -----
 
 use common::Harness;
@@ -1019,7 +1073,7 @@ async fn a_slow_snapshot_does_not_block_the_manager_and_shutdown_cancels_it() {
     assert!(left.is_empty(), "{left:?}");
     xade_runtime::flush(&h.writer).await;
     let page = h.reader.list_sessions(None, None, 0, 24).await.unwrap();
-    assert_eq!(page.total, 2, "no copy was saved");
+    assert_eq!(page.total, 1, "no copy was saved");
 }
 
 #[tokio::test]
@@ -1406,6 +1460,20 @@ async fn a_session_without_messages_cannot_be_forked() {
         .await;
 }
 
+/// An Antigravity session with these settings that was written in, so it is stored.
+async fn used_session(h: &mut Harness, model: &str, effort: Effort) {
+    h.create_on(ProviderId::Antigravity, model, effort, false);
+    let ev = h.until_status(5, SessionStatus::Idle).await;
+    let id = ev
+        .iter()
+        .find_map(|e| match &e.kind {
+            AppEventKind::SessionCreated(s) => Some(s.id),
+            _ => None,
+        })
+        .expect("SessionCreated");
+    send(h, id, "hi").await;
+}
+
 #[tokio::test]
 async fn a_fork_starts_from_the_targets_last_model_and_a_supported_effort() {
     let dir = tempfile::tempdir().unwrap();
@@ -1431,8 +1499,7 @@ async fn a_fork_starts_from_the_targets_last_model_and_a_supported_effort() {
     );
 
     // Target's latest session used "gem" with an effort it no longer lists (Max).
-    h.create_on(ProviderId::Antigravity, "gem", Effort::Max, false);
-    h.until_status(5, SessionStatus::Idle).await;
+    used_session(&mut h, "gem", Effort::Max).await;
     xade_runtime::flush(&h.writer).await;
     let second = fork(&mut h, src, ProviderId::Antigravity).await;
     let (row, _) = h.reader.load_session(second).await.unwrap();
@@ -1446,8 +1513,7 @@ async fn a_fork_starts_from_the_targets_last_model_and_a_supported_effort() {
     );
 
     // A level the model lists is kept.
-    h.create_on(ProviderId::Antigravity, "gem", Effort::Low, false);
-    h.until_status(5, SessionStatus::Idle).await;
+    used_session(&mut h, "gem", Effort::Low).await;
     xade_runtime::flush(&h.writer).await;
     let third = fork(&mut h, src, ProviderId::Antigravity).await;
     let (row, _) = h.reader.load_session(third).await.unwrap();

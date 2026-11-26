@@ -15,10 +15,52 @@ use crate::widgets::markdown::preview;
 use crate::widgets::tool_card::language_from_path;
 use crate::{chrome, theme};
 
-/// Larger files are refused.
+/// Larger text files are refused.
 pub const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
+/// Larger image files are refused.
+pub const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
 /// How often open files are compared with their mtime on disk.
 pub const DISK_POLL: Duration = Duration::from_secs(2);
+const IMAGE_EXTS: [&str; 7] = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "ico"];
+
+/// Whether `path` has a raster image extension supported by the file window.
+pub fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| IMAGE_EXTS.iter().any(|ext| ext.eq_ignore_ascii_case(e)))
+}
+
+/// Content read off the UI thread when opening a file.
+pub enum FileContent {
+    Text(String),
+    Image(egui::ColorImage),
+}
+
+/// Picture state when a file window displays an image instead of text.
+pub struct ImageState {
+    /// Decoded pixels waiting for GPU upload on the next frame; cleared right after upload.
+    pending: Option<egui::ColorImage>,
+    texture: Option<egui::TextureHandle>,
+    /// Pixel dimensions `[width, height]`.
+    pub size: [usize; 2],
+    /// `false` fits to the window; `true` shows 1:1 pixels inside a scroll area.
+    pub actual_size: bool,
+    /// A background decode after an on-disk mtime change is in flight.
+    pub reloading: bool,
+}
+
+impl ImageState {
+    fn new(pixels: egui::ColorImage) -> Self {
+        let size = pixels.size;
+        ImageState {
+            pending: Some(pixels),
+            texture: None,
+            size,
+            actual_size: false,
+            reloading: false,
+        }
+    }
+}
 
 /// bat's syntax set (two-face): far more languages than syntect's defaults. One static, since
 /// egui memoizes highlighting by the settings' address.
@@ -63,6 +105,8 @@ pub struct EditorVm {
     pub apply_rect: Option<egui::Rect>,
     /// 1-based inclusive lines of the last non-empty selection; kept while focus is elsewhere.
     pub selection: Option<(usize, usize)>,
+    /// Present when this window displays an image rather than text.
+    pub image: Option<ImageState>,
 }
 
 impl EditorVm {
@@ -106,8 +150,47 @@ impl EditorVm {
         Ok(())
     }
 
+    pub fn is_image(&self) -> bool {
+        self.image.is_some()
+    }
+
+    /// Replaces the displayed image after an off-thread reload, keeping the zoom choice.
+    pub fn set_image(&mut self, pixels: egui::ColorImage) {
+        let size = pixels.size;
+        if let Some(img) = self.image.as_mut() {
+            img.size = size;
+            img.pending = Some(pixels);
+            img.reloading = false;
+        } else {
+            self.image = Some(ImageState::new(pixels));
+        }
+        self.revision += 1;
+        self.disk_changed = false;
+        self.disk_mtime = self.path.as_deref().and_then(mtime);
+    }
+
+    /// Returns the path to decode off-thread when an open image's mtime changed on disk.
+    pub fn image_needs_reload(&mut self) -> Option<PathBuf> {
+        let img = self.image.as_mut()?;
+        if img.reloading {
+            return None;
+        }
+        let path = self.path.as_ref()?;
+        let now = mtime(path)?;
+        if Some(now) == self.disk_mtime {
+            return None;
+        }
+        img.reloading = true;
+        self.disk_mtime = Some(now);
+        Some(path.clone())
+    }
+
     /// Notices a file changed by someone else: clean editors reload, dirty ones flag it.
+    /// Images reload asynchronously via `image_needs_reload`.
     pub fn check_disk(&mut self) -> Result<(), String> {
+        if self.is_image() {
+            return Ok(());
+        }
         let Some(now) = self.path.as_deref().and_then(mtime) else {
             return Ok(());
         };
@@ -166,6 +249,36 @@ impl Editors {
                 window_rect: None,
                 apply_rect: None,
                 selection: None,
+                image: None,
+            },
+        );
+        id
+    }
+
+    pub fn create_image(&mut self, path: PathBuf, pixels: egui::ColorImage) -> EditorId {
+        self.next_id += 1;
+        let id = EditorId(self.next_id);
+        let disk_mtime = mtime(&path);
+        self.map.insert(
+            id,
+            EditorVm {
+                id,
+                path: Some(path),
+                untitled: 0,
+                text: String::new(),
+                dirty: false,
+                revision: 0,
+                busy: false,
+                close_after_save: false,
+                preview: false,
+                md_cache: crate::widgets::markdown::new_cache(),
+                disk_mtime,
+                disk_changed: false,
+                collapsed: false,
+                window_rect: None,
+                apply_rect: None,
+                selection: None,
+                image: Some(ImageState::new(pixels)),
             },
         );
         id
@@ -199,15 +312,51 @@ pub fn mtime(path: &Path) -> Option<SystemTime> {
 
 /// Reads a UTF-8 text file of at most `MAX_FILE_BYTES`.
 pub fn read_file(path: &Path) -> Result<String, String> {
-    let name = path.file_name().map_or_else(
-        || path.display().to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
+    let name = display_name(path);
     let meta = std::fs::metadata(path).map_err(|e| format!("Cannot open {name}: {e}"))?;
     if meta.len() > MAX_FILE_BYTES {
         return Err(format!("{name} is larger than 5 MB"));
     }
     std::fs::read_to_string(path).map_err(|e| format!("Cannot open {name}: {e}"))
+}
+
+/// Decodes a raster image of at most `MAX_IMAGE_BYTES` into RGBA pixels (blocking).
+pub fn read_image(path: &Path) -> Result<egui::ColorImage, String> {
+    let name = display_name(path);
+    let meta = std::fs::metadata(path).map_err(|e| format!("Cannot open {name}: {e}"))?;
+    if meta.len() > MAX_IMAGE_BYTES {
+        let mb = MAX_IMAGE_BYTES / (1024 * 1024);
+        return Err(format!("{name} is larger than {mb} MB"));
+    }
+    let bytes = std::fs::read(path).map_err(|e| format!("Cannot open {name}: {e}"))?;
+    let reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .map_err(|e| format!("Cannot open {name}: {e}"))?;
+    let rgba = reader
+        .decode()
+        .map_err(|e| format!("Cannot open {name}: {e}"))?
+        .into_rgba8();
+    let (w, h) = rgba.dimensions();
+    Ok(egui::ColorImage::from_rgba_unmultiplied(
+        [w as usize, h as usize],
+        rgba.as_raw(),
+    ))
+}
+
+/// Reads `path` as an image when its extension is a supported raster format, else as UTF-8 text.
+pub fn read_entry(path: &Path) -> Result<FileContent, String> {
+    if is_image_path(path) {
+        read_image(path).map(FileContent::Image)
+    } else {
+        read_file(path).map(FileContent::Text)
+    }
+}
+
+fn display_name(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || path.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 /// Writes through a temp file in the same directory, then renames it over `path`.
@@ -294,9 +443,10 @@ pub fn show(
     let label = if vm.dirty {
         format!("{title} \u{25CF}")
     } else {
-        title
+        title.clone()
     };
-    let markdown_file = vm.is_markdown();
+    let is_image = vm.is_image();
+    let markdown_file = !is_image && vm.is_markdown();
     chrome::header(
         ui,
         chrome::HeaderState {
@@ -310,7 +460,16 @@ pub fn show(
         |ui| {
             ui.add(egui::Label::new(RichText::new(label).strong()).truncate())
                 .on_hover_text(hover);
-            if markdown_file && ui.selectable_label(vm.preview, "Preview").clicked() {
+            if let Some(img) = vm.image.as_mut() {
+                ui.label(
+                    RichText::new(format!("{} \u{00D7} {}", img.size[0], img.size[1]))
+                        .small()
+                        .color(theme::text_muted()),
+                );
+                if ui.selectable_label(img.actual_size, "1:1").clicked() {
+                    img.actual_size = !img.actual_size;
+                }
+            } else if markdown_file && ui.selectable_label(vm.preview, "Preview").clicked() {
                 vm.preview = !vm.preview;
             }
         },
@@ -321,32 +480,91 @@ pub fn show(
     egui::CentralPanel::default()
         .frame(egui::Frame::NONE.inner_margin(egui::Margin::same(6)))
         .show(ui, |ui| {
-            if vm.disk_changed {
-                out.error = disk_bar(ui, vm);
-            }
-            if vm.preview && markdown_file {
-                egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        let id = crate::find::preview_id(vm.id);
-                        let mark = crate::find::mark(
-                            ui.ctx(),
-                            crate::workspace::WindowKind::Editor(vm.id),
-                        );
-                        let jump = mark.as_ref().is_some_and(|m| crate::find::take_jump(ui, m));
-                        let from = ui
-                            .ctx()
-                            .graphics(|g| g.get(ui.layer_id()).map_or(0, |l| l.next_idx().0));
-                        preview(ui, &mut vm.md_cache, id, &vm.text, mark.as_ref(), jump);
-                        if mark.is_some() {
-                            crate::find::blacken_current(ui, from);
-                        }
-                    });
+            if is_image {
+                show_image(ui, vm, &title);
             } else {
-                edit(ui, vm, show_whitespace);
+                if vm.disk_changed {
+                    out.error = disk_bar(ui, vm);
+                }
+                if vm.preview && markdown_file {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            let id = crate::find::preview_id(vm.id);
+                            let mark = crate::find::mark(
+                                ui.ctx(),
+                                crate::workspace::WindowKind::Editor(vm.id),
+                            );
+                            let jump = mark.as_ref().is_some_and(|m| crate::find::take_jump(ui, m));
+                            let from = ui
+                                .ctx()
+                                .graphics(|g| g.get(ui.layer_id()).map_or(0, |l| l.next_idx().0));
+                            preview(ui, &mut vm.md_cache, id, &vm.text, mark.as_ref(), jump);
+                            if mark.is_some() {
+                                crate::find::blacken_current(ui, from);
+                            }
+                        });
+                } else {
+                    edit(ui, vm, show_whitespace);
+                }
             }
         });
     out
+}
+
+/// Draws an image centered inside the window, scaled to fit or at 1:1 pixels inside a scroll area.
+fn show_image(ui: &mut egui::Ui, vm: &mut EditorVm, title: &str) {
+    let Some(img) = vm.image.as_mut() else {
+        return;
+    };
+    if let Some(pixels) = img.pending.take() {
+        let name = format!("file-image-{}", vm.id.0);
+        img.texture = Some(
+            ui.ctx()
+                .load_texture(name, pixels, egui::TextureOptions::LINEAR),
+        );
+    }
+    let Some(tex) = &img.texture else {
+        return;
+    };
+    let natural = egui::vec2(img.size[0].max(1) as f32, img.size[1].max(1) as f32);
+    let draw = |ui: &mut egui::Ui, size: egui::Vec2| {
+        let resp = ui.add(
+            egui::Image::from_texture((tex.id(), size))
+                .fit_to_exact_size(size)
+                .alt_text(title),
+        );
+        ui.painter().rect_stroke(
+            resp.rect,
+            0.0,
+            egui::Stroke::new(1.0, theme::border()),
+            egui::StrokeKind::Outside,
+        );
+    };
+    if img.actual_size {
+        egui::ScrollArea::both()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                let avail = ui.available_size();
+                let pad_x = ((avail.x - natural.x) * 0.5).max(0.0);
+                let pad_y = ((avail.y - natural.y) * 0.5).max(0.0);
+                ui.add_space(pad_y);
+                ui.horizontal(|ui| {
+                    ui.add_space(pad_x);
+                    draw(ui, natural);
+                });
+            });
+    } else {
+        let avail = (ui.available_size() - egui::vec2(4.0, 4.0)).max(egui::vec2(1.0, 1.0));
+        let scale = (avail.x / natural.x).min(avail.y / natural.y).min(1.0);
+        let size = (natural * scale).max(egui::vec2(1.0, 1.0));
+        let pad = ((ui.available_size() - size) * 0.5).max(egui::Vec2::ZERO);
+        ui.add_space(pad.y);
+        ui.horizontal(|ui| {
+            ui.add_space(pad.x);
+            draw(ui, size);
+        });
+    }
 }
 
 fn disk_bar(ui: &mut egui::Ui, vm: &mut EditorVm) -> Option<String> {
@@ -771,6 +989,100 @@ mod tests {
         vm.disk_mtime = Some(SystemTime::UNIX_EPOCH);
         vm.check_disk().unwrap();
         assert!(vm.disk_changed && vm.text == "two");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_paths_are_recognized_case_insensitively() {
+        for name in [
+            "a.png", "b.PNG", "c.jpg", "d.JPEG", "e.gif", "f.webp", "g.bmp", "h.ico",
+        ] {
+            assert!(is_image_path(Path::new(name)), "{name}");
+        }
+        for name in ["a.rs", "README.md", "Makefile", "diagram.svg", "data.bin"] {
+            assert!(!is_image_path(Path::new(name)), "{name}");
+        }
+    }
+
+    #[test]
+    fn read_entry_decodes_raster_formats_and_rejects_bad_or_oversized_images() {
+        let dir = std::env::temp_dir().join(format!("xade-img-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let rgba = image::RgbaImage::from_pixel(4, 3, image::Rgba([20, 140, 220, 255]));
+        let rgb = image::RgbImage::from_pixel(4, 3, image::Rgb([20, 140, 220]));
+        for (name, format, use_rgb) in [
+            ("a.png", image::ImageFormat::Png, false),
+            ("b.jpg", image::ImageFormat::Jpeg, true),
+            ("c.gif", image::ImageFormat::Gif, false),
+            ("d.webp", image::ImageFormat::WebP, false),
+            ("e.bmp", image::ImageFormat::Bmp, true),
+            ("f.ico", image::ImageFormat::Ico, false),
+        ] {
+            let p = dir.join(name);
+            if use_rgb {
+                rgb.save_with_format(&p, format).unwrap();
+            } else {
+                rgba.save_with_format(&p, format).unwrap();
+            }
+            match read_entry(&p).unwrap() {
+                FileContent::Image(img) => assert_eq!(img.size, [4, 3], "{name}"),
+                FileContent::Text(_) => panic!("expected image for {name}"),
+            }
+        }
+
+        let txt = dir.join("note.txt");
+        std::fs::write(&txt, "hello").unwrap();
+        assert!(matches!(read_entry(&txt), Ok(FileContent::Text(s)) if s == "hello"));
+
+        let corrupt = dir.join("broken.png");
+        std::fs::write(&corrupt, b"not a png").unwrap();
+        assert!(read_entry(&corrupt).is_err());
+
+        let huge = dir.join("huge.png");
+        std::fs::File::create(&huge)
+            .unwrap()
+            .set_len(MAX_IMAGE_BYTES + 1)
+            .unwrap();
+        assert!(matches!(read_entry(&huge), Err(e) if e.contains("larger than")));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn image_window_uploads_texture_and_reloads_on_mtime_change() {
+        let dir = std::env::temp_dir().join(format!("xade-imgvm-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("pic.png");
+        std::fs::write(&path, b"placeholder").unwrap();
+
+        let mut ed = Editors::default();
+        let pixels = egui::ColorImage::filled([64, 32], egui::Color32::from_rgb(10, 20, 30));
+        let id = ed.create_image(path.clone(), pixels);
+        let vm = ed.map.get_mut(&id).unwrap();
+        assert!(vm.is_image());
+        assert!(vm.image.as_ref().unwrap().pending.is_some());
+
+        frames(vm, 2);
+        let img = vm.image.as_ref().unwrap();
+        assert!(img.pending.is_none(), "uploaded and cleared");
+        assert!(img.texture.is_some());
+
+        vm.image.as_mut().unwrap().actual_size = true;
+        frames(vm, 2);
+
+        // Unchanged mtime needs no reload; changed mtime queues one once.
+        assert!(vm.image_needs_reload().is_none());
+        vm.disk_mtime = Some(SystemTime::UNIX_EPOCH);
+        assert_eq!(vm.image_needs_reload(), Some(path));
+        assert!(vm.image_needs_reload().is_none(), "one reload in flight");
+
+        vm.set_image(egui::ColorImage::filled([128, 64], egui::Color32::WHITE));
+        let img = vm.image.as_ref().unwrap();
+        assert_eq!(img.size, [128, 64]);
+        assert!(img.actual_size, "zoom choice kept across reloads");
+        assert!(!img.reloading);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

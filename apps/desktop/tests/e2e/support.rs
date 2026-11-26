@@ -134,6 +134,11 @@ impl Xade {
         self.ui.event(Event::Text(text.to_string()));
         self.settle();
     }
+
+    /// Writes a binary file (such as an image) into the workspace folder.
+    pub fn write_file(&self, name: &str, bytes: &[u8]) {
+        std::fs::write(self.dir.join("workspace").join(name), bytes).unwrap();
+    }
 }
 
 impl Drop for Xade {

@@ -42,3 +42,30 @@ fn a_markdown_file_opens_previews_wrapped_and_is_searchable() {
     x.press(Modifiers::NONE, Key::Escape);
     assert!(x.ui.query_by_label("1 / 1").is_none(), "Esc closes the bar");
 }
+
+/// Clicking an image file in the workspace opens it in a file window with its dimensions and
+/// 1:1 toggle instead of failing as non-UTF-8 text.
+#[test]
+fn an_image_file_opens_in_a_file_window() {
+    let x_img = image::RgbaImage::from_pixel(120, 80, image::Rgba([20, 140, 220, 255]));
+    let mut png = Vec::new();
+    x_img
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+
+    let mut x = Xade::start(&[], [1280.0, 800.0]);
+    x.write_file("shot.png", &png);
+
+    x.ui.get_by_label_contains("workspace  (1)").click();
+    x.wait_for("shot.png in the sidebar", |ui| {
+        ui.query_by_label("shot.png").is_some()
+    });
+    x.ui.get_by_label("shot.png").click();
+    x.wait_for("the image file window", |ui| {
+        ui.query_by_label("120 \u{00D7} 80").is_some() && ui.query_by_label("1:1").is_some()
+    });
+
+    x.ui.get_by_label("1:1").click();
+    x.settle();
+    assert!(x.ui.query_by_label("Could not open the file").is_none());
+}

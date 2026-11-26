@@ -1,6 +1,6 @@
 [package]
 name = "xade"
-version = "0.4.3"
+version = "0.4.4"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -33,7 +33,7 @@ tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 uuid = { version = "=1.29.3", features = ["v4"] }
 ignore = "=0.4.35"
 arboard = { version = "=3.7.0", default-features = false }
-image = { version = "=0.25.10", default-features = false, features = ["png"] }
+image = { version = "=0.25.10", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "ico"] }
 
 [dev-dependencies]
 egui_kittest = { version = "=0.37.0", features = ["eframe"] }

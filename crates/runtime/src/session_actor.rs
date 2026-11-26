@@ -49,6 +49,11 @@ pub(crate) struct Actor {
     /// The hand-off sent and not yet seen processed (no assistant output since). Put back when
     /// the turn ends first (stopped during the handshake, errored), so it is not lost.
     handoff_sent: Option<String>,
+    /// A new session has no row until its first message, so one nobody wrote in leaves nothing.
+    /// Until then `UpdateSession` writes match no row and `session` carries every change.
+    unstored: bool,
+    /// The row was just inserted and `SessionStored` is still to be sent.
+    announce_stored: bool,
 }
 
 impl Actor {
@@ -75,7 +80,15 @@ impl Actor {
             last_error: None,
             handoff: None,
             handoff_sent: None,
+            unstored: false,
+            announce_stored: false,
         }
+    }
+
+    /// A session that is not in the store yet.
+    pub(crate) fn unstored(mut self) -> Self {
+        self.unstored = true;
+        self
     }
 
     /// Text the provider gets in front of the first prompt (a fork's history).
@@ -103,6 +116,11 @@ impl Actor {
                     }
                 },
             };
+            if std::mem::take(&mut self.announce_stored) {
+                // The UI reads the store as soon as it hears of the row.
+                crate::flush(&self.writer).await;
+                self.emit(AppEventKind::SessionStored);
+            }
             if !keep_going {
                 break;
             }
@@ -159,6 +177,15 @@ impl Actor {
         m
     }
 
+    /// Stores a message, after the session's row when this is its first.
+    fn store_message(&mut self, m: Message) {
+        if std::mem::take(&mut self.unstored) {
+            self.write(WriteOp::InsertSession(self.session.clone()));
+            self.announce_stored = true;
+        }
+        self.write(WriteOp::InsertMessage(m));
+    }
+
     fn command(&self, cmd: SessionCommand) {
         if self.handle.commands.send(cmd).is_err() {
             self.emit(AppEventKind::Error("provider is not running".into()));
@@ -186,6 +213,9 @@ impl Actor {
                         self.write(op);
                     }
                 }
+                let mut msg = self.insert_message(Role::User, text.clone());
+                msg.tool_name = delivery.map(|d| d.tag().to_string());
+                self.store_message(msg);
                 if self.session.sent_model_id != self.session.model_id
                     || self.session.sent_effort != self.session.effort
                 {
@@ -199,9 +229,6 @@ impl Actor {
                         effort: self.session.effort,
                     });
                 }
-                let mut msg = self.insert_message(Role::User, text.clone());
-                msg.tool_name = delivery.map(|d| d.tag().to_string());
-                self.write(WriteOp::InsertMessage(msg));
                 if self.status != SessionStatus::Streaming {
                     self.set_status(SessionStatus::Streaming);
                 }
@@ -335,7 +362,7 @@ impl Actor {
             }
             ProviderEvent::AssistantText { text } => {
                 let m = self.insert_message(Role::Assistant, text.clone());
-                self.write(WriteOp::InsertMessage(m));
+                self.store_message(m);
             }
             ProviderEvent::ToolUse {
                 tool_use_id,
@@ -346,7 +373,7 @@ impl Actor {
                 m.tool_name = Some(name.clone());
                 m.tool_use_id = Some(tool_use_id.clone());
                 m.tool_payload_json = Some(input_json.clone());
-                self.write(WriteOp::InsertMessage(m));
+                self.store_message(m);
             }
             ProviderEvent::ToolResult {
                 tool_use_id,
@@ -358,7 +385,7 @@ impl Actor {
                 m.tool_use_id = Some(tool_use_id.clone());
                 m.tool_payload_json = structured_json.clone();
                 m.is_error = *is_error;
-                self.write(WriteOp::InsertMessage(m));
+                self.store_message(m);
             }
             ProviderEvent::PermissionRequest { .. } => {
                 self.emit(AppEventKind::Provider(ev));

@@ -6,6 +6,7 @@
 - FTS5 trigram `search_index` is filled only by triggers: session titles, and message text for user/assistant roles.
 - Search: empty lists; under 3 chars is `LIKE` on title and preview; otherwise FTS plus a nucleo title fuzzy pass. Rank: exact title substring, FTS bm25, fuzzy-only score; ties by `updated_at` newest.
 - Pages are zero-based; `max_seq` is 0 for a session with no messages. Timestamps are fixed-width UTC RFC3339 text.
+- A session nobody sent a message in has no row, so it is never listed and never feeds `last_model_choice` or `last_provider`.
 - A user message sent while a turn ran has `tool_name` `queued` or `steered` (`Delivery`); the chat badge reads it. New sessions start with `last_model_choice(provider)` (model, effort and Auto mode of that provider's latest Xade session, so a model id never crosses providers); `last_provider` is the latest Xade session's provider.
 - `sent_model_id`/`sent_effort` are the model and effort of the last sent message (`WriteOp::MarkSent`, written by the actor on Send); the composer's context-cost warning compares them with the current choice, so it survives closing the window. Empty model: nothing sent yet.
 - `sessions.origin` is `xade` or `claude_code`; `(provider_id, provider_session_id)` is unique. `quota` holds the last window per kind (Claude's); the actor writes it on every `Quota` event. Antigravity's quota is polled and kept in memory only.

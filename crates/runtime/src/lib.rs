@@ -111,6 +111,8 @@ pub enum AppEventKind {
     /// Every provider event except `Quota`; deltas are never persisted.
     Provider(ProviderEvent),
     SessionCreated(Session),
+    /// A new session's row is now readable: its first message was stored.
+    SessionStored,
     /// Reply to `Open`: the stored row and its full history.
     SessionOpened {
         session: Session,

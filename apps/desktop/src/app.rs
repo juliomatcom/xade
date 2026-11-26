@@ -126,10 +126,15 @@ pub enum UiMsg {
         session: SessionId,
         paths: Vec<PathBuf>,
     },
-    /// A file picked with Open File, read off the UI thread.
+    /// A file picked with Open File, read (or decoded, for images) off the UI thread.
     FileOpened {
         path: PathBuf,
-        text: Result<String, String>,
+        content: Result<editor::FileContent, String>,
+    },
+    /// An open image re-decoded off the UI thread after its mtime changed on disk.
+    ImageReloaded {
+        id: EditorId,
+        result: Result<egui::ColorImage, String>,
     },
     /// A folder read for the file tree finished.
     DirListed {
@@ -736,8 +741,8 @@ impl App {
         }
         let bridge = self.bridge.clone();
         self.rt.spawn_blocking(move || {
-            let text = editor::read_file(&path);
-            bridge.send(UiMsg::FileOpened { path, text });
+            let content = editor::read_entry(&path);
+            bridge.send(UiMsg::FileOpened { path, content });
         });
     }
 
@@ -1535,26 +1540,46 @@ impl App {
             };
             let path = file.path().to_path_buf();
             let read = path.clone();
-            let text = tokio::task::spawn_blocking(move || editor::read_file(&read))
+            let content = tokio::task::spawn_blocking(move || editor::read_entry(&read))
                 .await
                 .unwrap_or_else(|e| Err(e.to_string()));
-            bridge.send(UiMsg::FileOpened { path, text });
+            bridge.send(UiMsg::FileOpened { path, content });
         });
     }
 
-    fn on_file_opened(&mut self, path: PathBuf, text: Result<String, String>) {
+    fn on_file_opened(&mut self, path: PathBuf, content: Result<editor::FileContent, String>) {
         let restoring = self.restoring.remove(&Saved::File(path.clone()));
-        match text {
+        match content {
             Err(e) if restoring => {
                 tracing::warn!(error = %e, "skipping a window that did not reopen")
             }
             Err(e) => self.report(ErrorReport::new("Could not open the file", e)),
-            Ok(text) => {
+            Ok(content) => {
                 let id = match self.editors.find_path(&path) {
                     Some(id) => id,
-                    None => self.editors.create(Some(path), text),
+                    None => match content {
+                        editor::FileContent::Text(text) => self.editors.create(Some(path), text),
+                        editor::FileContent::Image(pixels) => {
+                            self.editors.create_image(path, pixels)
+                        }
+                    },
                 };
                 self.focus(WindowKind::Editor(id));
+            }
+        }
+    }
+
+    fn on_image_reloaded(&mut self, id: EditorId, result: Result<egui::ColorImage, String>) {
+        let Some(vm) = self.editors.map.get_mut(&id) else {
+            return;
+        };
+        match result {
+            Ok(pixels) => vm.set_image(pixels),
+            Err(e) => {
+                if let Some(img) = vm.image.as_mut() {
+                    img.reloading = false;
+                }
+                self.warn(e);
             }
         }
     }
@@ -1562,7 +1587,12 @@ impl App {
     /// Writes the editor's text, asking for a path first when it has none or `as_new`.
     pub fn save_editor(&mut self, id: EditorId, as_new: bool, close_after: bool) {
         let dir = self.target_dir();
-        let Some(vm) = self.editors.map.get_mut(&id).filter(|vm| !vm.busy) else {
+        let Some(vm) = self
+            .editors
+            .map
+            .get_mut(&id)
+            .filter(|vm| !vm.busy && !vm.is_image())
+        else {
             return;
         };
         vm.busy = true;
@@ -1695,12 +1725,22 @@ impl App {
             return;
         }
         self.editors.checked = Some(Instant::now());
-        let failures: Vec<String> = self
-            .editors
-            .map
-            .values_mut()
-            .filter_map(|vm| vm.check_disk().err())
-            .collect();
+        let mut failures = Vec::new();
+        let mut image_reloads = Vec::new();
+        for (&id, vm) in &mut self.editors.map {
+            if let Some(path) = vm.image_needs_reload() {
+                image_reloads.push((id, path));
+            } else if let Err(e) = vm.check_disk() {
+                failures.push(e);
+            }
+        }
+        for (id, path) in image_reloads {
+            let bridge = self.bridge.clone();
+            self.rt.spawn_blocking(move || {
+                let result = editor::read_image(&path);
+                bridge.send(UiMsg::ImageReloaded { id, result });
+            });
+        }
         for e in failures {
             self.warn(e);
         }
@@ -1950,7 +1990,8 @@ impl App {
                     composer::insert_mentions(vm, &paths);
                 }
             }
-            UiMsg::FileOpened { path, text } => self.on_file_opened(path, text),
+            UiMsg::FileOpened { path, content } => self.on_file_opened(path, content),
+            UiMsg::ImageReloaded { id, result } => self.on_image_reloaded(id, result),
             UiMsg::DirListed { path, result } => self.tree.loaded(&path, result),
             UiMsg::Saved {
                 id,
@@ -2171,6 +2212,7 @@ impl App {
                 self.refresh_workspaces();
                 self.refresh_cards();
             }
+            (Some(_), AppEventKind::SessionStored) => self.refresh_cards(),
             (Some(_), AppEventKind::SessionOpened { session, messages }) => {
                 self.restoring.remove(&Saved::Session(session.id));
                 self.insert_vm(session, messages);
@@ -2831,7 +2873,7 @@ mod tests {
         // What `open_settings` sends once the file is read.
         app.on_msg(UiMsg::FileOpened {
             path: file.clone(),
-            text: Ok(text),
+            content: Ok(editor::FileContent::Text(text)),
         });
         let id = app.editors.find_path(&file).expect("editor opened");
         assert_eq!(app.focused, Some(WindowKind::Editor(id)));
@@ -2994,11 +3036,11 @@ mod tests {
         app.on_msg(event(gone, AppEventKind::Error("not found".into())));
         app.on_msg(UiMsg::FileOpened {
             path: missing,
-            text: Err("No such file".into()),
+            content: Err("No such file".into()),
         });
         app.on_msg(UiMsg::FileOpened {
             path: present.clone(),
-            text: Ok("fn main() {}".into()),
+            content: Ok(editor::FileContent::Text("fn main() {}".into())),
         });
         // Only the failed ones went, with no error shown; the rest kept their place.
         assert!(app.errors.current().is_none());
@@ -3424,6 +3466,22 @@ mod tests {
                 .drop_without_applying_deltas();
         }
         assert_eq!(app.editors.pending_close, Some(id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn save_editor_ignores_image_windows() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = test_app(&rt);
+        let path = dir.join("shot.png");
+        let original = b"original-bytes";
+        std::fs::write(&path, original).unwrap();
+        let pixels = egui::ColorImage::filled([8, 8], egui::Color32::RED);
+        let id = app.editors.create_image(path.clone(), pixels);
+        app.focus(WindowKind::Editor(id));
+        app.save_editor(id, false, false);
+        assert!(!app.editors.map[&id].busy);
+        assert_eq!(std::fs::read(&path).unwrap(), original);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
