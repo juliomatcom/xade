@@ -11,13 +11,14 @@ XADE_DEMO_OUT="$out" cargo test -p xade --release --test demo -- --ignored
 web=site/public
 docs=docs/images
 mkdir -p "$docs"
+# The master is already the video's size; the camera zooms while it records.
 video() { ffmpeg -y -loglevel error -i "$out/master.mp4" -an "$@"; }
 still() { magick "$out/$1.png" -resize "$3" -quality 86 "$2"; }
 
 # Hero video, in two codecs.
-video -vf "scale=1920:-2:flags=lanczos" -c:v libx264 -preset veryslow -crf 26 \
+video -c:v libx264 -preset veryslow -crf 26 \
   -pix_fmt yuv420p -movflags +faststart "$web/multi-session.mp4"
-video -vf "scale=1920:-2:flags=lanczos" -c:v libvpx-vp9 -crf 38 -b:v 0 -row-mt 1 \
+video -c:v libvpx-vp9 -crf 38 -b:v 0 -row-mt 1 \
   -pix_fmt yuv420p "$web/multi-session.webm"
 
 # GitHub plays no repository video inline, so the README gets an animated WebP.
@@ -27,8 +28,8 @@ video -vf "fps=12,scale=1280:-2:flags=lanczos" -c:v libwebp_anim -quality 72 \
 still team "$web/app.webp" 2960x
 still home "$web/app-home.webp" 2960x
 # The New Multi-Session dialog alone, cut from the middle of its frame.
-magick "$out/modal.png" -gravity center -crop 1620x940+0+0 +repage -quality 86 \
-  "$web/multi-session-new.webp"
+magick "$out/modal.png" -gravity center -crop 2430x1410+0+0 +repage -resize 1620x \
+  -quality 86 "$web/multi-session-new.webp"
 cp "$web/multi-session-new.webp" "$docs/multi-session-new.webp"
 still member "$docs/multi-session-member.webp" 1480x
 still team-done "$docs/multi-session-team.webp" 1480x

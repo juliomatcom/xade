@@ -13,8 +13,9 @@ pub const FABLE: &str = "claude-fable-5-2";
 pub const OPUS: &str = "claude-opus-5-5";
 pub const SONNET: &str = "claude-sonnet-5-5";
 pub const NEON: &str = "gemini-4-neon";
+pub const SOL: &str = "gpt-6.2-sol";
 
-/// The live sessions of both providers, by model id (each model is used by one session).
+/// The live sessions of all providers, by model id (each model is used by one session).
 #[derive(Default)]
 pub struct Stage {
     events: Mutex<HashMap<String, mpsc::UnboundedSender<ProviderEvent>>>,
@@ -83,7 +84,7 @@ impl AgentProvider for DemoProvider {
                 model(SONNET, "Sonnet 5.5"),
             ],
             ProviderId::Antigravity => vec![model(NEON, "Gemini 4 Neon")],
-            ProviderId::Codex => vec![model("gpt-6-luna", "GPT-6-Luna")],
+            ProviderId::Codex => vec![model(SOL, "GPT-6.2-Sol"), model("gpt-6-luna", "GPT-6-Luna")],
         }
     }
     fn default_model(&self) -> String {
@@ -100,8 +101,15 @@ impl AgentProvider for DemoProvider {
     }
     fn quota(&self) -> Result<Vec<QuotaGroup>, ProviderError> {
         Ok(match self.id {
-            // Claude reports quota in its event stream; Codex has no quota bar in v1.
-            ProviderId::Claude | ProviderId::Codex => Vec::new(),
+            // Claude reports quota in its event stream.
+            ProviderId::Claude => Vec::new(),
+            ProviderId::Codex => vec![QuotaGroup {
+                name: String::new(),
+                windows: vec![
+                    window(QuotaKind::FiveHour, 24.0, 2),
+                    window(QuotaKind::SevenDay, 37.0, 61),
+                ],
+            }],
             ProviderId::Antigravity => vec![QuotaGroup {
                 name: "Gemini".into(),
                 windows: vec![

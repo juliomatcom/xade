@@ -162,7 +162,7 @@ export default function App() {
               ))}
             </ol>
             <figure>
-              <img src="/multi-session-new.webp" alt="Xade's New Multi-Session dialog with three members: #opus-1 and #sonnet-1 on Claude and #neon-1 on Antigravity" width={1620} height={940} loading="lazy" className="w-full rounded-xl border border-edge" />
+              <img src="/multi-session-new.webp" alt="Xade's New Multi-Session dialog with three members: #opus-1 on Claude, #neon-1 on Antigravity and #gpt-sol-1 on Codex" width={1620} height={940} loading="lazy" className="w-full rounded-xl border border-edge" />
               <figcaption className="mt-3 text-center text-sm text-slate-500">
                 Open it with the Multi button, or Cmd+Shift+T (Ctrl+Shift+T on Linux). All members share one working folder.{" "}
                 <a href={`${REPO}/blob/main/docs/multi-session.md`} rel="noopener" className="underline hover:text-white">Read the guide</a>

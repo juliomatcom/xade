@@ -8,7 +8,7 @@
 
 Works with Claude Code, Codex and Antigravity. OpenCode and local models are coming soon.
 
-<p align="center"><a href="https://xade.pro/"><img src="docs/images/multi-session.webp" alt="Xade demo: three models on one Multi-Session team plan, code and test a feature while a solo session runs beside them" width="100%"></a></p>
+<p align="center"><a href="https://xade.pro/"><img src="docs/images/multi-session.webp" alt="Xade demo: Claude Code, Antigravity and Codex on one Multi-Session team plan, code and test a feature while a solo session runs beside them" width="100%"></a></p>
 
 ## Why Xade
 
