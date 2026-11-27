@@ -476,7 +476,9 @@ fn assistant(
     ui.horizontal_top(|ui| {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
         if let Some(tex) = cli_symbol(ui.ctx(), provider) {
-            egui::Image::new(&tex).paint_at(ui, rect);
+            egui::Image::new(&tex)
+                .tint(symbol_tint(provider))
+                .paint_at(ui, rect);
         }
         ui.vertical(body).inner
     })
@@ -489,6 +491,16 @@ const ANTHROPIC_SYMBOL: &[u8] = include_bytes!("../../../assets/anthropic-symbol
 const GOOGLE_SYMBOL: &[u8] = include_bytes!("../../../assets/google-symbol.png");
 const CLAUDE_CODE_SYMBOL: &[u8] = include_bytes!("../../../assets/claude-code-symbol.png");
 const ANTIGRAVITY_SYMBOL: &[u8] = include_bytes!("../../../assets/antigravity-symbol.png");
+const OPENAI_SYMBOL: &[u8] = include_bytes!("../../../assets/openai-symbol.png");
+
+/// Tint applied when drawing a provider's symbol: the OpenAI PNG is white-on-transparent so
+/// `theme::text()` keeps it legible on both dark and light themes.
+pub(crate) fn symbol_tint(provider: ProviderId) -> egui::Color32 {
+    match provider {
+        ProviderId::Codex => theme::text(),
+        ProviderId::Claude | ProviderId::Antigravity => egui::Color32::WHITE,
+    }
+}
 
 /// The logo of the company behind a provider, for window headers and the top bar.
 pub(crate) fn company_symbol(
@@ -496,20 +508,20 @@ pub(crate) fn company_symbol(
     provider: ProviderId,
 ) -> Option<egui::TextureHandle> {
     let (name, png) = match provider {
-        ProviderId::Claude => Some(("anthropic_symbol", ANTHROPIC_SYMBOL)),
-        ProviderId::Antigravity => Some(("google_symbol", GOOGLE_SYMBOL)),
-        ProviderId::Codex => None,
-    }?;
+        ProviderId::Claude => ("anthropic_symbol", ANTHROPIC_SYMBOL),
+        ProviderId::Antigravity => ("google_symbol", GOOGLE_SYMBOL),
+        ProviderId::Codex => ("openai_symbol", OPENAI_SYMBOL),
+    };
     symbol(ctx, name, png)
 }
 
 /// The logo of a provider's CLI, the avatar of its messages.
 pub(crate) fn cli_symbol(ctx: &egui::Context, provider: ProviderId) -> Option<egui::TextureHandle> {
     let (name, png) = match provider {
-        ProviderId::Claude => Some(("claude_code_symbol", CLAUDE_CODE_SYMBOL)),
-        ProviderId::Antigravity => Some(("antigravity_symbol", ANTIGRAVITY_SYMBOL)),
-        ProviderId::Codex => None,
-    }?;
+        ProviderId::Claude => ("claude_code_symbol", CLAUDE_CODE_SYMBOL),
+        ProviderId::Antigravity => ("antigravity_symbol", ANTIGRAVITY_SYMBOL),
+        ProviderId::Codex => ("openai_symbol", OPENAI_SYMBOL),
+    };
     symbol(ctx, name, png)
 }
 
@@ -539,7 +551,11 @@ mod symbol_tests {
     fn every_company_and_cli_symbol_decodes_into_its_own_cached_texture() {
         let ctx = egui::Context::default();
         let mut ids = std::collections::HashSet::new();
-        for p in [ProviderId::Claude, ProviderId::Antigravity] {
+        for p in [
+            ProviderId::Claude,
+            ProviderId::Antigravity,
+            ProviderId::Codex,
+        ] {
             for load in [super::company_symbol, super::cli_symbol] {
                 let tex = load(&ctx, p).expect("symbol");
                 assert_eq!(tex.size(), [80, 80]);
@@ -548,13 +564,10 @@ mod symbol_tests {
                 ids.insert(tex.id());
             }
         }
-        assert_eq!(
-            ids.len(),
-            4,
-            "company and CLI logos differ for every provider"
-        );
-        assert!(super::company_symbol(&ctx, ProviderId::Codex).is_none());
-        assert!(super::cli_symbol(&ctx, ProviderId::Codex).is_none());
+        // Claude and Antigravity have distinct company + CLI marks; Codex shares the OpenAI mark.
+        assert_eq!(ids.len(), 5);
+        assert_eq!(super::symbol_tint(ProviderId::Codex), crate::theme::text());
+        assert_eq!(super::symbol_tint(ProviderId::Claude), egui::Color32::WHITE);
     }
 }
 

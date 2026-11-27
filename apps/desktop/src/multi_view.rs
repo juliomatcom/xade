@@ -402,7 +402,9 @@ fn tab_bar(ui: &mut egui::Ui, vm: &mut MultiSessionVm, members: &HashMap<Session
                             conversation::company_symbol(ui.ctx(), m.session.provider_id)
                         {
                             ui.add(
-                                egui::Image::new(&tex).fit_to_exact_size(egui::vec2(12.0, 12.0)),
+                                egui::Image::new(&tex)
+                                    .tint(conversation::symbol_tint(m.session.provider_id))
+                                    .fit_to_exact_size(egui::vec2(12.0, 12.0)),
                             );
                         }
                         ui.label(label);
@@ -697,7 +699,9 @@ fn team_feed(
                                 egui::Sense::hover(),
                             );
                             if let Some(tex) = conversation::cli_symbol(ui.ctx(), provider) {
-                                egui::Image::new(&tex).paint_at(ui, rect);
+                                egui::Image::new(&tex)
+                                    .tint(conversation::symbol_tint(provider))
+                                    .paint_at(ui, rect);
                             }
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
@@ -784,7 +788,9 @@ fn combined_entry_row(
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
                 if let Some(tex) = conversation::cli_symbol(ui.ctx(), *provider) {
-                    egui::Image::new(&tex).paint_at(ui, rect);
+                    egui::Image::new(&tex)
+                        .tint(conversation::symbol_tint(*provider))
+                        .paint_at(ui, rect);
                 }
                 ui.vertical(|ui| {
                     ui.label(
@@ -818,6 +824,7 @@ fn combined_entry_row(
                             {
                                 ui.add(
                                     egui::Image::new(&tex)
+                                        .tint(conversation::symbol_tint(*sender_provider))
                                         .fit_to_exact_size(egui::vec2(14.0, 14.0)),
                                 );
                             }

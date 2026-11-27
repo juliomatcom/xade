@@ -441,7 +441,7 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[Qu
             tex.id(),
             r,
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
+            crate::conversation::symbol_tint(provider),
         );
     }
     let pairs = groups.len().max(1);
@@ -957,7 +957,9 @@ fn card_ui(
             egui::vec2(CLI_ICON_SIZE, CLI_ICON_SIZE),
         );
         if let Some(tex) = crate::conversation::cli_symbol(ui.ctx(), pid) {
-            egui::Image::new(&tex).paint_at(ui, icon_rect);
+            egui::Image::new(&tex)
+                .tint(crate::conversation::symbol_tint(pid))
+                .paint_at(ui, icon_rect);
         }
         icon_right -= CLI_ICON_SIZE + CLI_ICON_GAP;
     }
