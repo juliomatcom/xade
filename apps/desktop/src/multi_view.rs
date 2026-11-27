@@ -129,7 +129,7 @@ pub fn show(
         })
     });
     let agg_status = vm.aggregate_status(members);
-    header(ui, vm, env, &agg_status, maximized, &mut out);
+    header(ui, vm, members, env, &agg_status, maximized, &mut out);
     if vm.collapsed {
         return out;
     }
@@ -242,9 +242,25 @@ fn approval_jump_strip(
         });
 }
 
+fn header_cli_providers(
+    member_ids: &[SessionId],
+    members: &HashMap<SessionId, SessionVm>,
+) -> Vec<ProviderId> {
+    let mut out = Vec::new();
+    for sid in member_ids {
+        if let Some(m) = members.get(sid) {
+            if !out.contains(&m.session.provider_id) {
+                out.push(m.session.provider_id);
+            }
+        }
+    }
+    out
+}
+
 fn header(
     ui: &mut egui::Ui,
     vm: &mut MultiSessionVm,
+    members: &HashMap<SessionId, SessionVm>,
     env: &Env,
     agg_status: &SessionStatus,
     maximized: bool,
@@ -260,6 +276,7 @@ fn header(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let cli_providers = header_cli_providers(&vm.member_ids, members);
     let badge = |ui: &mut egui::Ui| chrome::header_badge(ui, "Multi");
     let mut renamed = None;
     chrome::header(
@@ -277,6 +294,15 @@ fn header(
             if !cwd.is_empty() {
                 ui.label(RichText::new(cwd).small().color(theme::text_muted()))
                     .on_hover_text(vm.cwd.display().to_string());
+            }
+            for pid in &cli_providers {
+                if let Some(tex) = conversation::cli_symbol(ui.ctx(), *pid) {
+                    ui.add(
+                        egui::Image::new(&tex)
+                            .tint(conversation::symbol_tint(*pid))
+                            .fit_to_exact_size(egui::vec2(14.0, 14.0)),
+                    );
+                }
             }
             renamed = multi_title_label(ui, vm, &title);
         },
@@ -398,8 +424,7 @@ fn tab_bar(ui: &mut egui::Ui, vm: &mut MultiSessionVm, members: &HashMap<Session
                     };
                     if tab_item(ui, ("multi_tab_member", vm.multi.id, sid), selected, |ui| {
                         session_view::status_dot(ui, &m.status);
-                        if let Some(tex) =
-                            conversation::company_symbol(ui.ctx(), m.session.provider_id)
+                        if let Some(tex) = conversation::cli_symbol(ui.ctx(), m.session.provider_id)
                         {
                             ui.add(
                                 egui::Image::new(&tex)

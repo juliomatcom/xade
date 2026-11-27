@@ -104,7 +104,7 @@ fn header(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env, out: &mut ViewOut) {
             }
             // Before the truncating labels, which take all the width left.
             fork = fork_button(ui, vm, env);
-            if let Some(tex) = conversation::company_symbol(ui.ctx(), vm.session.provider_id) {
+            if let Some(tex) = conversation::cli_symbol(ui.ctx(), vm.session.provider_id) {
                 ui.add(
                     egui::Image::new(&tex)
                         .tint(conversation::symbol_tint(vm.session.provider_id))
@@ -117,13 +117,6 @@ fn header(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env, out: &mut ViewOut) {
                     .sense(egui::Sense::hover()),
             )
             .on_hover_text(provider);
-            if let Some(tex) = conversation::cli_symbol(ui.ctx(), vm.session.provider_id) {
-                ui.add(
-                    egui::Image::new(&tex)
-                        .tint(conversation::symbol_tint(vm.session.provider_id))
-                        .fit_to_exact_size(egui::vec2(14.0, 14.0)),
-                );
-            }
             renamed = title_label(ui, vm, &title);
         },
     );
