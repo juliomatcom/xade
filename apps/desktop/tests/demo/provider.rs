@@ -72,6 +72,7 @@ impl AgentProvider for DemoProvider {
         match self.id {
             ProviderId::Claude => "Claude",
             ProviderId::Antigravity => "Antigravity",
+            ProviderId::Codex => "Codex",
         }
     }
     fn models(&self) -> Vec<ModelOption> {
@@ -82,6 +83,7 @@ impl AgentProvider for DemoProvider {
                 model(SONNET, "Sonnet 5.5"),
             ],
             ProviderId::Antigravity => vec![model(NEON, "Gemini 4 Neon")],
+            ProviderId::Codex => vec![model("gpt-6-luna", "GPT-6-Luna")],
         }
     }
     fn default_model(&self) -> String {
@@ -98,8 +100,8 @@ impl AgentProvider for DemoProvider {
     }
     fn quota(&self) -> Result<Vec<QuotaGroup>, ProviderError> {
         Ok(match self.id {
-            // Claude reports quota in its event stream.
-            ProviderId::Claude => Vec::new(),
+            // Claude reports quota in its event stream; Codex has no quota bar in v1.
+            ProviderId::Claude | ProviderId::Codex => Vec::new(),
             ProviderId::Antigravity => vec![QuotaGroup {
                 name: "Gemini".into(),
                 windows: vec![

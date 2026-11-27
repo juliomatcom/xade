@@ -51,4 +51,5 @@ impl Default for MultiSessionId {
 pub enum ProviderId {
     Claude,
     Antigravity,
+    Codex,
 }

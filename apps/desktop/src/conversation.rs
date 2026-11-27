@@ -496,18 +496,20 @@ pub(crate) fn company_symbol(
     provider: ProviderId,
 ) -> Option<egui::TextureHandle> {
     let (name, png) = match provider {
-        ProviderId::Claude => ("anthropic_symbol", ANTHROPIC_SYMBOL),
-        ProviderId::Antigravity => ("google_symbol", GOOGLE_SYMBOL),
-    };
+        ProviderId::Claude => Some(("anthropic_symbol", ANTHROPIC_SYMBOL)),
+        ProviderId::Antigravity => Some(("google_symbol", GOOGLE_SYMBOL)),
+        ProviderId::Codex => None,
+    }?;
     symbol(ctx, name, png)
 }
 
 /// The logo of a provider's CLI, the avatar of its messages.
 pub(crate) fn cli_symbol(ctx: &egui::Context, provider: ProviderId) -> Option<egui::TextureHandle> {
     let (name, png) = match provider {
-        ProviderId::Claude => ("claude_code_symbol", CLAUDE_CODE_SYMBOL),
-        ProviderId::Antigravity => ("antigravity_symbol", ANTIGRAVITY_SYMBOL),
-    };
+        ProviderId::Claude => Some(("claude_code_symbol", CLAUDE_CODE_SYMBOL)),
+        ProviderId::Antigravity => Some(("antigravity_symbol", ANTIGRAVITY_SYMBOL)),
+        ProviderId::Codex => None,
+    }?;
     symbol(ctx, name, png)
 }
 
@@ -551,6 +553,8 @@ mod symbol_tests {
             4,
             "company and CLI logos differ for every provider"
         );
+        assert!(super::company_symbol(&ctx, ProviderId::Codex).is_none());
+        assert!(super::cli_symbol(&ctx, ProviderId::Codex).is_none());
     }
 }
 

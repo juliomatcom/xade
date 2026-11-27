@@ -5055,6 +5055,7 @@ dependencies = [
  "uuid",
  "xade-antigravity",
  "xade-claude",
+ "xade-codex",
  "xade-core",
  "xade-runtime",
  "xade-store",
@@ -5125,6 +5126,7 @@ dependencies = [
  "uuid",
  "xade-antigravity",
  "xade-claude",
+ "xade-codex",
  "xade-core",
  "xade-store",
 ]

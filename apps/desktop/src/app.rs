@@ -3156,6 +3156,10 @@ impl StubProvider {
         Self::new(ProviderId::Antigravity, "Antigravity", &["gemini-4-neon"])
     }
 
+    pub(crate) fn codex() -> Self {
+        Self::new(ProviderId::Codex, "Codex", &["gpt-6-luna"])
+    }
+
     fn new(id: ProviderId, name: &'static str, models: &[&str]) -> Self {
         let models = models
             .iter()
@@ -4255,6 +4259,44 @@ mod tests {
         assert!(app.deferred_restore.is_none());
         assert_eq!(app.windows_file, Some(file));
         assert!(matches!(cmds.try_recv(), Ok(ManagerCmd::Import)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn three_providers_filter_and_select_codex_independently() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        app.providers.push(Arc::new(StubProvider::codex()));
+        let (claude, agy, codex) = (
+            ProviderId::Claude,
+            ProviderId::Antigravity,
+            ProviderId::Codex,
+        );
+        assert_eq!(app.visible_providers(), vec![claude, agy, codex]);
+        assert_eq!(app.selectable_providers(), vec![claude, agy, codex]);
+
+        // Missing Antigravity still leaves Claude + Codex selectable.
+        fail(&mut app, agy, ProviderError::NotInstalled);
+        assert_eq!(app.visible_providers(), vec![claude, codex]);
+        assert_eq!(app.selectable_providers(), vec![claude, codex]);
+
+        // Picking Codex creates a Codex session with its own default model.
+        let ws = WorkspaceId::new();
+        app.home.workspaces = vec![Workspace {
+            id: ws,
+            root_path: dir.clone(),
+            display_name: "w".into(),
+            last_opened_at: OffsetDateTime::now_utc(),
+            is_open: true,
+        }];
+        app.home.scope = Some(ws);
+        app.writer
+            .send(WriteOp::UpsertWorkspace(app.home.workspaces[0].clone()))
+            .unwrap();
+        app.home.provider_pick = Some(codex);
+        let (p, model, _, _) = created(&rt, &mut app);
+        assert_eq!(p, codex);
+        assert_eq!(model, "gpt-6-luna");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

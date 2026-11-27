@@ -19,6 +19,7 @@ uuid = { version = "=1.29.3", features = ["v4"] }
 [dev-dependencies]
 xade-claude = { path = "../claude" }
 xade-antigravity = { path = "../antigravity" }
+xade-codex = { path = "../codex" }
 tempfile = "=3.27.0"
 tokio = { version = "=1.54.1", default-features = false, features = ["rt-multi-thread", "macros", "time", "sync"] }
 

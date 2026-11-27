@@ -31,6 +31,7 @@ use std::sync::Arc;
 
 use xade_antigravity::AntigravityProvider;
 use xade_claude::ClaudeProvider;
+use xade_codex::CodexProvider;
 use xade_core::{AgentProvider, ProviderError, ProviderId};
 use xade_runtime::SessionManager;
 use xade_store::{StoreReader, StoreWriter};
@@ -232,6 +233,7 @@ pub fn backend(
         vec![
             Arc::new(ClaudeProvider::new()),
             Arc::new(AntigravityProvider::new()),
+            Arc::new(CodexProvider::new()),
         ],
     )
 }

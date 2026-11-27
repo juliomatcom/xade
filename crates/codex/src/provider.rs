@@ -10,7 +10,9 @@ use std::sync::{mpsc, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
-use xade_core::{Effort, ModelOption, ProviderError, SessionHandle, SpawnConfig};
+use xade_core::{
+    AgentProvider, Effort, ModelOption, ProviderError, ProviderId, SessionHandle, SpawnConfig,
+};
 
 use crate::models::{
     fallback_models, parse_account, parse_models, AccountStatus, FALLBACK_MODEL_ID,
@@ -175,6 +177,44 @@ impl CodexProvider {
             Err(e) if e.message.to_lowercase().contains("no rollout") => Ok(()),
             Err(e) => Err(ProviderError::Protocol(e.message)),
         }
+    }
+}
+
+impl AgentProvider for CodexProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::Codex
+    }
+
+    fn display_name(&self) -> &'static str {
+        CodexProvider::display_name(self)
+    }
+
+    fn models(&self) -> Vec<ModelOption> {
+        CodexProvider::models(self)
+    }
+
+    fn default_model(&self) -> String {
+        CodexProvider::default_model(self)
+    }
+
+    fn effort_levels(&self) -> Vec<Effort> {
+        CodexProvider::effort_levels(self)
+    }
+
+    fn preflight(&self) -> Result<(), ProviderError> {
+        CodexProvider::preflight(self)
+    }
+
+    fn account_label(&self) -> Option<String> {
+        CodexProvider::account_label(self)
+    }
+
+    fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
+        CodexProvider::spawn(self, cfg)
+    }
+
+    fn delete_session(&self, provider_session_id: &str) -> Result<(), ProviderError> {
+        CodexProvider::delete_session(self, provider_session_id)
     }
 }
 
@@ -434,6 +474,7 @@ mod tests {
     #[test]
     fn missing_binary_is_not_installed_with_static_fallback_model() {
         let p = CodexProvider::with_optional_binary(None);
+        assert_eq!(p.id(), ProviderId::Codex);
         assert_eq!(p.preflight(), Err(ProviderError::NotInstalled));
         assert_eq!(p.default_model(), FALLBACK_MODEL_ID);
         assert_eq!(p.models().len(), 1);

@@ -123,6 +123,7 @@ pub(crate) fn team_preamble(my_handle: &str, roster: &[(String, ProviderId, Stri
             let p = match provider {
                 ProviderId::Claude => "Claude",
                 ProviderId::Antigravity => "Antigravity",
+                ProviderId::Codex => "Codex",
             };
             format!("- #{handle} ({p}, {model})")
         })

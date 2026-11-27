@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 xade-antigravity = { path = "../../crates/antigravity" }
 xade-claude = { path = "../../crates/claude" }
+xade-codex = { path = "../../crates/codex" }
 xade-core = { path = "../../crates/core" }
 xade-runtime = { path = "../../crates/runtime" }
 xade-store = { path = "../../crates/store" }

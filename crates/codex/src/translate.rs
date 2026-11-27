@@ -294,9 +294,10 @@ impl Translator {
                 .first()
                 .map(|c| str_field(c, "path"))
                 .unwrap_or_default();
+            let hunks = file_change_hunks(changes);
             ToolMeta {
                 name: "Edit".to_string(),
-                input_json: json!({"file_path": first_path}).to_string(),
+                input_json: json!({"file_path": first_path, "structuredPatch": hunks}).to_string(),
             }
         };
         self.tools.insert(id.clone(), meta.clone());
@@ -435,15 +436,7 @@ fn is_single_add(changes: &[Value]) -> bool {
     changes.len() == 1 && change_kind(&changes[0]) == Some("add")
 }
 
-fn file_change_structured_json(changes: &[Value]) -> String {
-    if is_single_add(changes) {
-        return json!({
-            "type": "create",
-            "structuredPatch": [],
-            "originalFile": null,
-        })
-        .to_string();
-    }
+fn file_change_hunks(changes: &[Value]) -> Vec<Value> {
     let mut hunks = Vec::new();
     for change in changes {
         let diff = change
@@ -461,7 +454,19 @@ fn file_change_structured_json(changes: &[Value]) -> String {
             hunks.push(json!({"oldStart": 1, "newStart": 1, "lines": lines}));
         }
     }
-    json!({"structuredPatch": hunks}).to_string()
+    hunks
+}
+
+fn file_change_structured_json(changes: &[Value]) -> String {
+    if is_single_add(changes) {
+        return json!({
+            "type": "create",
+            "structuredPatch": [],
+            "originalFile": null,
+        })
+        .to_string();
+    }
+    json!({"structuredPatch": file_change_hunks(changes)}).to_string()
 }
 
 /// Parses unified diff `@@ -oldStart[,oldCount] +newStart[,newCount] @@` hunks into the

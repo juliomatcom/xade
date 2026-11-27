@@ -19,11 +19,13 @@ use common::Harness;
 use tokio::sync::oneshot;
 use xade_antigravity::AntigravityProvider;
 use xade_claude::ClaudeProvider;
+use xade_codex::CodexProvider;
 use xade_core::{AgentProvider, Effort, ProviderEvent, ProviderId, Role, SessionId, SessionStatus};
 use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
 
 const CLAUDE: &str = "haiku";
 const AGY: &str = "gemini-3.8-flash";
+const CODEX: &str = "gpt-6-luna";
 const WAIT: u64 = 180;
 const REMEMBER: &str = "Remember the word kiwi. Reply with just: ok";
 /// The prompt the app ships for the snapshot turn.
@@ -61,6 +63,7 @@ impl Cleanup {
             let res = match provider {
                 ProviderId::Claude => self.claude.delete_session(id),
                 ProviderId::Antigravity => self.agy.delete_session(id),
+                ProviderId::Codex => CodexProvider::new().delete_session(id),
             };
             if let Err(e) = res {
                 eprintln!("could not delete conversation {id}: {e}");
@@ -118,6 +121,7 @@ fn model(p: ProviderId) -> &'static str {
     match p {
         ProviderId::Claude => CLAUDE,
         ProviderId::Antigravity => AGY,
+        ProviderId::Codex => CODEX,
     }
 }
 
