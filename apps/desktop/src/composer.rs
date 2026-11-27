@@ -33,6 +33,8 @@ const INPUT_MIN_ROWS: usize = 2;
 const INPUT_MAX_ROWS: usize = 10;
 /// Side of the (square) send button, and height of Stop.
 const BUTTON_SIZE: f32 = 48.0;
+/// Space left and right of the row under the input box.
+const CONTROLS_INSET: i8 = 8;
 
 /// What the composer asks of the app after drawing.
 #[derive(Default)]
@@ -222,15 +224,24 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
     }
     queued_rows(ui, vm);
 
-    // The row under the box ends where the box does, not at the panel edge.
     let box_width = input_box.response.rect.width();
-    out.attach = ui
-        .scope(|ui| {
-            ui.set_max_width(box_width);
-            controls(ui, vm, env)
-        })
-        .inner;
+    out.attach = controls_row(ui, box_width, |ui| controls(ui, vm, env));
     out
+}
+
+/// The row under the input box, inset from the box's sides rather than reaching the panel edge.
+pub(crate) fn controls_row<R>(
+    ui: &mut egui::Ui,
+    box_width: f32,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(CONTROLS_INSET, 0))
+        .show(ui, |ui| {
+            ui.set_max_width(box_width - 2.0 * f32::from(CONTROLS_INSET));
+            add(ui)
+        })
+        .inner
 }
 
 /// Shows the user's message and hands it to the session.

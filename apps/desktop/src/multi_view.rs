@@ -20,7 +20,7 @@ use crate::widgets::path_links::PathLinks;
 use crate::widgets::scroll_nav;
 use crate::widgets::working;
 use crate::workspace::Env;
-use crate::{chrome, conversation, icons, theme};
+use crate::{chrome, composer, conversation, icons, theme};
 
 /// Matches standalone `composer.rs` input sizing and button geometry.
 const INPUT_MIN_ROWS: usize = 2;
@@ -1143,8 +1143,7 @@ fn unified_composer(
     // composer controls).
     let box_width = input_box.response.rect.width();
     ui.add_space(4.0);
-    ui.scope(|ui| {
-        ui.set_max_width(box_width);
+    composer::controls_row(ui, box_width, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("To:").small().color(theme::text_muted()));
             let is_all = parsed_target.is_none();
