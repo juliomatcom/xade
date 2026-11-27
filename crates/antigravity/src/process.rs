@@ -674,9 +674,8 @@ async fn run(mut agent: Agent, mut p: Process) {
     let code = status.and_then(|st| st.code());
     if !requested && code != Some(0) {
         let tail: Vec<String> = lock(&p.stderr_tail).iter().cloned().collect();
-        agent.emit(ProviderEvent::Error(format!(
-            "agy exited unexpectedly: {}",
-            tail.join("\n")
+        agent.emit(ProviderEvent::Error(xade_core::unexpected_exit_message(
+            "agy", status, &tail,
         )));
     }
     agent.emit(ProviderEvent::Exited { code });

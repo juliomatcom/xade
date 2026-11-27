@@ -14,6 +14,7 @@ Anything else in `meta` (argv, restart, exit_code) is ignored.
 """
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -57,6 +58,8 @@ for raw in open(fixture):
             os.replace(tmp, os.path.join(here, "bg.pid"))
         if "exit" in frame:
             sys.exit(frame["exit"])
+        if "signal" in frame:
+            os.kill(os.getpid(), getattr(signal, frame["signal"]))
         if frame.get("hang"):
             while True:
                 time.sleep(1)

@@ -13,6 +13,9 @@ time = { version = "=0.3.55", features = ["serde", "formatting", "parsing"] }
 tokio = { version = "=1.54.1", default-features = false, features = ["sync"] }
 uuid = { version = "=1.29.3", features = ["v4", "serde"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+
 [lints]
 workspace = true
 

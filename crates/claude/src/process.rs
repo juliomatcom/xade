@@ -297,10 +297,11 @@ async fn run(mut s: Session) {
     let code = status.and_then(|st| st.code());
     if !requested && code != Some(0) {
         let tail: Vec<String> = lock(&s.stderr_tail).iter().cloned().collect();
-        let _ = s.events.send(ProviderEvent::Error(format!(
-            "claude exited unexpectedly: {}",
-            tail.join("\n")
-        )));
+        let _ = s
+            .events
+            .send(ProviderEvent::Error(xade_core::unexpected_exit_message(
+                "claude", status, &tail,
+            )));
     }
     let _ = s.events.send(ProviderEvent::Exited { code });
 }

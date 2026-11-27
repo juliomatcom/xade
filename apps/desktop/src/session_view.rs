@@ -279,7 +279,10 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, status: &SessionStatus) {
         SessionStatus::Idle => (theme::text_muted(), "Idle".to_string()),
         SessionStatus::Streaming => (theme::accent(), "Streaming".to_string()),
         SessionStatus::NeedsApproval => (theme::warn(), "Needs approval".to_string()),
-        SessionStatus::Error(e) => (theme::danger(), format!("Error: {e}")),
+        SessionStatus::Error(e) => (
+            theme::danger(),
+            format!("Error: {}", conversation::error_summary(e)),
+        ),
         SessionStatus::Starting => (theme::text_muted(), "Starting".to_string()),
         SessionStatus::Closed => (theme::text_muted(), "Closed".to_string()),
     };

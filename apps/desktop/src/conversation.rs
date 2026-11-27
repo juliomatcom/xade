@@ -1,11 +1,12 @@
 //! The scrolling transcript of one session.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use egui::RichText;
 use egui_commonmark::CommonMarkCache;
-use xade_core::{Delivery, Message, ProviderId, Role, SessionStatus};
+use xade_core::{Delivery, Message, ProviderId, Role, SessionId, SessionStatus};
 
 use crate::app::SessionVm;
 use crate::theme;
@@ -253,7 +254,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                         .request_repaint_after(std::time::Duration::from_secs(30));
                 }
                 if let Some(e) = error {
-                    ui.label(RichText::new(&*e).color(theme::danger()));
+                    error_block(ui, session_id, e);
                 }
             });
         // After a send: land on the end, which also re-arms `stick_to_bottom`.
@@ -273,6 +274,73 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
         vm.open_changes(&calls);
     }
     open
+}
+
+const ERROR_SUMMARY_CHARS: usize = 160;
+const ERROR_DETAILS_MAX_HEIGHT: f32 = 160.0;
+
+/// Single-line summary of an error message, suitable for chat lines and hover tooltips.
+pub(crate) fn error_summary(msg: &str) -> Cow<'_, str> {
+    split_error(msg).0
+}
+
+/// Splits an error into its single-line summary and any remaining detail (from extra lines, or the
+/// full message when a single line exceeds `ERROR_SUMMARY_CHARS`).
+fn split_error(msg: &str) -> (Cow<'_, str>, Option<&str>) {
+    let trimmed = msg.trim();
+    if let Some((first, rest)) = trimmed.split_once('\n') {
+        let first = first.trim_end();
+        let rest = rest.trim();
+        let details = (!rest.is_empty()).then_some(rest);
+        if first.chars().count() > ERROR_SUMMARY_CHARS {
+            let cut: String = first.chars().take(ERROR_SUMMARY_CHARS).collect();
+            return (Cow::Owned(format!("{cut}…")), Some(trimmed));
+        }
+        return (Cow::Borrowed(first), details);
+    }
+    if trimmed.chars().count() > ERROR_SUMMARY_CHARS {
+        let cut: String = trimmed.chars().take(ERROR_SUMMARY_CHARS).collect();
+        return (Cow::Owned(format!("{cut}…")), Some(trimmed));
+    }
+    (Cow::Borrowed(trimmed), None)
+}
+
+/// Renders a session error at the bottom of the transcript: always one concise line, with any
+/// multi-line or long detail collapsed under an inline `Details` toggle.
+fn error_block(ui: &mut egui::Ui, session_id: SessionId, msg: &str) {
+    let (summary, details) = split_error(msg);
+    ui.label(RichText::new(summary.as_ref()).color(theme::danger()));
+    let Some(details) = details else {
+        return;
+    };
+    let id = egui::Id::unique(("session_error_details", session_id));
+    let state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    state
+        .show_header(ui, |ui| {
+            ui.label(RichText::new("Details").small().color(theme::text_muted()));
+        })
+        .body(|ui| {
+            egui::Frame::new()
+                .fill(theme::bg_terminal())
+                .stroke(egui::Stroke::new(1.0, theme::border()))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::ScrollArea::vertical()
+                        .id_salt((id, "scroll"))
+                        .max_height(ERROR_DETAILS_MAX_HEIGHT)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(details)
+                                    .small()
+                                    .monospace()
+                                    .color(theme::text_muted()),
+                            );
+                        });
+                });
+        });
 }
 
 /// Runs of two or more consecutive tool calls other than code changes (their results
@@ -1208,5 +1276,75 @@ mod tests {
         }
         // Each line belongs to its own message: the second time is below the first message.
         assert!(times[1].1.top() > body("zzuser").bottom());
+    }
+
+    #[test]
+    fn split_error_keeps_short_lines_inline_and_folds_multiline_or_long_errors() {
+        let short = "agy exited unexpectedly (SIGBUS, signal 7)";
+        assert_eq!(split_error(short), (Cow::Borrowed(short), None));
+
+        let multi = "agy exited unexpectedly (exit code 1)\nstack frame 1\nstack frame 2";
+        assert_eq!(
+            split_error(multi),
+            (
+                Cow::Borrowed("agy exited unexpectedly (exit code 1)"),
+                Some("stack frame 1\nstack frame 2")
+            )
+        );
+
+        assert_eq!(
+            split_error("only one line\n   \n"),
+            (Cow::Borrowed("only one line"), None)
+        );
+
+        let long = "é".repeat(ERROR_SUMMARY_CHARS + 20);
+        let (summary, details) = split_error(&long);
+        assert_eq!(summary.chars().count(), ERROR_SUMMARY_CHARS + 1);
+        assert!(summary.ends_with('…'));
+        assert_eq!(details, Some(long.as_str()));
+    }
+
+    #[test]
+    fn multiline_error_starts_collapsed_in_conversation() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut v = vm(vec![]);
+        v.error = Some("agy exited unexpectedly (exit code 1)\nhidden stderr line".into());
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(500.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        fn collect_texts(s: &egui::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                egui::Shape::Vec(v) => v.iter().for_each(|c| collect_texts(c, out)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |ui| {
+                show(ui, &mut v);
+            });
+            texts.clear();
+            out.shapes
+                .iter()
+                .for_each(|c| collect_texts(&c.shape, &mut texts));
+            out.drop_without_applying_deltas();
+        }
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("agy exited unexpectedly (exit code 1)")),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|t| t == "Details"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("hidden stderr line")),
+            "details must start collapsed: {texts:?}"
+        );
     }
 }

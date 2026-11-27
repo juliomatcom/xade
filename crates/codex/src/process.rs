@@ -706,12 +706,7 @@ async fn run(mut agent: Agent, mut p: Process) {
     let mid_turn = agent.turn_in_flight() || !agent.queued.is_empty();
     if !requested && (code != Some(0) || mid_turn) {
         let tail: Vec<String> = lock(&p.stderr_tail).iter().cloned().collect();
-        let detail = tail.join("\n");
-        let msg = if detail.is_empty() {
-            "codex exited unexpectedly".to_string()
-        } else {
-            format!("codex exited unexpectedly: {detail}")
-        };
+        let msg = xade_core::unexpected_exit_message("codex", status, &tail);
         agent.emit(ProviderEvent::Error(msg));
         if mid_turn {
             agent.emit(ProviderEvent::TurnComplete {
