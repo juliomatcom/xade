@@ -212,17 +212,7 @@ impl Translator {
                 }
                 self.ensure_command_tool(item, out);
                 self.flush(out);
-                let status = item
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let exit_code = item.get("exitCode").and_then(Value::as_i64);
-                let is_error = status != "completed" || !matches!(exit_code, None | Some(0));
-                let output = item
-                    .get("aggregatedOutput")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default()
-                    .to_string();
+                let (output, is_error) = command_result(item);
                 out.push(ProviderEvent::ToolResult {
                     tool_use_id: id,
                     output,
@@ -237,25 +227,7 @@ impl Translator {
                 }
                 self.ensure_file_change_tool(item, out);
                 self.flush(out);
-                let status = item
-                    .get("status")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
-                let is_error = status != "completed";
-                let changes = item
-                    .get("changes")
-                    .and_then(Value::as_array)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default();
-                let verb = if is_error { status } else { "edited" };
-                let output = changes
-                    .iter()
-                    .filter_map(|c| c.get("path").and_then(Value::as_str))
-                    .filter(|p| !p.is_empty())
-                    .map(|p| format!("{p}: {verb}"))
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let structured_json = (!is_error).then(|| file_change_structured_json(changes));
+                let (output, is_error, structured_json) = file_change_result(item);
                 out.push(ProviderEvent::ToolResult {
                     tool_use_id: id,
                     output,
@@ -290,28 +262,10 @@ impl Translator {
         if id.is_empty() || self.tools.contains_key(&id) {
             return;
         }
-        let changes = item
-            .get("changes")
-            .and_then(Value::as_array)
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let meta = if is_single_add(changes) {
-            let path = str_field(&changes[0], "path");
-            let diff = str_field(&changes[0], "diff");
-            ToolMeta {
-                name: "Write".to_string(),
-                input_json: json!({"file_path": path, "content": diff}).to_string(),
-            }
-        } else {
-            let first_path = changes
-                .first()
-                .map(|c| str_field(c, "path"))
-                .unwrap_or_default();
-            let hunks = file_change_hunks(changes);
-            ToolMeta {
-                name: "Edit".to_string(),
-                input_json: json!({"file_path": first_path, "structuredPatch": hunks}).to_string(),
-            }
+        let (name, input_json) = file_change_tool(item);
+        let meta = ToolMeta {
+            name: name.to_string(),
+            input_json,
         };
         self.tools.insert(id.clone(), meta.clone());
         out.push(ProviderEvent::ToolUse {
@@ -402,7 +356,7 @@ impl Translator {
     }
 }
 
-fn str_field(v: &Value, key: &str) -> String {
+pub(crate) fn str_field(v: &Value, key: &str) -> String {
     v.get(key)
         .and_then(Value::as_str)
         .unwrap_or_default()
@@ -424,7 +378,7 @@ fn parse_breakdown(v: Option<&Value>) -> TokenBreakdown {
     }
 }
 
-fn command_input_json(v: &Value) -> String {
+pub(crate) fn command_input_json(v: &Value) -> String {
     let unwrapped = v
         .get("commandActions")
         .and_then(Value::as_array)
@@ -436,6 +390,70 @@ fn command_input_json(v: &Value) -> String {
         .or_else(|| v.get("command").and_then(Value::as_str))
         .unwrap_or_default();
     json!({"command": cmd, "description": ""}).to_string()
+}
+
+pub(crate) fn command_result(item: &Value) -> (String, bool) {
+    let status = item
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let exit_code = item.get("exitCode").and_then(Value::as_i64);
+    let is_error = status != "completed" || !matches!(exit_code, None | Some(0));
+    let output = item
+        .get("aggregatedOutput")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    (output, is_error)
+}
+
+pub(crate) fn file_change_tool(item: &Value) -> (&'static str, String) {
+    let changes = item
+        .get("changes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if is_single_add(changes) {
+        let path = str_field(&changes[0], "path");
+        let diff = str_field(&changes[0], "diff");
+        (
+            "Write",
+            json!({"file_path": path, "content": diff}).to_string(),
+        )
+    } else {
+        let first_path = changes
+            .first()
+            .map(|c| str_field(c, "path"))
+            .unwrap_or_default();
+        let hunks = file_change_hunks(changes);
+        (
+            "Edit",
+            json!({"file_path": first_path, "structuredPatch": hunks}).to_string(),
+        )
+    }
+}
+
+pub(crate) fn file_change_result(item: &Value) -> (String, bool, Option<String>) {
+    let status = item
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let is_error = status != "completed";
+    let changes = item
+        .get("changes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let verb = if is_error { status } else { "edited" };
+    let output = changes
+        .iter()
+        .filter_map(|c| c.get("path").and_then(Value::as_str))
+        .filter(|p| !p.is_empty())
+        .map(|p| format!("{p}: {verb}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let structured_json = (!is_error).then(|| file_change_structured_json(changes));
+    (output, is_error, structured_json)
 }
 
 fn change_kind(change: &Value) -> Option<&str> {

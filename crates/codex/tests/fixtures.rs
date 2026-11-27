@@ -6,18 +6,20 @@
 use std::collections::HashMap;
 
 use serde_json::{json, Value};
+use xade_codex::import::{parse_thread, should_import_thread};
 use xade_codex::models::{parse_account, parse_models, AccountStatus};
 use xade_codex::rpc::{self, Incoming};
 use xade_codex::Translator;
-use xade_core::{Effort, ProviderEvent, UsageTotals};
+use xade_core::{Effort, ProviderEvent, Role, UsageTotals};
 
-const ALL: [&str; 15] = [
+const ALL: [&str; 16] = [
     "account",
     "auto",
     "bad_model",
     "bad_resume",
     "edit",
     "edit_update",
+    "import",
     "interrupt",
     "interrupt_pending_permission",
     "resume",
@@ -571,6 +573,62 @@ fn account_fixture_parses_models_and_api_key_account() {
         old.effort_levels,
         [Effort::Low, Effort::Medium, Effort::High, Effort::XHigh]
     );
+}
+
+#[test]
+fn import_fixture_maps_thread_list_and_thread_read() {
+    let list = result_of("import", "thread/list");
+    let summary = &list["result"]["data"][0];
+    assert_eq!(summary["originator"], "xade");
+    assert!(!should_import_thread(summary));
+
+    let mut tui_summary = summary.clone();
+    tui_summary["originator"] = json!("codex-tui");
+    assert!(should_import_thread(&tui_summary));
+
+    let read = result_of("import", "thread/read");
+    let imp = parse_thread(summary, &read["result"]).expect("parsed imported session");
+    assert_eq!(imp.provider_session_id, summary["id"].as_str().expect("id"));
+    assert_eq!(imp.model_id, "gpt-6-luna");
+    assert_eq!(
+        imp.title,
+        "Run the shell command `touch imported.txt` now. Do not ask…"
+    );
+    assert_eq!(imp.created_at.unix_timestamp(), 1_795_786_627);
+    assert_eq!(imp.updated_at.unix_timestamp(), 1_795_786_631);
+    assert_eq!(imp.usage, UsageTotals::default());
+
+    let roles: Vec<Role> = imp.messages.iter().map(|m| m.role).collect();
+    assert_eq!(
+        roles,
+        [
+            Role::User,
+            Role::Assistant,
+            Role::ToolCall,
+            Role::ToolResult,
+            Role::Assistant,
+        ]
+    );
+    assert_eq!(
+        imp.messages[0].content_text,
+        "Run the shell command `touch imported.txt` now. Do not ask me anything."
+    );
+    assert_eq!(imp.messages[2].tool_name.as_deref(), Some("Bash"));
+    let input: Value = serde_json::from_str(
+        imp.messages[2]
+            .tool_payload_json
+            .as_deref()
+            .expect("bash input"),
+    )
+    .expect("json");
+    assert_eq!(
+        input,
+        json!({"command": "touch imported.txt", "description": ""})
+    );
+    assert_eq!(imp.messages[2].tool_use_id, imp.messages[3].tool_use_id);
+    assert!(!imp.messages[3].is_error);
+    assert_eq!(imp.messages[4].content_text, "Created `imported.txt`.");
+    assert!(imp.messages[3].created_at > imp.messages[2].created_at);
 }
 
 #[test]

@@ -292,6 +292,20 @@ def sc_account(r):
     r.stop()
 
 
+def sc_import(r):
+    r.start()
+    tid = new_thread(r)
+    turn(r, tid, "Run the shell command `touch imported.txt` now. Do not ask me anything.")
+    h = approve("accept")
+    r.until(is_done, on=lambda f: h(r, f))
+    r.stop()
+    r.log("meta", {"restart": True})
+    r.start()
+    r.req("thread/list", {"limit": 100, "cwd": r.cwd, "sourceKinds": ["cli", "vscode", "exec", "appServer"]})
+    r.req("thread/read", {"threadId": tid, "includeTurns": True})
+    r.stop()
+
+
 SCENARIOS = {k[3:]: v for k, v in globals().items() if k.startswith("sc_")}
 
 

@@ -704,3 +704,42 @@ fn quota_returns_empty_on_api_key_error_and_groups_on_success() {
     assert_eq!(groups[0].windows[0].utilization_pct, 35.0);
     assert_eq!(groups[0].windows[1].utilization_pct, 12.0);
 }
+
+#[test]
+fn import_sessions_pages_thread_list_and_skips_xade_ephemeral_and_subagents() {
+    let f = fake("fake/import_pages");
+    let imported = f.provider.import_sessions();
+    assert_eq!(imported.len(), 2);
+    assert_eq!(imported[0].provider_session_id, "t-keep-1");
+    assert_eq!(imported[0].title, "First kept");
+    assert_eq!(imported[0].model_id, "gpt-6.2-sol");
+    assert_eq!(imported[0].messages.len(), 2);
+
+    assert_eq!(imported[1].provider_session_id, "t-keep-2");
+    assert_eq!(imported[1].title, "second kept prompt");
+    assert_eq!(imported[1].model_id, "gpt-6-luna");
+    assert_eq!(imported[1].messages.len(), 2);
+
+    assert_eq!(
+        f.methods(),
+        [
+            "initialize",
+            "initialized",
+            "thread/list",
+            "thread/list",
+            "thread/read",
+            "thread/read",
+        ]
+    );
+    let sent = f.sent();
+    assert_eq!(
+        sent[2]["params"]["sourceKinds"],
+        serde_json::json!(["cli", "vscode", "exec", "appServer"])
+    );
+    assert!(sent[2]["params"].get("cursor").is_none());
+    assert_eq!(sent[3]["params"]["cursor"], "page-2");
+    assert_eq!(sent[4]["params"]["threadId"], "t-keep-1");
+    assert_eq!(sent[4]["params"]["includeTurns"], true);
+    assert_eq!(sent[5]["params"]["threadId"], "t-keep-2");
+    assert_eq!(sent[5]["params"]["includeTurns"], true);
+}

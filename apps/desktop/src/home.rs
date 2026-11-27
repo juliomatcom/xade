@@ -652,6 +652,7 @@ pub(crate) fn origin_label(o: SessionOrigin) -> &'static str {
     match o {
         SessionOrigin::Xade => "Xade",
         SessionOrigin::ClaudeCode => "Claude Code",
+        SessionOrigin::Codex => "Codex",
     }
 }
 
@@ -660,6 +661,7 @@ pub fn origin_badge(ui: &mut egui::Ui, origin: SessionOrigin) {
     let color = match origin {
         SessionOrigin::Xade => theme::accent(),
         SessionOrigin::ClaudeCode => theme::claude(),
+        SessionOrigin::Codex => theme::text_muted(),
     };
     crate::chrome::badge(ui, origin_label(origin), color);
 }
@@ -671,6 +673,7 @@ fn origin_filter(app: &mut App, ui: &mut egui::Ui) {
             ("All", None),
             ("Xade", Some(SessionOrigin::Xade)),
             ("Claude Code", Some(SessionOrigin::ClaudeCode)),
+            ("Codex", Some(SessionOrigin::Codex)),
         ] {
             if ui
                 .selectable_label(app.home.origin == value, label)

@@ -50,6 +50,7 @@ pub enum SessionOrigin {
     #[default]
     Xade,
     ClaudeCode,
+    Codex,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

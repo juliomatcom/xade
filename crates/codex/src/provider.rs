@@ -1,6 +1,7 @@
 //! `CodexProvider`: binary resolution, short app-server preflight (`account/read` + `model/list`),
 //! session spawn, and `thread/delete`.
 
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
@@ -11,10 +12,11 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use xade_core::{
-    AgentProvider, Effort, ModelOption, ProviderError, ProviderId, QuotaGroup, SessionHandle,
-    SpawnConfig,
+    AgentProvider, Effort, ImportedSession, ModelOption, ProviderError, ProviderId, QuotaGroup,
+    SessionHandle, SpawnConfig,
 };
 
+use crate::import::{parse_thread, should_import_thread};
 use crate::models::{
     fallback_models, parse_account, parse_models, AccountStatus, FALLBACK_MODEL_ID,
 };
@@ -24,6 +26,7 @@ use crate::usage::parse_rate_limits;
 
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(10);
 const QUOTA_TIMEOUT: Duration = Duration::from_secs(10);
+const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(10);
 const REAP_WAIT: Duration = Duration::from_secs(2);
 
@@ -186,6 +189,95 @@ impl CodexProvider {
         }
     }
 
+    /// Imports past non-Xade Codex threads via `thread/list` + `thread/read` (`includeTurns: true`)
+    /// in one short app-server process bounded by [`IMPORT_TIMEOUT`]. On timeout mid-import,
+    /// returns the sessions already read.
+    pub fn import_sessions(&self) -> Vec<ImportedSession> {
+        let Some(binary) = self.binary.as_ref() else {
+            return Vec::new();
+        };
+        let mut srv = match ShortServer::spawn(binary, IMPORT_TIMEOUT) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(error = %e, "codex import spawn failed");
+                return Vec::new();
+            }
+        };
+
+        let mut kept = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut seen_cursors = HashSet::new();
+        loop {
+            let mut params = json!({
+                "limit": 100,
+                "sourceKinds": ["cli", "vscode", "exec", "appServer"],
+            });
+            if let Some(c) = &cursor {
+                params["cursor"] = json!(c);
+            }
+            match srv.request("thread/list", params) {
+                Ok(Ok(val)) => {
+                    if let Some(data) = val.get("data").and_then(Value::as_array) {
+                        for thread in data {
+                            if should_import_thread(thread) {
+                                kept.push(thread.clone());
+                            }
+                        }
+                    }
+                    let next = val
+                        .get("nextCursor")
+                        .and_then(Value::as_str)
+                        .filter(|c| !c.is_empty())
+                        .map(String::from);
+                    match next {
+                        Some(c) if seen_cursors.insert(c.clone()) => cursor = Some(c),
+                        _ => break,
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(code = e.code, error = %e.message, "codex thread/list failed");
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "codex thread/list stopped early");
+                    break;
+                }
+            }
+        }
+
+        let mut sessions = Vec::new();
+        for summary in &kept {
+            let Some(id) = summary
+                .get("id")
+                .and_then(Value::as_str)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            match srv.request("thread/read", json!({"threadId": id, "includeTurns": true})) {
+                Ok(Ok(detail)) => {
+                    if let Some(session) = parse_thread(summary, &detail) {
+                        sessions.push(session);
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(
+                        thread_id = id,
+                        code = e.code,
+                        error = %e.message,
+                        "codex thread/read failed"
+                    );
+                }
+                Err(e) => {
+                    tracing::debug!(thread_id = id, error = %e, "codex import stopped early");
+                    break;
+                }
+            }
+        }
+        srv.finish();
+        sessions
+    }
+
     pub fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
         let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
         let supported = {
@@ -258,6 +350,10 @@ impl AgentProvider for CodexProvider {
 
     fn quota(&self) -> Result<Vec<QuotaGroup>, ProviderError> {
         CodexProvider::quota(self)
+    }
+
+    fn import_sessions(&self) -> Vec<ImportedSession> {
+        CodexProvider::import_sessions(self)
     }
 
     fn delete_session(&self, provider_session_id: &str) -> Result<(), ProviderError> {

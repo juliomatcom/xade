@@ -1788,12 +1788,16 @@ fn imported_rows(
             sender_handle: None,
         })
         .collect();
+    let origin = match provider_id {
+        ProviderId::Codex => SessionOrigin::Codex,
+        ProviderId::Claude | ProviderId::Antigravity => SessionOrigin::ClaudeCode,
+    };
     let session = Session {
         id,
         workspace_id: WorkspaceId::new(),
         provider_id,
         provider_session_id: Some(imp.provider_session_id),
-        origin: SessionOrigin::ClaudeCode,
+        origin,
         title: imp.title,
         preview_snippet: String::new(),
         model_id: if imp.model_id.is_empty() {

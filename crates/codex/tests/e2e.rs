@@ -301,3 +301,138 @@ async fn resume_in_a_new_process_keeps_context() {
     assert!(said(&evs).contains("tangerine"), "{evs:?}");
     ctx.shutdown(&mut h2).await;
 }
+
+/// Free, read-only live check: imports non-Xade threads from the real Codex CLI and verifies
+/// via a separate `thread/list` call that no returned thread has an `originator` starting with
+/// `"xade"`.
+#[test]
+#[ignore]
+fn import_sessions_live_skips_xade_threads() {
+    use std::io::{BufRead, BufReader, Write};
+    use std::process::Stdio;
+
+    e2e!();
+    let provider = CodexProvider::new();
+    provider
+        .preflight()
+        .expect("codex is installed and signed in");
+    let imported = provider.import_sessions();
+
+    // Cross-check every imported thread id against raw `thread/list` metadata.
+    let bin = provider.binary().expect("codex binary");
+    let mut child = Command::new(bin)
+        .arg("app-server")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn app-server");
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = BufReader::new(child.stdout.take().expect("stdout"));
+    fn rpc(
+        stdin: &mut std::process::ChildStdin,
+        stdout: &mut BufReader<std::process::ChildStdout>,
+        id: u64,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let req =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        writeln!(stdin, "{req}").expect("write");
+        stdin.flush().expect("flush");
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let n = stdout.read_line(&mut line).expect("read");
+            assert!(n > 0, "eof waiting for {method}");
+            let v: serde_json::Value = serde_json::from_str(&line).expect("json");
+            if v.get("id").and_then(serde_json::Value::as_u64) == Some(id)
+                && v.get("method").is_none()
+            {
+                return v;
+            }
+        }
+    }
+    rpc(
+        &mut stdin,
+        &mut stdout,
+        1,
+        "initialize",
+        serde_json::json!({"clientInfo": {"name": "xade", "title": "Xade", "version": "0.0.0"}}),
+    );
+    writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({"jsonrpc": "2.0", "method": "initialized"})
+    )
+    .expect("initialized");
+    stdin.flush().expect("flush");
+
+    let mut by_id = std::collections::HashMap::new();
+    let mut cursor: Option<String> = None;
+    let mut next_id = 2u64;
+    loop {
+        let mut params = serde_json::json!({
+            "limit": 100,
+            "sourceKinds": ["cli", "vscode", "exec", "appServer"],
+        });
+        if let Some(c) = &cursor {
+            params["cursor"] = serde_json::json!(c);
+        }
+        let resp = rpc(&mut stdin, &mut stdout, next_id, "thread/list", params);
+        next_id += 1;
+        if let Some(arr) = resp
+            .pointer("/result/data")
+            .and_then(serde_json::Value::as_array)
+        {
+            for t in arr {
+                if let Some(id) = t.get("id").and_then(serde_json::Value::as_str) {
+                    by_id.insert(id.to_string(), t.clone());
+                }
+            }
+        }
+        cursor = resp
+            .pointer("/result/nextCursor")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(String::from);
+        if cursor.is_none() {
+            break;
+        }
+    }
+    drop(stdin);
+    let _ = child.wait();
+
+    for s in &imported {
+        assert!(!s.provider_session_id.is_empty());
+        assert!(!s.cwd.as_os_str().is_empty());
+        assert!(
+            !s.messages.is_empty(),
+            "empty session {}",
+            s.provider_session_id
+        );
+        let raw = by_id
+            .get(&s.provider_session_id)
+            .expect("imported thread exists in thread/list");
+        let originator = raw
+            .get("originator")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            !originator.starts_with("xade"),
+            "xade-originated thread {} leaked into import (originator={originator:?})",
+            s.provider_session_id
+        );
+        eprintln!(
+            "imported codex session: id={} originator={originator:?} title={:?} model={:?} messages={}",
+            s.provider_session_id,
+            s.title,
+            s.model_id,
+            s.messages.len()
+        );
+    }
+    assert!(
+        !imported.is_empty(),
+        "expected at least one non-Xade Codex thread on disk"
+    );
+}

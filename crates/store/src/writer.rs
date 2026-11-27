@@ -562,9 +562,9 @@ fn prune_throwaway(tx: &Transaction) -> rusqlite::Result<PruneCounts> {
     let sessions: Vec<(String, String)> = tx
         .prepare(
             "SELECT s.id, w.root_path FROM sessions s JOIN workspaces w ON w.id = s.workspace_id
-             WHERE s.origin = ?1",
+             WHERE s.origin != ?1",
         )?
-        .query_map([schema::origin_str(SessionOrigin::ClaudeCode)], |r| {
+        .query_map([schema::origin_str(SessionOrigin::Xade)], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -697,7 +697,7 @@ fn import_session(
                     to_i64(u.cache_read_tokens),
                     fmt_ts(s.created_at),
                     fmt_ts(s.updated_at),
-                    schema::origin_str(SessionOrigin::ClaudeCode),
+                    schema::origin_str(s.origin),
                 ],
             )?;
             id

@@ -374,6 +374,7 @@ pub(crate) fn origin_str(o: SessionOrigin) -> &'static str {
     match o {
         SessionOrigin::Xade => "xade",
         SessionOrigin::ClaudeCode => "claude_code",
+        SessionOrigin::Codex => "codex",
     }
 }
 
@@ -381,6 +382,7 @@ pub(crate) fn parse_origin(idx: usize, s: &str) -> rusqlite::Result<SessionOrigi
     match s {
         "xade" => Ok(SessionOrigin::Xade),
         "claude_code" => Ok(SessionOrigin::ClaudeCode),
+        "codex" => Ok(SessionOrigin::Codex),
         other => Err(conversion_error(idx, UnknownValue(other.to_string()))),
     }
 }

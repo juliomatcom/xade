@@ -1090,6 +1090,7 @@ mod tests {
         for (origin, label) in [
             (xade_core::SessionOrigin::Xade, "Xade"),
             (xade_core::SessionOrigin::ClaudeCode, "Claude Code"),
+            (xade_core::SessionOrigin::Codex, "Codex"),
         ] {
             for focused in [true, false] {
                 let ((color, badge), (_, title)) = probe(origin, focused, label);
@@ -1184,9 +1185,14 @@ mod tests {
 
     #[test]
     fn an_imported_session_title_stays_read_only() {
-        let (v, renames) = rename_run(xade_core::SessionOrigin::ClaudeCode, |at| vec![click(at)]);
-        assert_eq!(v.renaming, None);
-        assert!(renames.iter().all(Option::is_none));
+        for origin in [
+            xade_core::SessionOrigin::ClaudeCode,
+            xade_core::SessionOrigin::Codex,
+        ] {
+            let (v, renames) = rename_run(origin, |at| vec![click(at)]);
+            assert_eq!(v.renaming, None, "{origin:?}");
+            assert!(renames.iter().all(Option::is_none), "{origin:?}");
+        }
     }
 
     fn key(k: egui::Key) -> Vec<egui::Event> {
@@ -1322,6 +1328,7 @@ mod tests {
         for origin in [
             xade_core::SessionOrigin::Xade,
             xade_core::SessionOrigin::ClaudeCode,
+            xade_core::SessionOrigin::Codex,
         ] {
             assert!(!header_selection_settles(origin), "{origin:?}");
         }
