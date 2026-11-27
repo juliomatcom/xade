@@ -2,36 +2,44 @@
 
 # Xade
 
-A fast native desktop app for running several AI coding agent sessions side by side. **100% free and open source (MIT), no subscription required.**
+**Your coding agents, side by side or on one team.** Run them in separate windows, or let them plan, build and review together, in a native Rust app with no Electron. **100% free and open source (MIT), no subscription required.**
 
-Xade is short for X-provider Agentic Development Environment (pronounced "zade").
-
-**It uses the agent clients you already have configured.** Xade drives your installed Claude Code (`claude`), Antigravity (`agy`), and Codex (`codex`) CLIs as is: your login, settings, `CLAUDE.md` files, MCP servers, skills and permission rules all apply. There is no Xade account or subscription, no API keys to paste, nothing to set up again, and your existing Claude Code sessions can be imported and resumed.
+Works with Claude Code, Codex and Antigravity. OpenCode and local models are coming soon.
 
 <p align="center"><a href="https://xade.pro/"><img src="docs/images/multi-session.webp" alt="Xade demo: three models on one Multi-Session team plan, code and test a feature while a solo session runs beside them" width="100%"></a></p>
 
+## Why Xade
+
+- **A team of models.** A [Multi-Session](docs/multi-session.md) puts several models in one window and one folder. Message all of them or one `#handle`, and they hand work to each other.
+- **Native Rust.** A GPU-rendered app, with no Electron and no web runtime.
+- **Your setup, as is.** Xade drives your installed Claude Code (`claude`), Codex (`codex`) and Antigravity (`agy`) CLIs: your login, settings, instruction files, MCP servers, skills and permission rules all apply. No Xade account and no API keys to paste.
+- **Hit a limit? Switch providers.** Fork a session to another provider; the new agent starts from a summary of the work.
+- **No telemetry.** Session history is saved on your machine. The agents still send prompts and code to their model providers.
+
 **Simple. Opinionated. Really fast.** Xade does one thing well, makes the choices for you, and never trades speed for features. These three rules lead every change to the project.
 
-## What it does
+## What else it does
 
-- Run multiple Claude Code, Antigravity, and Codex sessions in side-by-side windows, and fork a session to another provider.
-- Start a [Multi-Session](docs/multi-session.md): a team of models in one window and one folder. Message all of them or one `#handle`, and they hand work to each other.
-- The top bar shows usage quota for each provider, with reset times on hover.
-- Select message text to copy or quote it into the prompt. Links in chat open in your default browser.
-- Sessions are saved locally and searchable. Typos are fine in titles.
+- Run multiple sessions in side-by-side windows.
+- Import and resume your existing Claude Code and Codex sessions.
+- Search saved sessions. Typos are fine in titles.
 - Review code changes in a side-by-side diff before they are applied, and open any file in VS Code.
 - Turn auto-approve on or off per session. With it on, changes still show up for review afterwards.
+- See usage quota in the top bar for providers that report it, with reset times on hover.
 - Pick the model and effort level, and see context and token meters.
+- Select message text to copy or quote it into the prompt. Links in chat open in your default browser.
 - The git branch and changed-file count stay visible in the bottom bar.
 - Auto mode and the model choice carry over to new sessions.
 
 ## How it works
 
-Xade runs the official `claude` CLI that you already have installed and logged in. It talks to the CLI over its JSON streaming mode and never reads or touches your credentials. Sessions are stored in a local SQLite file. Antigravity runs through `agy acp` and Codex through `codex app-server`. More providers and local models are on the roadmap.
+Xade runs the official CLIs you already have installed and logged in, and never reads or touches your credentials: Claude Code over its JSON streaming mode, Codex through `codex app-server` and Antigravity through `agy acp`. Sessions are stored in a local SQLite file.
+
+The name is short for X-provider Agentic Development Environment (pronounced "zade").
 
 ## Status
 
-Early MVP. macOS and Linux (x86_64, aarch64). Claude Code, Antigravity (`agy`), and Codex (`codex`) are the providers; see [docs/antigravity.md](docs/antigravity.md) and [docs/codex.md](docs/codex.md).
+Early MVP. macOS and Linux (x86_64, aarch64). Provider guides: [Codex](docs/codex.md) and [Antigravity](docs/antigravity.md). OpenCode and local models are coming soon.
 
 ## Install
 
@@ -57,12 +65,13 @@ Linux needs a Vulkan-capable GPU driver and, for file dialogs, xdg-desktop-porta
 
 ## Requirements
 
-- Rust (stable)
-- Claude Code CLI, installed and logged in (check with `claude auth status`), Antigravity CLI `agy`, and/or Codex CLI `codex` (`codex login`)
+- At least one agent CLI, installed and logged in: Claude Code (check with `claude auth status`), Codex (`codex login`) or Antigravity (`agy`)
 - git
 - VS Code with the `code` command (optional, for opening files from the diff view)
 
 ## Build and run
+
+Building needs Rust (stable).
 
 ```sh
 cargo run --release -p xade

@@ -1,7 +1,7 @@
 {
   "name": "Xade",
   "short_name": "Xade",
-  "description": "One workspace for all your AI coding agents.",
+  "description": "Your coding agents, side by side or on one team.",
   "start_url": "/",
   "display": "standalone",
   "background_color": "#020617",

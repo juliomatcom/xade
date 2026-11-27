@@ -34,7 +34,7 @@ cat > "$WORK/xade.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Xade
-Comment=Desktop client for Claude Code
+Comment=Your coding agents, side by side or on one team
 Exec=xade
 Icon=xade
 Terminal=false
