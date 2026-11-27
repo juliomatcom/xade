@@ -1,0 +1,6 @@
+{"dir":"in","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}}
+{"dir":"out","frame":{"id":1,"result":{"userAgent":"xade"}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","method":"initialized"}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":2,"method":"thread/delete","params":{"threadId":"t1"}}}
+{"dir":"out","frame":{"id":2,"result":{}}}
+{"dir":"out","frame":{"method":"thread/deleted","params":{"threadId":"t1"}}}

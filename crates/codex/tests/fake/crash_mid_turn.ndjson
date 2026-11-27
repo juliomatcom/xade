@@ -1,0 +1,11 @@
+{"dir":"in","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}}
+{"dir":"out","frame":{"id":1,"result":{"userAgent":"xade"}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","method":"initialized"}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":2,"method":"thread/start","params":{}}}
+{"dir":"out","frame":{"id":2,"result":{"thread":{"id":"t1"},"model":"gpt-6-luna"}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":3,"method":"turn/start","params":{}}}
+{"dir":"out","frame":{"id":3,"result":{"turn":{"id":"turn1","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn1","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"turn1","itemId":"m1","delta":"partial"}}}
+{"dir":"meta","frame":{"stderr":"boom"}}
+{"dir":"meta","frame":{"exit":3}}

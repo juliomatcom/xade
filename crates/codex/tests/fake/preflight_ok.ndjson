@@ -1,0 +1,7 @@
+{"dir":"in","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}}
+{"dir":"out","frame":{"id":1,"result":{"userAgent":"xade"}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","method":"initialized"}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":2,"method":"account/read","params":{}}}
+{"dir":"out","frame":{"id":2,"result":{"account":{"type":"apiKey"},"requiresOpenaiAuth":true}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":3,"method":"model/list","params":{}}}
+{"dir":"out","frame":{"id":3,"result":{"data":[{"id":"gpt-6.2-sol","displayName":"GPT-6.2-Sol","description":"Fast","hidden":false,"isDefault":true,"supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"high"},{"reasoningEffort":"ultra"}]},{"id":"gpt-5.5","displayName":"GPT-5.5","description":"Legacy","hidden":false,"isDefault":false,"supportedReasoningEfforts":[{"reasoningEffort":"low"},{"reasoningEffort":"medium"}]}]}}}
