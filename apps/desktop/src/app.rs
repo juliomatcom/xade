@@ -872,7 +872,7 @@ impl App {
         });
     }
 
-    /// Imports Claude Code history; one run at a time, finished by `ImportDone`.
+    /// Imports every provider's history; one run at a time, finished by the first `ImportDone`.
     pub fn start_import(&mut self) {
         if self.home.importing {
             return;

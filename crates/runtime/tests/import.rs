@@ -147,14 +147,27 @@ fn non_temp_dir() -> tempfile::TempDir {
 }
 
 async fn import(h: &mut common::Harness) -> (u32, u32) {
+    import_from(h, 1).await
+}
+
+/// Each provider's batch is applied as it arrives and ends with its own `ImportDone`.
+async fn import_from(h: &mut common::Harness, providers: usize) -> (u32, u32) {
     h.tx.send(ManagerCmd::Import).unwrap();
-    let ev = h
-        .until(5, |e| matches!(e.kind, AppEventKind::ImportDone { .. }))
-        .await;
-    match ev.last().unwrap().kind {
-        AppEventKind::ImportDone { imported, updated } => (imported, updated),
-        _ => unreachable!(),
+    let (mut imported, mut updated) = (0, 0);
+    for _ in 0..providers {
+        let ev = h
+            .until(5, |e| matches!(e.kind, AppEventKind::ImportDone { .. }))
+            .await;
+        if let AppEventKind::ImportDone {
+            imported: i,
+            updated: u,
+        } = ev.last().unwrap().kind
+        {
+            imported += i;
+            updated += u;
+        }
     }
+    (imported, updated)
 }
 
 #[tokio::test]
@@ -422,7 +435,7 @@ async fn codex_import_gets_codex_origin_while_claude_keeps_claude_code() {
     *claude.import.lock().unwrap() = vec![imported("cc-1", "from claude", &h.cwd, 20)];
     *codex.import.lock().unwrap() = vec![imported("cx-1", "from codex", &h.cwd, 10)];
 
-    assert_eq!(import(&mut h).await, (2, 0));
+    assert_eq!(import_from(&mut h, 2).await, (2, 0));
 
     let cc_page = h
         .reader

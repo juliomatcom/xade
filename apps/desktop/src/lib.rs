@@ -183,7 +183,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         options,
         Box::new(move |cc| Ok(Box::new(launch.into_app(cc, initial_workspace)))),
     )?;
-    drop(rt);
+    // Bounded: a blocking import or quota call on a hung CLI must not stall quit.
+    rt.shutdown_timeout(std::time::Duration::from_secs(2));
     Ok(())
 }
 

@@ -21,7 +21,8 @@ DROP = {"remoteControl/status/changed", "skills/changed", "mcpServer/startupStat
 
 
 def redact(s):
-    s = s.replace(HOME, "/HOME").replace(USER, "USER")
+    s = s.replace(HOME, "/HOME")
+    s = re.sub(r"(?<![A-Za-z0-9_])" + re.escape(USER) + r"(?![A-Za-z0-9_])", "USER", s)
     return EMAIL.sub("<redacted-email>", s)
 
 

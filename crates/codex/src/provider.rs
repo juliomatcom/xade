@@ -1,13 +1,14 @@
 //! `CodexProvider`: binary resolution, short app-server preflight (`account/read` + `model/list`),
 //! session spawn, and `thread/delete`.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{mpsc, RwLock, RwLockReadGuard};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Mutex, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -41,6 +42,12 @@ struct Catalog {
 pub struct CodexProvider {
     binary: Option<PathBuf>,
     catalog: RwLock<Catalog>,
+    /// Set when `account/rateLimits/read` says the account is not a ChatGPT sign-in (API key):
+    /// quota is not asked again until the next preflight.
+    no_quota: AtomicBool,
+    /// `updatedAt` of every thread already returned by `import_sessions` in this run; an
+    /// unchanged thread is not read again (the manager skips not-newer sessions anyway).
+    imported: Mutex<HashMap<String, i64>>,
 }
 
 impl Default for CodexProvider {
@@ -67,6 +74,8 @@ impl CodexProvider {
         Self {
             binary,
             catalog: RwLock::new(Catalog::default()),
+            no_quota: AtomicBool::new(false),
+            imported: Mutex::new(HashMap::new()),
         }
     }
 
@@ -116,6 +125,7 @@ impl CodexProvider {
     /// Runs one short `codex app-server` process: `initialize`, `initialized`, `account/read`,
     /// `model/list`, then closes stdin.
     pub fn preflight(&self) -> Result<(), ProviderError> {
+        self.no_quota.store(false, Ordering::Relaxed);
         let result = self.run_preflight();
         if result.is_err() {
             self.catalog
@@ -167,6 +177,9 @@ impl CodexProvider {
         let Some(binary) = self.binary.as_ref() else {
             return Ok(Vec::new());
         };
+        if self.no_quota.load(Ordering::Relaxed) {
+            return Ok(Vec::new());
+        }
         let mut srv = match ShortServer::spawn(binary, QUOTA_TIMEOUT) {
             Ok(s) => s,
             Err(e) => {
@@ -180,6 +193,9 @@ impl CodexProvider {
             Ok(Ok(val)) => Ok(parse_rate_limits(&val)),
             Ok(Err(e)) => {
                 tracing::debug!(code = e.code, error = %e.message, "codex rate limits unavailable");
+                if e.message.contains("chatgpt authentication required") {
+                    self.no_quota.store(true, Ordering::Relaxed);
+                }
                 Ok(Vec::new())
             }
             Err(e) => {
@@ -246,7 +262,12 @@ impl CodexProvider {
         }
 
         let mut sessions = Vec::new();
-        for summary in &kept {
+        let mut seen = self
+            .imported
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        for (n, summary) in kept.iter().enumerate() {
             let Some(id) = summary
                 .get("id")
                 .and_then(Value::as_str)
@@ -254,10 +275,18 @@ impl CodexProvider {
             else {
                 continue;
             };
+            let updated = summary
+                .get("updatedAt")
+                .and_then(Value::as_i64)
+                .unwrap_or(0);
+            if seen.get(id) == Some(&updated) {
+                continue;
+            }
             match srv.request("thread/read", json!({"threadId": id, "includeTurns": true})) {
                 Ok(Ok(detail)) => {
                     if let Some(session) = parse_thread(summary, &detail) {
                         sessions.push(session);
+                        seen.insert(id.to_string(), updated);
                     }
                 }
                 Ok(Err(e)) => {
@@ -269,12 +298,17 @@ impl CodexProvider {
                     );
                 }
                 Err(e) => {
-                    tracing::debug!(thread_id = id, error = %e, "codex import stopped early");
+                    tracing::warn!(
+                        error = %e,
+                        unread = kept.len() - n,
+                        "codex import stopped early; the rest is read on the next import"
+                    );
                     break;
                 }
             }
         }
         srv.finish();
+        *self.imported.lock().unwrap_or_else(|e| e.into_inner()) = seen;
         sessions
     }
 

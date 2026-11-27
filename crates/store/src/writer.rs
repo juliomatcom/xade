@@ -55,7 +55,7 @@ pub enum WriteOp {
     UpsertQuota(QuotaWindow),
     /// Idempotent import of a session from a provider's own history, in one transaction:
     /// upserts the workspace by `workspace_root` (`session.workspace_id` is ignored), then
-    /// upserts the session by `(provider_id, provider_session_id)` as `ClaudeCode` origin and
+    /// upserts the session by `(provider_id, provider_session_id)` with `session.origin` and
     /// replaces its messages. A session with `Xade` origin is never touched. On update the
     /// session id, effort, auto mode and cost are kept, and a zero context max keeps the old one.
     ImportSession {
@@ -70,7 +70,7 @@ pub enum WriteOp {
         session: Session,
         messages: Vec<Message>,
     },
-    /// Deletes `ClaudeCode`-origin sessions whose workspace root is throwaway (see
+    /// Deletes imported (non-`Xade`) sessions whose workspace root is throwaway (see
     /// `throwaway::is_throwaway_dir`; messages and search rows go with them), then workspaces
     /// that are throwaway and hold no session. Replies with the counts.
     PruneThrowaway(mpsc::Sender<PruneCounts>),

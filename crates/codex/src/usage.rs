@@ -29,7 +29,10 @@ pub fn parse_rate_limits(result: &Value) -> Vec<QuotaGroup> {
         let mut out = Vec::new();
         for key in keys {
             if let Some(snap) = map.get(key) {
-                if let Some(g) = parse_snapshot(snap) {
+                if let Some(mut g) = parse_snapshot(snap) {
+                    if g.name.is_empty() && !out.is_empty() {
+                        g.name = key.clone();
+                    }
                     out.push(g);
                 }
             }
