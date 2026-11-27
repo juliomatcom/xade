@@ -1,0 +1,5 @@
+{"dir":"in","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}}
+{"dir":"out","frame":{"id":1,"result":{"userAgent":"xade"}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","method":"initialized"}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":2,"method":"account/rateLimits/read","params":{}}}
+{"dir":"out","frame":{"error":{"code":-32600,"message":"chatgpt authentication required to read rate limits"},"id":2}}

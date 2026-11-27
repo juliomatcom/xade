@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use xade_core::{
-    AgentProvider, Effort, ModelOption, ProviderError, ProviderId, SessionHandle, SpawnConfig,
+    AgentProvider, Effort, ModelOption, ProviderError, ProviderId, QuotaGroup, SessionHandle,
+    SpawnConfig,
 };
 
 use crate::models::{
@@ -19,8 +20,10 @@ use crate::models::{
 };
 use crate::process::spawn_session;
 use crate::rpc::{self, Incoming, RpcError};
+use crate::usage::parse_rate_limits;
 
 const PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(10);
+const QUOTA_TIMEOUT: Duration = Duration::from_secs(10);
 const DELETE_TIMEOUT: Duration = Duration::from_secs(10);
 const REAP_WAIT: Duration = Duration::from_secs(2);
 
@@ -154,6 +157,35 @@ impl CodexProvider {
         Ok(())
     }
 
+    /// Queries `account/rateLimits/read` in one short `codex app-server` process.
+    /// Any error (API-key accounts returning `-32600`, timeout, not signed in) logs at `debug`
+    /// and yields an empty list so API-key users never see a quota error banner.
+    pub fn quota(&self) -> Result<Vec<QuotaGroup>, ProviderError> {
+        let Some(binary) = self.binary.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let mut srv = match ShortServer::spawn(binary, QUOTA_TIMEOUT) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(error = %e, "codex quota spawn failed");
+                return Ok(Vec::new());
+            }
+        };
+        let res = srv.request("account/rateLimits/read", json!({}));
+        srv.finish();
+        match res {
+            Ok(Ok(val)) => Ok(parse_rate_limits(&val)),
+            Ok(Err(e)) => {
+                tracing::debug!(code = e.code, error = %e.message, "codex rate limits unavailable");
+                Ok(Vec::new())
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "codex quota request failed");
+                Ok(Vec::new())
+            }
+        }
+    }
+
     pub fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
         let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
         let supported = {
@@ -222,6 +254,10 @@ impl AgentProvider for CodexProvider {
 
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
         CodexProvider::spawn(self, cfg)
+    }
+
+    fn quota(&self) -> Result<Vec<QuotaGroup>, ProviderError> {
+        CodexProvider::quota(self)
     }
 
     fn delete_session(&self, provider_session_id: &str) -> Result<(), ProviderError> {

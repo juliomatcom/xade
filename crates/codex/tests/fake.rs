@@ -686,3 +686,21 @@ fn delete_session_waits_for_response_and_treats_no_rollout_as_ok() {
     let missing = fake("fake/delete_missing");
     assert_eq!(missing.provider.delete_session("missing"), Ok(()));
 }
+
+#[test]
+fn quota_returns_empty_on_api_key_error_and_groups_on_success() {
+    let err = fake("fake/quota_api_key");
+    assert_eq!(err.provider.quota(), Ok(vec![]));
+    assert_eq!(
+        err.methods(),
+        ["initialize", "initialized", "account/rateLimits/read"]
+    );
+
+    let ok = fake("fake/quota_ok");
+    let groups = ok.provider.quota().expect("quota");
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0].name, "");
+    assert_eq!(groups[0].windows.len(), 2);
+    assert_eq!(groups[0].windows[0].utilization_pct, 35.0);
+    assert_eq!(groups[0].windows[1].utilization_pct, 12.0);
+}
