@@ -32,7 +32,7 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
         .iter()
         .filter_map(|k| match k {
             WindowKind::Editor(id) => app.editors.map.get(id).map(|vm| (*id, vm.title())),
-            WindowKind::Session(_) | WindowKind::MultiSession(_) => None,
+            WindowKind::Session(_) | WindowKind::MultiSession(_) | WindowKind::Guide => None,
         })
         .filter(|(_, name)| name.to_lowercase().contains(&needle))
         .collect();

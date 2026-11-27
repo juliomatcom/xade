@@ -2,7 +2,7 @@
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::{OnceLock, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use xade_core::{
@@ -18,7 +18,9 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 const USAGE_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub struct AntigravityProvider {
-    binary: Option<PathBuf>,
+    binary: OnceLock<PathBuf>,
+    /// Finds a binary that was missing at startup; `None` for a fixed one.
+    lookup: Option<fn() -> Option<PathBuf>>,
     /// Empty until `preflight` fills it from `agy models`.
     catalog: RwLock<Vec<ModelOption>>,
 }
@@ -32,11 +34,10 @@ impl Default for AntigravityProvider {
 impl AntigravityProvider {
     /// Resolves the `agy` binary now: `$PATH`, then the usual install locations.
     pub fn new() -> Self {
-        let dirs = candidate_dirs(
-            std::env::var_os("PATH"),
-            std::env::var_os("HOME").map(PathBuf::from),
-        );
-        Self::with_optional_binary(first_binary(&dirs))
+        Self {
+            lookup: Some(resolve_binary),
+            ..Self::with_optional_binary(resolve_binary())
+        }
     }
 
     pub fn with_binary(path: PathBuf) -> Self {
@@ -45,7 +46,8 @@ impl AntigravityProvider {
 
     fn with_optional_binary(binary: Option<PathBuf>) -> Self {
         Self {
-            binary,
+            binary: binary.map(OnceLock::from).unwrap_or_default(),
+            lookup: None,
             catalog: RwLock::new(Vec::new()),
         }
     }
@@ -55,8 +57,27 @@ impl AntigravityProvider {
     }
 
     pub fn binary(&self) -> Option<&Path> {
-        self.binary.as_deref()
+        self.binary.get().map(PathBuf::as_path)
     }
+
+    /// The binary, looked up again while it is missing, so a CLI installed after startup is
+    /// found by the next preflight.
+    fn find_binary(&self) -> Option<&Path> {
+        if self.binary.get().is_none() {
+            if let Some(found) = self.lookup.and_then(|lookup| lookup()) {
+                // A concurrent preflight may have set it first; either path is good.
+                let _ = self.binary.set(found);
+            }
+        }
+        self.binary()
+    }
+}
+
+fn resolve_binary() -> Option<PathBuf> {
+    first_binary(&candidate_dirs(
+        std::env::var_os("PATH"),
+        std::env::var_os("HOME").map(PathBuf::from),
+    ))
 }
 
 /// Where `agy` may live, in lookup order: `$PATH`, the default install `~/.gemini/bin`, then the
@@ -115,7 +136,7 @@ impl AgentProvider for AntigravityProvider {
     }
 
     fn preflight(&self) -> Result<(), ProviderError> {
-        let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
+        let binary = self.find_binary().ok_or(ProviderError::NotInstalled)?;
         match run_models(binary, MODELS_TIMEOUT) {
             Fetch::SpawnFailed(e) => Err(ProviderError::Spawn(e)),
             Fetch::TimedOut => Err(ProviderError::Protocol("agy models timed out".into())),
@@ -149,7 +170,7 @@ impl AgentProvider for AntigravityProvider {
     }
 
     fn quota(&self) -> Result<Vec<QuotaGroup>, ProviderError> {
-        let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
+        let binary = self.binary().ok_or(ProviderError::NotInstalled)?;
         match run_agy(
             binary,
             &["-p", "/usage", "--output-format", "json"],
@@ -169,7 +190,7 @@ impl AgentProvider for AntigravityProvider {
     }
 
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
-        let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
+        let binary = self.binary().ok_or(ProviderError::NotInstalled)?;
         spawn_session(binary, cfg)
     }
 

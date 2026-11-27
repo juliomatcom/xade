@@ -9,6 +9,7 @@ mod editor;
 mod errors;
 mod file_tree;
 mod find;
+mod guide;
 mod home;
 mod icons;
 mod keymap;

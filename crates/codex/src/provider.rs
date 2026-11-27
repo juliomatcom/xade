@@ -8,7 +8,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Mutex, RwLock, RwLockReadGuard};
+use std::sync::{mpsc, Mutex, OnceLock, RwLock, RwLockReadGuard};
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -40,7 +40,9 @@ struct Catalog {
 }
 
 pub struct CodexProvider {
-    binary: Option<PathBuf>,
+    binary: OnceLock<PathBuf>,
+    /// Finds a binary that was missing at startup; `None` for a fixed one.
+    lookup: Option<fn() -> Option<PathBuf>>,
     catalog: RwLock<Catalog>,
     /// Set when `account/rateLimits/read` says the account is not a ChatGPT sign-in (API key):
     /// quota is not asked again until the next preflight.
@@ -59,11 +61,10 @@ impl Default for CodexProvider {
 impl CodexProvider {
     /// Resolves the `codex` binary now: `$PATH`, then standard user/system install dirs.
     pub fn new() -> Self {
-        let dirs = candidate_dirs(
-            std::env::var_os("PATH"),
-            std::env::var_os("HOME").map(PathBuf::from),
-        );
-        Self::with_optional_binary(first_binary(&dirs))
+        Self {
+            lookup: Some(resolve_binary),
+            ..Self::with_optional_binary(resolve_binary())
+        }
     }
 
     pub fn with_binary(path: PathBuf) -> Self {
@@ -72,7 +73,8 @@ impl CodexProvider {
 
     fn with_optional_binary(binary: Option<PathBuf>) -> Self {
         Self {
-            binary,
+            binary: binary.map(OnceLock::from).unwrap_or_default(),
+            lookup: None,
             catalog: RwLock::new(Catalog::default()),
             no_quota: AtomicBool::new(false),
             imported: Mutex::new(HashMap::new()),
@@ -84,7 +86,19 @@ impl CodexProvider {
     }
 
     pub fn binary(&self) -> Option<&Path> {
-        self.binary.as_deref()
+        self.binary.get().map(PathBuf::as_path)
+    }
+
+    /// The binary, looked up again while it is missing, so a CLI installed after startup is
+    /// found by the next preflight.
+    fn find_binary(&self) -> Option<&Path> {
+        if self.binary.get().is_none() {
+            if let Some(found) = self.lookup.and_then(|lookup| lookup()) {
+                // A concurrent preflight may have set it first; either path is good.
+                let _ = self.binary.set(found);
+            }
+        }
+        self.binary()
     }
 
     pub fn display_name(&self) -> &'static str {
@@ -137,7 +151,7 @@ impl CodexProvider {
     }
 
     fn run_preflight(&self) -> Result<(), ProviderError> {
-        let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
+        let binary = self.find_binary().ok_or(ProviderError::NotInstalled)?;
         let mut srv = ShortServer::spawn(binary, PREFLIGHT_TIMEOUT)?;
         let acct_res = srv.request("account/read", json!({}))?;
         let models_res = srv.request("model/list", json!({}))?;
@@ -174,7 +188,7 @@ impl CodexProvider {
     /// Any error (API-key accounts returning `-32600`, timeout, not signed in) logs at `debug`
     /// and yields an empty list so API-key users never see a quota error banner.
     pub fn quota(&self) -> Result<Vec<QuotaGroup>, ProviderError> {
-        let Some(binary) = self.binary.as_ref() else {
+        let Some(binary) = self.binary() else {
             return Ok(Vec::new());
         };
         if self.no_quota.load(Ordering::Relaxed) {
@@ -209,7 +223,7 @@ impl CodexProvider {
     /// in one short app-server process bounded by [`IMPORT_TIMEOUT`]. On timeout mid-import,
     /// returns the sessions already read.
     pub fn import_sessions(&self) -> Vec<ImportedSession> {
-        let Some(binary) = self.binary.as_ref() else {
+        let Some(binary) = self.binary() else {
             return Vec::new();
         };
         let mut srv = match ShortServer::spawn(binary, IMPORT_TIMEOUT) {
@@ -313,7 +327,7 @@ impl CodexProvider {
     }
 
     pub fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
-        let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
+        let binary = self.binary().ok_or(ProviderError::NotInstalled)?;
         let supported = {
             let cat = self.catalog();
             cat.models
@@ -337,7 +351,7 @@ impl CodexProvider {
                 "invalid thread id {provider_session_id:?}"
             )));
         }
-        let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
+        let binary = self.binary().ok_or(ProviderError::NotInstalled)?;
         let mut srv = ShortServer::spawn(binary, DELETE_TIMEOUT)?;
         let res = srv.request("thread/delete", json!({"threadId": provider_session_id}))?;
         srv.finish();
@@ -579,6 +593,13 @@ fn kill_and_reap(child: &mut Child) {
     let _ = child.wait();
 }
 
+fn resolve_binary() -> Option<PathBuf> {
+    first_binary(&candidate_dirs(
+        std::env::var_os("PATH"),
+        std::env::var_os("HOME").map(PathBuf::from),
+    ))
+}
+
 /// Where `codex` may live, in lookup order: `$PATH`, `~/.local/bin`, `/opt/homebrew/bin`,
 /// `/usr/local/bin` (GUI apps on macOS lack the shell `$PATH`).
 fn candidate_dirs(path_var: Option<OsString>, home: Option<PathBuf>) -> Vec<PathBuf> {
@@ -667,6 +688,25 @@ mod tests {
             }),
             Err(ProviderError::NotInstalled)
         ));
+    }
+
+    #[test]
+    fn a_binary_installed_after_startup_is_found_by_the_next_lookup() {
+        static INSTALLED: AtomicBool = AtomicBool::new(false);
+        fn lookup() -> Option<PathBuf> {
+            INSTALLED
+                .load(Ordering::Relaxed)
+                .then(|| PathBuf::from("/opt/codex"))
+        }
+        let p = CodexProvider {
+            lookup: Some(lookup),
+            ..CodexProvider::with_optional_binary(None)
+        };
+        assert_eq!(p.find_binary(), None);
+        INSTALLED.store(true, Ordering::Relaxed);
+        assert_eq!(p.binary(), None, "only a lookup finds it");
+        assert_eq!(p.find_binary(), Some(Path::new("/opt/codex")));
+        assert_eq!(p.binary(), Some(Path::new("/opt/codex")));
     }
 
     #[test]

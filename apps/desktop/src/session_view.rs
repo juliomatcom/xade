@@ -31,6 +31,8 @@ pub struct ViewOut {
     pub fork: Option<ProviderId>,
     /// The title the user committed in the header.
     pub rename: Option<String>,
+    /// A button of the guide window.
+    pub guide: Option<crate::guide::GuideAction>,
 }
 
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {

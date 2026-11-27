@@ -27,6 +27,7 @@ pub const ABOUT: &str = "\u{2139}";
 /// A terminal prompt: providers are CLIs.
 pub const PROVIDERS: &str = ">_";
 pub const STATUS: &str = PROVIDERS;
+pub const GUIDE: &str = "\u{1F4D6}";
 pub const OPEN_SESSION: &str = "\u{1F4C2}";
 pub const SHORTCUTS: &str = "\u{2328}";
 pub const SETTINGS: &str = "\u{2699}";
@@ -86,6 +87,7 @@ mod tests {
             COPY,
             BUG,
             TRASH,
+            GUIDE,
             FORK,
             MULTI,
             EXIT,

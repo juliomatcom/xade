@@ -642,7 +642,7 @@ fn refresh_button(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// The top-left menu: adding a folder, Status and About.
+/// The top-left menu: adding a folder, About, Status and the setup guide.
 fn app_menu(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button(icons::MENU, |ui| {
         if ui
@@ -656,6 +656,12 @@ fn app_menu(app: &mut App, ui: &mut egui::Ui) {
         }
         if ui.button(icons::with(icons::STATUS, "Status")).clicked() {
             app.status_open = true;
+        }
+        if ui
+            .button(icons::with(icons::GUIDE, "Setup guide"))
+            .clicked()
+        {
+            app.open_guide();
         }
         ui.separator();
         if ui.button(icons::with(icons::EXIT, "Exit")).clicked() {
@@ -723,6 +729,7 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
             .filter_map(|id| Some((id, app.unavailable_text(id)?)))
             .collect(),
     };
+    let none_usable = !failing.is_empty();
     for (id, text) in failing {
         egui::Frame::new()
             .fill(theme::bg_raised())
@@ -735,6 +742,15 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
                     app.retry_preflight(id);
                 }
             });
+        ui.add_space(12.0);
+    }
+    if none_usable {
+        if ui
+            .button(icons::with(icons::GUIDE, "Setup guide"))
+            .clicked()
+        {
+            app.open_guide();
+        }
         ui.add_space(12.0);
     }
     origin_filter(app, ui);
@@ -1745,7 +1761,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_status_item_opens_the_status_dialog() {
+    fn the_menu_items_open_the_status_dialog_and_the_setup_guide() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -1798,6 +1814,17 @@ mod tests {
         let item = find(&texts, "Status").expect("menu item drawn");
         run(&mut app, click(item));
         assert!(app.status_open);
+
+        // The click on Status may leave the menu open; open it only when it closed.
+        run(&mut app, vec![]);
+        if find(&run(&mut app, vec![]), "Setup guide").is_none() {
+            run(&mut app, click(menu));
+            run(&mut app, vec![]);
+        }
+        let texts = run(&mut app, vec![]);
+        let item = find(&texts, "Setup guide").expect("menu item drawn");
+        run(&mut app, click(item));
+        assert!(app.guide.is_some() && app.view == View::Workspace);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1825,6 +1852,11 @@ mod tests {
             .preflight
             .insert(ProviderId::Claude, Err(ProviderError::NotLoggedIn));
         assert_eq!(banners(&mut app, &ctx).len(), 2);
+        let texts = painted(&mut app, &ctx, grid);
+        assert!(
+            texts.iter().any(|t| t.ends_with("Setup guide")),
+            "{texts:?}"
+        );
         // Not installed hides Antigravity: the Claude banner is exactly today's.
         app.home
             .preflight
