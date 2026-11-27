@@ -40,10 +40,7 @@ pub fn should_import_thread(thread: &Value) -> bool {
         .get("originator")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if originator.starts_with("xade") {
-        return false;
-    }
-    true
+    !originator.starts_with("xade")
 }
 
 /// Converts a `thread/list` summary and its `thread/read` (`includeTurns: true`) result into an
