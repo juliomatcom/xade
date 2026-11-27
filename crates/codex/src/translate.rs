@@ -33,6 +33,9 @@ struct ToolMeta {
 pub struct Translator {
     /// Streamed assistant text not yet finalized as an `AssistantText`.
     text_buf: String,
+    /// Text of the current `agentMessage` already emitted by an early flush, so its
+    /// `item/completed` emits only the rest.
+    msg_flushed: String,
     thought_chars: usize,
     /// Metadata recorded on `item/started` so approvals and completion reuse the same tool shape.
     tools: HashMap<String, ToolMeta>,
@@ -153,9 +156,9 @@ impl Translator {
 
     fn flush(&mut self, out: &mut Vec<ProviderEvent>) {
         if !self.text_buf.is_empty() {
-            out.push(ProviderEvent::AssistantText {
-                text: std::mem::take(&mut self.text_buf),
-            });
+            let text = std::mem::take(&mut self.text_buf);
+            self.msg_flushed.push_str(&text);
+            out.push(ProviderEvent::AssistantText { text });
         }
     }
 
@@ -165,6 +168,9 @@ impl Translator {
             "userMessage" | "agentMessage" | "reasoning" => {
                 // Flush any prior agentMessage that never received `item/completed` (e.g. mid-steer).
                 self.flush(out);
+                if kind == "agentMessage" {
+                    self.msg_flushed.clear();
+                }
             }
             "commandExecution" => {
                 self.flush(out);
@@ -183,10 +189,16 @@ impl Translator {
         match kind {
             "agentMessage" => {
                 let buf = std::mem::take(&mut self.text_buf);
+                let flushed = std::mem::take(&mut self.msg_flushed);
                 let authoritative = item.get("text").and_then(Value::as_str).unwrap_or_default();
-                let text = if !authoritative.is_empty() {
+                let text = if authoritative.is_empty() {
+                    buf
+                } else if let Some(rest) = authoritative.strip_prefix(flushed.as_str()) {
+                    rest.to_string()
+                } else if flushed.is_empty() {
                     authoritative.to_string()
                 } else {
+                    // Part was already shown and the final text diverges: keep what streamed.
                     buf
                 };
                 if !text.is_empty() {
@@ -235,14 +247,15 @@ impl Translator {
                     .and_then(Value::as_array)
                     .map(Vec::as_slice)
                     .unwrap_or_default();
+                let verb = if is_error { status } else { "edited" };
                 let output = changes
                     .iter()
                     .filter_map(|c| c.get("path").and_then(Value::as_str))
                     .filter(|p| !p.is_empty())
-                    .map(|p| format!("{p}: edited"))
+                    .map(|p| format!("{p}: {verb}"))
                     .collect::<Vec<_>>()
                     .join("\n");
-                let structured_json = Some(file_change_structured_json(changes));
+                let structured_json = (!is_error).then(|| file_change_structured_json(changes));
                 out.push(ProviderEvent::ToolResult {
                     tool_use_id: id,
                     output,
@@ -484,7 +497,9 @@ pub fn parse_unified_hunks(diff: &str) -> Vec<Value> {
             continue;
         }
         if let Some((_, _, ref mut lines)) = cur {
-            if line.starts_with([' ', '-', '+', '\\']) {
+            if line.is_empty() {
+                lines.push(" ".to_string());
+            } else if line.starts_with([' ', '-', '+', '\\']) {
                 lines.push(line.to_string());
             } else if line.starts_with("diff ") {
                 if let Some((os, ns, finished)) = cur.take() {
@@ -535,6 +550,68 @@ mod tests {
                 json!({"oldStart": 10, "newStart": 11, "lines": ["-gone", " stay"]}),
             ]
         );
+    }
+
+    #[test]
+    fn a_blank_line_inside_a_hunk_is_an_empty_context_line() {
+        let diff = "@@ -1,3 +1,3 @@\n a\n\n-b\n+B\n";
+        assert_eq!(
+            parse_unified_hunks(diff),
+            vec![json!({"oldStart": 1, "newStart": 1, "lines": [" a", " ", "-b", "+B"]})]
+        );
+    }
+
+    #[test]
+    fn text_flushed_early_is_not_repeated_on_completion() {
+        let mut t = Translator::new();
+        t.on_notification(
+            "item/started",
+            &json!({"item": {"type": "agentMessage", "id": "m1", "text": ""}}),
+        );
+        t.on_notification("item/agentMessage/delta", &json!({"delta": "Hello "}));
+        let started = t.on_notification(
+            "item/started",
+            &json!({"item": {"type": "reasoning", "id": "r1"}}),
+        );
+        assert_eq!(
+            started,
+            vec![ProviderEvent::AssistantText {
+                text: "Hello ".into()
+            }]
+        );
+        t.on_notification("item/agentMessage/delta", &json!({"delta": "world"}));
+        let done = t.on_notification(
+            "item/completed",
+            &json!({"item": {"type": "agentMessage", "id": "m1", "text": "Hello world"}}),
+        );
+        assert_eq!(
+            done,
+            vec![ProviderEvent::AssistantText {
+                text: "world".into()
+            }]
+        );
+    }
+
+    #[test]
+    fn a_declined_file_change_has_no_patch_and_says_so() {
+        let mut t = Translator::new();
+        let item = json!({"type": "fileChange", "id": "f1", "status": "declined",
+            "changes": [{"path": "/w/a.txt", "kind": {"type": "update"},
+                         "diff": "@@ -1 +1 @@\n-a\n+b\n"}]});
+        let evs = t.on_notification("item/completed", &json!({ "item": item }));
+        let result = evs
+            .iter()
+            .find_map(|e| match e {
+                ProviderEvent::ToolResult {
+                    output,
+                    is_error,
+                    structured_json,
+                    ..
+                } => Some((output.clone(), *is_error, structured_json.clone())),
+                _ => None,
+            })
+            .expect("a tool result");
+        assert_eq!(result, ("/w/a.txt: declined".to_string(), true, None));
     }
 
     #[test]

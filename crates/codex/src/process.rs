@@ -412,7 +412,10 @@ impl Agent {
     }
 
     async fn send_prompt(&mut self, text: String) {
-        if let Some(turn_id) = self.active_turn_id.clone() {
+        if self.interrupted && self.turn_in_flight() {
+            // Never steer into a turn being stopped; `turn/completed` starts it.
+            self.queued.push_back(text);
+        } else if let Some(turn_id) = self.active_turn_id.clone() {
             let Some(tid) = self.thread_id.clone() else {
                 return;
             };
@@ -432,6 +435,9 @@ impl Agent {
     }
 
     async fn start_turn(&mut self, text: String) {
+        if self.closing() {
+            return;
+        }
         let Some(tid) = self.thread_id.clone() else {
             return;
         };
@@ -500,6 +506,9 @@ impl Agent {
     }
 
     async fn on_approval(&mut self, id: Value, method: &str, params: &Value) {
+        if self.closing() {
+            return;
+        }
         let ours = self
             .thread_id
             .as_deref()
@@ -589,6 +598,9 @@ impl Agent {
                         is_error: !interrupted,
                         interrupted,
                     });
+                    if let Some(next) = self.queued.pop_front() {
+                        self.start_turn(next).await;
+                    }
                 }
             },
             Pending::Steer { text } => {

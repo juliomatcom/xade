@@ -346,6 +346,24 @@ async fn interrupt_mid_stream_sends_turn_interrupt_and_keeps_text() {
 }
 
 #[tokio::test]
+async fn a_prompt_right_after_stop_never_steers_the_dying_turn() {
+    let f = fake("interrupt");
+    let mut h = f.spawn("gpt-6-luna", Effort::Low, false, None);
+    prompt(&h, "write essay");
+    until(&mut h, |e| matches!(e, ProviderEvent::TextDelta(_))).await;
+    send(&h, SessionCommand::Interrupt);
+    prompt(&h, "next question");
+    let evs = until(&mut h, is_turn).await;
+    assert_eq!(turns(&evs), [(false, true)]);
+    shutdown(&mut h).await;
+    assert!(
+        !f.methods().iter().any(|m| m == "turn/steer"),
+        "{:?}",
+        f.methods()
+    );
+}
+
+#[tokio::test]
 async fn interrupt_with_pending_permission_sends_only_turn_interrupt() {
     let f = fake("interrupt_pending_permission");
     let mut h = f.spawn("gpt-6-luna", Effort::Low, false, None);

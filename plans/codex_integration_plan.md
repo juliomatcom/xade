@@ -158,3 +158,4 @@ Copy the antigravity crate layout and adapt; keep files small.
 - Auto ON keeps the workspace-write sandbox (no network, no writes outside cwd), unlike Claude's full bypass.
 - Multi-file `fileChange` items show as one `Edit` on the first path with all hunks.
 - User Codex hooks (`~/.codex/hooks.json`) run as configured; their frames are ignored.
+- Sub-agent threads (other `threadId`s) are not shown; their approvals are declined.

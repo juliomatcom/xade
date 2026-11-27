@@ -110,6 +110,17 @@ impl CodexProvider {
     /// Runs one short `codex app-server` process: `initialize`, `initialized`, `account/read`,
     /// `model/list`, then closes stdin.
     pub fn preflight(&self) -> Result<(), ProviderError> {
+        let result = self.run_preflight();
+        if result.is_err() {
+            self.catalog
+                .write()
+                .unwrap_or_else(|e| e.into_inner())
+                .account_label = None;
+        }
+        result
+    }
+
+    fn run_preflight(&self) -> Result<(), ProviderError> {
         let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
         let mut srv = ShortServer::spawn(binary, PREFLIGHT_TIMEOUT)?;
         let acct_res = srv.request("account/read", json!({}))?;
