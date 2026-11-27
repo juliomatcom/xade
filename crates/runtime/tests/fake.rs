@@ -1202,15 +1202,19 @@ fn imported(psid: &str, cwd: &std::path::Path, first_prompt: &str) -> ImportedSe
     }
 }
 
-async fn import_count(h: &mut Harness) -> u32 {
+/// Sums the `ImportDone` of every provider: each batch is applied as it arrives.
+async fn import_count(h: &mut Harness, providers: usize) -> u32 {
     h.tx.send(ManagerCmd::Import).unwrap();
-    let ev = h
-        .until(5, |e| matches!(e.kind, AppEventKind::ImportDone { .. }))
-        .await;
-    match ev.last().unwrap().kind {
-        AppEventKind::ImportDone { imported, .. } => imported,
-        _ => unreachable!(),
+    let mut total = 0;
+    for _ in 0..providers {
+        let ev = h
+            .until(5, |e| matches!(e.kind, AppEventKind::ImportDone { .. }))
+            .await;
+        if let AppEventKind::ImportDone { imported, .. } = ev.last().unwrap().kind {
+            total += imported;
+        }
     }
+    total
 }
 
 #[tokio::test]
@@ -1237,7 +1241,7 @@ async fn an_import_never_takes_the_snapshot_turns_own_conversation() {
         imported("real", &h.cwd, "fix the bug"),
         imported("mentions", &h.cwd, "see @/home/x/forks/a.md"),
     ];
-    assert_eq!(import_count(&mut h).await, 2, "only the real ones");
+    assert_eq!(import_count(&mut h, 2).await, 2, "only the real ones");
     let page = h.reader.list_sessions(None, None, 0, 24).await.unwrap();
     assert_eq!(page.total, 3, "the source and the two real ones");
 
