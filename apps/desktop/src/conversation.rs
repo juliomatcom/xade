@@ -15,6 +15,7 @@ use crate::widgets::markdown::markdown;
 use crate::widgets::path_links::PathLinks;
 use crate::widgets::scroll_nav;
 use crate::widgets::tool_card::{self, CardStatus};
+use crate::widgets::working;
 
 /// Draws the transcript; returns a file path the user clicked.
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
@@ -256,6 +257,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                 if let Some(e) = error {
                     error_block(ui, session_id, e);
                 }
+                working::show(ui, &working::clis([(provider, &*status)]));
             });
         // After a send: land on the end, which also re-arms `stick_to_bottom`.
         nav.jump_top(ui, content_top);
@@ -535,6 +537,9 @@ fn avatar_provider(m: &Message, session: ProviderId) -> ProviderId {
     m.provider_id.unwrap_or(session)
 }
 
+/// Side of the CLI mark beside a message.
+pub(crate) const AVATAR: f32 = 20.0;
+
 /// The assistant avatar beside `body`, which draws the text.
 fn assistant(
     ui: &mut egui::Ui,
@@ -542,7 +547,7 @@ fn assistant(
     body: impl FnOnce(&mut egui::Ui) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
     ui.horizontal_top(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(AVATAR), egui::Sense::hover());
         if let Some(tex) = cli_symbol(ui.ctx(), provider) {
             egui::Image::new(&tex)
                 .tint(symbol_tint(provider))

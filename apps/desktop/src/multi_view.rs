@@ -18,6 +18,7 @@ use crate::session_view::{self, ViewOut};
 use crate::widgets::markdown::markdown;
 use crate::widgets::path_links::PathLinks;
 use crate::widgets::scroll_nav;
+use crate::widgets::working;
 use crate::workspace::Env;
 use crate::{chrome, conversation, icons, theme};
 
@@ -672,6 +673,12 @@ fn team_feed(
             .get(sid)
             .is_some_and(|m| !m.live_text.is_empty() || m.thinking_tokens.is_some())
     });
+    let working_clis = working::clis(
+        vm.member_ids
+            .iter()
+            .filter_map(|id| members.get(id))
+            .map(|m| (m.session.provider_id, &m.status)),
+    );
     let mut open_file = None;
     let feed_id = ("team_feed", vm.multi.id);
     let nav_id = ui.make_persistent_id(feed_id);
@@ -762,6 +769,7 @@ fn team_feed(
                         });
                         ui.add_space(8.0);
                     }
+                    working::show(ui, &working_clis);
                 });
             nav.jump_top(ui, content_top);
             if std::mem::take(&mut vm.scroll_to_end) || nav.bottom {

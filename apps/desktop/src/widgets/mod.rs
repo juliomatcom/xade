@@ -16,6 +16,7 @@ pub mod selection_menu;
 pub mod session_picker;
 pub mod status_modal;
 pub mod tool_card;
+pub mod working;
 
 /// Space between a modal's edge and its content, so dialogs do not feel tight.
 pub const MODAL_MARGIN: i8 = 24;
