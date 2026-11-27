@@ -7,10 +7,10 @@
 - Really fast: never block a frame, never add startup or interaction latency; a feature that slows the app does not ship.
 
 ## Hard invariants
-- Never read, copy, log or transmit CLI credentials (Claude's, `agy`'s) or `claude auth status` output beyond `loggedIn` and `email`; `email` is for on-screen display only: never log (not at debug), persist, or put it in error reports, Copy text or issue bodies.
+- Never read, copy, log or transmit CLI credentials (Claude's, `agy`'s, `codex`'s) or auth output (`claude auth status`, `codex` `account/read`) beyond login state and display-only account label (`email` / `"API key"`): never log (not at debug), persist, or put it in error reports, Copy text or issue bodies.
 - Spawn the vendor binary unmodified; never patch, wrap or proxy it, never expose it over the network.
 - No token billing in this app.
-- Dependency rule: xade-core ← xade-claude, xade-antigravity, xade-store ← xade-runtime ← xade. Only xade names concrete providers.
+- Dependency rule: xade-core ← xade-claude, xade-antigravity, xade-codex, xade-store ← xade-runtime ← xade. Only xade names concrete providers.
 - Only the store writer thread writes SQLite; only the session actor creates message WriteOps.
 - Persist every user prompt, finalized assistant block and tool result when it completes; never persist deltas.
 - Unknown CLI frames or fields are skipped, never fatal.
