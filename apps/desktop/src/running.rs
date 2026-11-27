@@ -15,7 +15,8 @@ use crate::{icons, theme};
 
 /// How often `AgentProvider::running_sessions` is polled.
 pub const POLL: Duration = Duration::from_secs(3);
-/// Claude Code writes 1 h prompt-cache entries.
+/// Claude Code writes 1 h prompt-cache entries. Antigravity and Codex document no fixed TTL;
+/// their recorded turns still hit the cache after 40 and 27 idle minutes, so 1 h holds for all.
 const CACHE_TTL_SECS: i64 = 3600;
 /// Minimum width of the confirm modal's content.
 pub const MODAL_MIN_WIDTH: f32 = 520.0;

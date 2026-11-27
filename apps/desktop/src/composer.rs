@@ -94,14 +94,9 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
         vm.view_subagents = !vm.view_subagents;
     }
     if idle {
-        let last = vm
-            .sync
-            .transcript
-            .mtime
-            .map_or(vm.session.updated_at, time::OffsetDateTime::from);
         if let Some(text) = send_note(
             vm.session.usage.context_tokens_used,
-            last,
+            last_activity(vm),
             time::OffsetDateTime::now_utc(),
         ) {
             note_frame(ui, &text);
@@ -251,6 +246,18 @@ pub fn send_now(vm: &mut SessionVm, env_cmd: &Env, text: String, delivery: Optio
     });
 }
 
+/// When the prompt cache was last written: the latest of the Claude transcript's mtime (only
+/// Claude has one), the session's stored timestamp, and the newest message. Without the message
+/// time, providers lacking a transcript read as expired an hour after the session opened.
+fn last_activity(vm: &SessionVm) -> time::OffsetDateTime {
+    let mtime = vm.sync.transcript.mtime.map(time::OffsetDateTime::from);
+    let newest = vm.messages.iter().map(|m| m.created_at).max();
+    [mtime, newest]
+        .into_iter()
+        .flatten()
+        .fold(vm.session.updated_at, std::cmp::max)
+}
+
 /// One row per queued message, each cancellable.
 fn queued_rows(ui: &mut egui::Ui, vm: &mut SessionVm) {
     let mut cancel = None;
@@ -304,6 +311,17 @@ mod tests {
         set_attach_note(&mut v, "x".into());
         send_now(&mut v, &env, "hi".into(), None);
         assert!(v.attach_note.is_none());
+    }
+
+    #[test]
+    fn last_activity_follows_the_newest_message_without_a_transcript() {
+        let mut v = vm(String::new());
+        v.sync.transcript.mtime = None;
+        v.session.updated_at = time::OffsetDateTime::now_utc() - time::Duration::hours(3);
+        let m = crate::app::new_message(&v, xade_core::Role::Assistant, "ok".into(), None);
+        let at = m.created_at;
+        v.messages.push(m);
+        assert_eq!(last_activity(&v), at);
     }
 
     #[test]
