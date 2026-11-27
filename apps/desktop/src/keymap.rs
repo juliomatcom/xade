@@ -489,8 +489,9 @@ fn hits(s: &Stroke, mods: Modifiers, key: Key) -> bool {
 
 /// Consumes this frame's press of the local Send or SendOther key (the composer reads these
 /// itself); the stroke with more modifiers goes first because `consume_key` ignores extra
-/// Shift and Alt.
-pub fn take_send(input: &mut egui::InputState) -> Option<Action> {
+/// Shift and Alt. When `send_on_enter` is true, a plain unmodified Enter also sends (while
+/// Shift+Enter stays unconsumed so the multiline text box inserts a newline).
+pub fn take_send(input: &mut egui::InputState, send_on_enter: bool) -> Option<Action> {
     let km = current();
     let mut strokes: Vec<(Action, Stroke)> = [Action::Send, Action::SendOther]
         .into_iter()
@@ -498,10 +499,47 @@ pub fn take_send(input: &mut egui::InputState) -> Option<Action> {
         .collect();
     let weight = |m: Modifiers| [m.shift, m.alt, m.ctrl, m.command, m.mac_cmd].map(u8::from);
     strokes.sort_by_key(|(_, s)| std::cmp::Reverse(weight(s.mods).iter().sum::<u8>()));
-    strokes
+    if let Some(action) = strokes
         .into_iter()
         .find(|(_, s)| input.consume_key(s.mods, s.key))
         .map(|(a, _)| a)
+    {
+        return Some(action);
+    }
+    if send_on_enter {
+        let mut consumed = false;
+        input.events.retain(|e| {
+            if !consumed
+                && matches!(
+                    e,
+                    egui::Event::Key {
+                        key: Key::Enter,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if modifiers.matches_exact(Modifiers::NONE)
+                )
+            {
+                consumed = true;
+                false
+            } else {
+                true
+            }
+        });
+        if consumed {
+            return Some(Action::Send);
+        }
+    }
+    None
+}
+
+/// Hint label for the primary send key in composer placeholders.
+pub fn send_hint_key(send_on_enter: bool) -> String {
+    if send_on_enter {
+        "Enter".to_string()
+    } else {
+        shortcut_text(Action::Send)
+    }
 }
 
 /// What one key press did to the chord state.
@@ -903,5 +941,31 @@ mod tests {
                 .collect()
         });
         assert!(missing.is_empty(), "missing glyphs: {missing:?}");
+    }
+
+    #[test]
+    fn take_send_on_enter_sends_plain_enter_and_leaves_shift_enter_for_newline() {
+        let key_ev = |modifiers: Modifiers| egui::Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        let mut input = egui::InputState::default();
+        input.events.push(key_ev(Modifiers::NONE));
+        assert_eq!(take_send(&mut input, false), None);
+        assert_eq!(input.events.len(), 1, "plain Enter untouched when disabled");
+
+        assert_eq!(take_send(&mut input, true), Some(Action::Send));
+        assert!(input.events.is_empty(), "plain Enter consumed when enabled");
+
+        input.events.push(key_ev(Modifiers::SHIFT));
+        assert_eq!(take_send(&mut input, true), None);
+        assert_eq!(input.events.len(), 1, "Shift+Enter stays for newline");
+
+        input.events.clear();
+        input.events.push(key_ev(CMD_SHIFT));
+        assert_eq!(take_send(&mut input, true), Some(Action::SendOther));
     }
 }

@@ -56,16 +56,9 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
     let mut send: Option<bool> = None;
     let input_id = ui.scope_id().with("composer_input");
     let focused = ui.memory(|m| m.has_focus(input_id));
-    let pressed = if focused {
-        ui.input_mut(keymap::take_send)
-    } else {
-        None
-    };
     if focused {
         crate::widgets::selection_menu::mark_text_box(ui.ctx());
     }
-    let hotkey_other = pressed == Some(Action::SendOther);
-    let hotkey = pressed == Some(Action::Send);
     // Pasting copied files or an image attaches them, like the attach button.
     if focused {
         if let Some(files) = ui.input_mut(|i| take_pasted_files(&mut i.events, clipboard_files)) {
@@ -73,7 +66,15 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
         }
         out.pasted_image = ui.input_mut(|i| take_pasted_image(&mut i.events));
     }
+    // Mention popup runs before `take_send` so plain Enter accepts a match when `send_on_enter` is on.
     let popup = mention_popup_start(ui, vm, input_id, focused, &mut out);
+    let pressed = if focused {
+        ui.input_mut(|i| keymap::take_send(i, env.send_on_enter))
+    } else {
+        None
+    };
+    let hotkey_other = pressed == Some(Action::SendOther);
+    let hotkey = pressed == Some(Action::Send);
     if let Some((text, at)) = &vm.attach_note {
         if at.elapsed() >= ATTACH_NOTE_TTL {
             vm.attach_note = None;
@@ -153,7 +154,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
                                         .layouter(&mut layouter)
                                         .hint_text(format!(
                                             "Message ({} to {})",
-                                            keymap::shortcut_text(Action::Send),
+                                            keymap::send_hint_key(env.send_on_enter),
                                             if running { "queue or steer" } else { "send" }
                                         )),
                                 );
@@ -294,6 +295,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: crate::config::SendMode::Queue,
+            send_on_enter: false,
             break_all: true,
             ide_context: None,
             focused: false,

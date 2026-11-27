@@ -992,7 +992,7 @@ fn unified_composer(
     }
 
     let pressed = if input_focused {
-        ui.input_mut(keymap::take_send)
+        ui.input_mut(|i| keymap::take_send(i, env.send_on_enter))
     } else {
         None
     };
@@ -1028,7 +1028,7 @@ fn unified_composer(
 
     let hint = format!(
         "Message all models or #handle: ({} to {})",
-        keymap::shortcut_text(Action::Send),
+        keymap::send_hint_key(env.send_on_enter),
         if target_busy {
             "queue or steer"
         } else {
