@@ -152,9 +152,6 @@ Copy the antigravity crate layout and adapt; keep files small.
 - Then #opus-1 runs a high-effort code review (Sonnet sub-agent) and fixes the findings.
 
 ## 8. Accepted rough edges for v1 (next iterations)
-- No Codex/OpenAI logo; no theme colour.
-- No quota bar (ChatGPT-plan rate limits via `account/rateLimits/read` could be added later).
-- No history import of terminal Codex sessions (`thread/list` makes it possible later).
 - Auto ON keeps the workspace-write sandbox (no network, no writes outside cwd), unlike Claude's full bypass.
 - Multi-file `fileChange` items show as one `Edit` on the first path with all hunks.
 - User Codex hooks (`~/.codex/hooks.json`) run as configured; their frames are ignored.
