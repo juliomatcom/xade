@@ -5089,6 +5089,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "xade-codex"
+version = "0.5.1"
+dependencies = [
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "xade-core",
+]
+
+[[package]]
 name = "xade-core"
 version = "0.5.1"
 dependencies = [
