@@ -28,6 +28,7 @@ pub const ABOUT: &str = "\u{2139}";
 pub const PROVIDERS: &str = ">_";
 pub const STATUS: &str = PROVIDERS;
 pub const GUIDE: &str = "\u{1F4D6}";
+pub const HELP: &str = "?";
 pub const OPEN_SESSION: &str = "\u{1F4C2}";
 pub const SHORTCUTS: &str = "\u{2328}";
 pub const SETTINGS: &str = "\u{2699}";
@@ -88,6 +89,7 @@ mod tests {
             BUG,
             TRASH,
             GUIDE,
+            HELP,
             FORK,
             MULTI,
             EXIT,

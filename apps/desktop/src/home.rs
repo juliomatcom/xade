@@ -642,7 +642,7 @@ fn refresh_button(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// The top-left menu: adding a folder, About, Status and the setup guide.
+/// The top-left menu: adding a folder, About, Status, the setup guide and Help.
 fn app_menu(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button(icons::MENU, |ui| {
         if ui
@@ -662,6 +662,9 @@ fn app_menu(app: &mut App, ui: &mut egui::Ui) {
             .clicked()
         {
             app.open_guide();
+        }
+        if ui.button(icons::with(icons::HELP, "Help")).clicked() {
+            app.help_open = true;
         }
         ui.separator();
         if ui.button(icons::with(icons::EXIT, "Exit")).clicked() {

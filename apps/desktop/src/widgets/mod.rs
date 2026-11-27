@@ -5,6 +5,7 @@ pub mod changes_summary;
 pub mod delete_modal;
 pub mod diff_modal;
 pub mod file_picker;
+pub mod help_modal;
 pub mod keymaps_modal;
 pub mod markdown;
 pub mod multi_modal;

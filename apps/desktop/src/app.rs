@@ -325,7 +325,7 @@ pub struct App {
     /// A non-fatal notice for the status bar, with when it appeared.
     warning: Option<(String, Instant)>,
     /// Where the log files live; `None` in headless tests.
-    log_dir: Option<PathBuf>,
+    pub(crate) log_dir: Option<PathBuf>,
     pub providers: Vec<Arc<dyn AgentProvider>>,
     pub writer: WriterHandle,
     pub reader: StoreReader,
@@ -344,6 +344,7 @@ pub struct App {
     pub keymaps_open: bool,
     pub about_open: bool,
     pub status_open: bool,
+    pub help_open: bool,
     /// The Cmd+F bar, when open.
     pub find: Option<crate::find::FindState>,
     /// The session picker, when open.
@@ -476,6 +477,7 @@ impl App {
             keymaps_open: false,
             about_open: false,
             status_open: false,
+            help_open: false,
             find: None,
             picker: None,
             picker_generation: 0,
@@ -575,6 +577,7 @@ impl App {
             keymaps_open: false,
             about_open: false,
             status_open: false,
+            help_open: false,
             find: None,
             picker: None,
             picker_generation: 0,
@@ -3194,6 +3197,7 @@ impl App {
         self.saving_overlay(&ctx);
         about_modal::show(self, &ctx);
         crate::widgets::status_modal::show(self, &ctx);
+        crate::widgets::help_modal::show(self, &ctx);
         crate::find::show(self, &ctx);
         self.editor_modal(&ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {
