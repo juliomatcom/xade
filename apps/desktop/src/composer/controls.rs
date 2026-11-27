@@ -54,10 +54,11 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
             .width(110.0)
             .show_ui(ui, |ui| {
                 for m in &models {
-                    let picked = ui
-                        .selectable_label(vm.session.model_id == m.id, &m.label)
-                        .on_hover_text(&m.description)
-                        .clicked();
+                    let mut resp = ui.selectable_label(vm.session.model_id == m.id, &m.label);
+                    if let Some(tip) = model_tooltip(m) {
+                        resp = resp.on_hover_text(tip);
+                    }
+                    let picked = resp.clicked();
                     if picked && vm.session.model_id != m.id {
                         vm.session.model_id = m.id.clone();
                         vm.settings_pending = true;
@@ -147,6 +148,13 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
     .inner
 }
 
+/// Hover text for a model picker row; `None` when the provider gives no description, so egui
+/// does not paint an empty tooltip box.
+fn model_tooltip(m: &ModelOption) -> Option<&str> {
+    let tip = m.description.trim();
+    (!tip.is_empty()).then_some(tip)
+}
+
 /// `Default` plus the levels of the model with this exact id; `fallback` when the id is unknown.
 pub(crate) fn effort_choices(
     models: &[ModelOption],
@@ -208,5 +216,18 @@ mod tests {
         let supported = effort_choices(&models, "m-1", &all);
         assert_eq!(reconcile_effort(Effort::High, &supported), Effort::High);
         assert_eq!(reconcile_effort(Effort::Max, &supported), Effort::Default);
+    }
+
+    #[test]
+    fn model_tooltip_omits_blank_descriptions() {
+        let model = |description: &str| ModelOption {
+            id: "m".into(),
+            label: "M".into(),
+            description: description.into(),
+            effort_levels: vec![],
+        };
+        assert_eq!(model_tooltip(&model("")), None);
+        assert_eq!(model_tooltip(&model("   ")), None);
+        assert_eq!(model_tooltip(&model("Fast model")), Some("Fast model"));
     }
 }
