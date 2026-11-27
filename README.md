@@ -73,7 +73,7 @@ Linux needs a Vulkan-capable GPU driver and, for file dialogs, xdg-desktop-porta
 
 ## Build and run
 
-Building needs Rust (stable).
+Building needs Rust. [rustup](https://rustup.rs) picks up the version pinned in `rust-toolchain.toml`.
 
 ```sh
 cargo run --release -p xade

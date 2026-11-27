@@ -18,11 +18,12 @@
 - Code changes are reviewed only in the diff modal, never inline.
 
 ## Code
-- Rust stable, edition 2021. `cargo fmt`; `cargo clippy --workspace -- -D warnings` clean.
+- Rust pinned in `rust-toolchain.toml`, edition 2021. `cargo fmt`; `cargo clippy --workspace -- -D warnings` clean.
 - Packages are `xade-*` for crates and `xade` for the app (a crate named `core` shadows Rust's `core`); directories stay `crates/<name>` and `apps/desktop`.
 - No `unwrap`/`expect` outside tests and startup wiring; errors via `thiserror` in libs.
 - No trait without two implementations (FakeProvider counts for AgentProvider).
-- Pin exact versions (`=x.y.z`) when adding a crate; never upgrade/swap one without asking. egui-family crates move together.
+- Pin every version exactly (crates `=x.y.z`, npm packages, toolchains, CI actions and runners, tools): no ranges, `latest`, `stable` or floating tags.
+- Version updates are periodic and manual; never upgrade/swap a package without asking (CI builds with `--locked`). egui-family crates move together.
 - `tracing` for logs; never log prompt or message text above `debug`.
 - Never swallow an error: log it, or report it to the user (`App::report`); the UI never panics out of a frame.
 - UI colors only from `theme.rs` tokens.
