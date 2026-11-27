@@ -601,6 +601,10 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                                     actions.push(TreeAction::Toggle(root.clone()));
                                 }
                                 resp.context_menu(|ui| {
+                                    if ui.button("View in explorer").clicked() {
+                                        actions.push(TreeAction::Reveal(root.clone()));
+                                        ui.close();
+                                    }
                                     if ui.button("Close workspace").clicked() {
                                         close = Some(*id);
                                         ui.close();

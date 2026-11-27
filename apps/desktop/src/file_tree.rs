@@ -41,11 +41,13 @@ enum Node {
     Failed(String),
 }
 
-/// What a click on a row asks the app to do.
+/// What a click on a row, or its right-click menu, asks the app to do.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TreeAction {
     Toggle(PathBuf),
     Open(PathBuf),
+    /// Show this folder in the system file manager.
+    Reveal(PathBuf),
 }
 
 /// A folder is expanded exactly when it has a node.
@@ -131,6 +133,15 @@ pub fn click_action(e: &Entry) -> TreeAction {
     }
 }
 
+/// "View in explorer": a folder shows itself; a file or symlink (never followed) its parent.
+pub fn reveal_action(e: &Entry) -> TreeAction {
+    let dir = match e.kind {
+        Kind::Dir => &e.path,
+        Kind::File | Kind::Symlink => e.path.parent().unwrap_or(&e.path),
+    };
+    TreeAction::Reveal(dir.to_path_buf())
+}
+
 /// Draws the children of the expanded folder `dir` at `depth`, walking only expanded folders.
 /// `dir` is the workspace root: the right-click menu copies paths relative to it.
 pub fn show(
@@ -161,9 +172,7 @@ fn show_in(
             for e in &l.entries {
                 let open = e.kind == Kind::Dir && tree.is_expanded(&e.path);
                 let dirty = changed.is_some_and(|c| c.contains(&e.path));
-                if row(ui, root, depth, e, open, dirty) {
-                    out.push(click_action(e));
-                }
+                out.extend(row(ui, root, depth, e, open, dirty));
                 if open {
                     show_in(ui, tree, root, &e.path, depth + 1, changed, out);
                 }
@@ -197,9 +206,16 @@ fn note(ui: &mut egui::Ui, depth: usize, text: &str) {
     }
 }
 
-/// One entry row; `true` when clicked. Rows scrolled out of view are allocated, not painted.
-/// `dirty`: the entry (or a file inside it) has uncommitted changes.
-fn row(ui: &mut egui::Ui, root: &Path, depth: usize, e: &Entry, open: bool, dirty: bool) -> bool {
+/// One entry row and what the user asked of it. Rows scrolled out of view are allocated, not
+/// painted. `dirty`: the entry (or a file inside it) has uncommitted changes.
+fn row(
+    ui: &mut egui::Ui,
+    root: &Path,
+    depth: usize,
+    e: &Entry,
+    open: bool,
+    dirty: bool,
+) -> Option<TreeAction> {
     let (rect, resp) = row_rect(ui, Sense::click());
     if ui.is_rect_visible(rect) {
         if resp.hovered() {
@@ -232,7 +248,12 @@ fn row(ui: &mut egui::Ui, root: &Path, depth: usize, e: &Entry, open: bool, dirt
     let resp = resp
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .on_hover_text(&e.name);
+    let mut action = None;
     resp.context_menu(|ui| {
+        if ui.button("View in explorer").clicked() {
+            action = Some(reveal_action(e));
+            ui.close();
+        }
         let (relative, full) = path_texts(root, &e.path);
         if ui.button("Copy relative path").clicked() {
             ui.ctx().copy_text(relative);
@@ -243,7 +264,10 @@ fn row(ui: &mut egui::Ui, root: &Path, depth: usize, e: &Entry, open: bool, dirt
             ui.close();
         }
     });
-    resp.clicked()
+    if resp.clicked() {
+        action = Some(click_action(e));
+    }
+    action
 }
 
 /// `(relative to root, full)` text of an entry's path.
@@ -370,6 +394,14 @@ mod tests {
             click_action(&entry("f.rs", Kind::File)),
             TreeAction::Open(PathBuf::from("/r/f.rs"))
         );
+    }
+
+    #[test]
+    fn view_in_explorer_shows_a_folder_itself_and_a_file_or_link_by_its_parent() {
+        let reveal = |kind| reveal_action(&entry("x", kind));
+        assert_eq!(reveal(Kind::Dir), TreeAction::Reveal("/r/x".into()));
+        assert_eq!(reveal(Kind::File), TreeAction::Reveal("/r".into()));
+        assert_eq!(reveal(Kind::Symlink), TreeAction::Reveal("/r".into()));
     }
 
     /// A real pointer click on the first row of an expanded tree yields its action.

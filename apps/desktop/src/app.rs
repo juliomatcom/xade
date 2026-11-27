@@ -806,6 +806,7 @@ impl App {
         match action {
             TreeAction::Toggle(path) => self.toggle_dir(&path),
             TreeAction::Open(path) => self.open_path(path),
+            TreeAction::Reveal(dir) => logging::open_dir(&dir),
         }
     }
 
