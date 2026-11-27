@@ -325,6 +325,19 @@ fn session_controls(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
+/// A provider's CLI symbol sized for a text row, tinted like everywhere else.
+fn provider_icon(ctx: &egui::Context, id: ProviderId) -> Option<egui::Image<'static>> {
+    let tex = crate::conversation::cli_symbol(ctx, id)?;
+    let size = egui::vec2(PROVIDER_ICON_SIZE, PROVIDER_ICON_SIZE);
+    Some(
+        egui::Image::new((tex.id(), size))
+            .tint(crate::conversation::symbol_tint(id))
+            .fit_to_exact_size(size),
+    )
+}
+
+const PROVIDER_ICON_SIZE: f32 = 14.0;
+
 /// Picks the provider of new sessions; hidden unless two or more providers are available.
 fn provider_dropdown(app: &mut App, ui: &mut egui::Ui) {
     let ids = app.selectable_providers();
@@ -332,14 +345,19 @@ fn provider_dropdown(app: &mut App, ui: &mut egui::Ui) {
         return;
     };
     let mut picked = None;
+    if let Some(icon) = provider_icon(ui.ctx(), current) {
+        ui.add(icon);
+    }
     egui::ComboBox::from_id_salt("provider")
         .selected_text(app.provider_name(current))
         .show_ui(ui, |ui| {
             for id in ids {
-                if ui
-                    .selectable_label(id == current, app.provider_name(id))
-                    .clicked()
-                {
+                let name = app.provider_name(id);
+                let row = match provider_icon(ui.ctx(), id) {
+                    Some(icon) => egui::Button::selectable(id == current, (icon, name)),
+                    None => egui::Button::selectable(id == current, name),
+                };
+                if ui.add(row).clicked() {
                     picked = Some(id);
                 }
             }
