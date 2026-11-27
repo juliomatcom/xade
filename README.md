@@ -2,6 +2,8 @@
 
 # Xade
 
+[![CI](https://github.com/juliomatcom/xade/actions/workflows/ci.yml/badge.svg)](https://github.com/juliomatcom/xade/actions/workflows/ci.yml)
+
 **Your coding agents, side by side or on one team.** Run them in separate windows, or let them plan, build and review together, in a native Rust app with no Electron. **100% free and open source (MIT), no subscription required.**
 
 Works with Claude Code, Codex and Antigravity. OpenCode and local models are coming soon.
