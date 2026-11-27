@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::{RwLock, RwLockReadGuard};
+use std::sync::{OnceLock, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -19,7 +19,9 @@ const MODELS_TIMEOUT: Duration = Duration::from_secs(15);
 const FALLBACK_DEFAULT: &str = "sonnet";
 
 pub struct ClaudeProvider {
-    binary: Option<PathBuf>,
+    binary: OnceLock<PathBuf>,
+    /// Finds a binary that was missing at startup; `None` for a fixed one.
+    lookup: Option<fn() -> Option<PathBuf>>,
     /// Static aliases until `preflight` replaces them with the CLI's versioned list.
     catalog: RwLock<Catalog>,
     /// Email from the last auth check; display only, never logged or persisted.
@@ -62,7 +64,10 @@ impl Default for ClaudeProvider {
 impl ClaudeProvider {
     /// Resolves the `claude` binary now: `$PATH`, then the usual install locations.
     pub fn new() -> Self {
-        Self::with_optional_binary(resolve_binary())
+        Self {
+            lookup: Some(resolve_binary),
+            ..Self::with_optional_binary(resolve_binary())
+        }
     }
 
     pub fn with_binary(path: PathBuf) -> Self {
@@ -71,7 +76,8 @@ impl ClaudeProvider {
 
     fn with_optional_binary(binary: Option<PathBuf>) -> Self {
         Self {
-            binary,
+            binary: binary.map(OnceLock::from).unwrap_or_default(),
+            lookup: None,
             catalog: RwLock::new(fallback_catalog()),
             account: RwLock::new(None),
         }
@@ -82,7 +88,19 @@ impl ClaudeProvider {
     }
 
     pub fn binary(&self) -> Option<&Path> {
-        self.binary.as_deref()
+        self.binary.get().map(PathBuf::as_path)
+    }
+
+    /// The binary, looked up again while it is missing, so a CLI installed after startup is
+    /// found by the next preflight.
+    fn find_binary(&self) -> Option<&Path> {
+        if self.binary.get().is_none() {
+            if let Some(found) = self.lookup.and_then(|lookup| lookup()) {
+                // A concurrent preflight may have set it first; either path is good.
+                let _ = self.binary.set(found);
+            }
+        }
+        self.binary()
     }
 }
 
@@ -167,7 +185,7 @@ impl AgentProvider for ClaudeProvider {
             *self.account.write().unwrap_or_else(|e| e.into_inner()) = v;
         };
         set_account(None);
-        let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
+        let binary = self.find_binary().ok_or(ProviderError::NotInstalled)?;
         // The output carries account details: read only `loggedIn` and `email`
         // (the latter for display), never log them.
         let out = Command::new(binary)
@@ -189,7 +207,7 @@ impl AgentProvider for ClaudeProvider {
     }
 
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
-        let binary = self.binary.as_ref().ok_or(ProviderError::NotInstalled)?;
+        let binary = self.binary().ok_or(ProviderError::NotInstalled)?;
         spawn_session(binary, cfg)
     }
 

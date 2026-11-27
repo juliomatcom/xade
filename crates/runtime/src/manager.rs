@@ -487,17 +487,18 @@ impl SessionManager {
         )));
     }
 
-    /// Parses histories off the manager task; `apply_import` runs when they arrive.
+    /// Parses each provider's history off the manager task, in parallel; `apply_import` runs for
+    /// each batch as it arrives, so a slow provider never holds back another's history.
     fn start_import(&self) {
-        let providers = self.providers.clone();
-        let tx = self.import_tx.clone();
-        let events = self.events.clone();
-        tokio::spawn(async move {
-            let mut batches = Vec::new();
-            for p in providers {
+        for p in self.providers.clone() {
+            let tx = self.import_tx.clone();
+            let events = self.events.clone();
+            tokio::spawn(async move {
                 let id = p.id();
                 match tokio::task::spawn_blocking(move || p.import_sessions()).await {
-                    Ok(sessions) => batches.push((id, sessions)),
+                    Ok(sessions) => {
+                        let _ = tx.send(vec![(id, sessions)]);
+                    }
                     Err(e) => {
                         tracing::error!(error = %e, "import task failed");
                         let kind = AppEventKind::Error(format!("Importing history failed: {e}"));
@@ -505,11 +506,12 @@ impl SessionManager {
                             session_id: None,
                             kind,
                         });
+                        // Still finish the run, so `ImportDone` always arrives.
+                        let _ = tx.send(Vec::new());
                     }
                 }
-            }
-            let _ = tx.send(batches);
-        });
+            });
+        }
     }
 
     /// Skips sessions Xade owns or runs, transcripts not newer than the stored row, and
@@ -1788,12 +1790,16 @@ fn imported_rows(
             sender_handle: None,
         })
         .collect();
+    let origin = match provider_id {
+        ProviderId::Codex => SessionOrigin::Codex,
+        ProviderId::Claude | ProviderId::Antigravity => SessionOrigin::ClaudeCode,
+    };
     let session = Session {
         id,
         workspace_id: WorkspaceId::new(),
         provider_id,
         provider_session_id: Some(imp.provider_session_id),
-        origin: SessionOrigin::ClaudeCode,
+        origin,
         title: imp.title,
         preview_snippet: String::new(),
         model_id: if imp.model_id.is_empty() {

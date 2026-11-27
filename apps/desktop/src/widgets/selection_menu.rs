@@ -88,6 +88,7 @@ fn in_window(app: &App, ctx: &egui::Context, pos: Pos2) -> bool {
                 app.multi_sessions.get(&id).is_none_or(|vm| vm.collapsed)
             }
             WindowKind::Editor(id) => app.editors.map.get(&id).is_none_or(|vm| vm.collapsed),
+            WindowKind::Guide => app.guide.as_ref().is_none_or(|vm| vm.collapsed),
         };
         !collapsed && layer.id == win_id(kind)
     })

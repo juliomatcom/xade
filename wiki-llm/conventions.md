@@ -7,10 +7,10 @@
 - Really fast: never block a frame, never add startup or interaction latency; a feature that slows the app does not ship.
 
 ## Hard invariants
-- Never read, copy, log or transmit CLI credentials (Claude's, `agy`'s) or `claude auth status` output beyond `loggedIn` and `email`; `email` is for on-screen display only: never log (not at debug), persist, or put it in error reports, Copy text or issue bodies.
+- Never read, copy, log or transmit CLI credentials (Claude's, `agy`'s, `codex`'s) or auth output (`claude auth status`, `codex` `account/read`) beyond login state and display-only account label (`email` / `"API key"`): never log (not at debug), persist, or put it in error reports, Copy text or issue bodies.
 - Spawn the vendor binary unmodified; never patch, wrap or proxy it, never expose it over the network.
 - No token billing in this app.
-- Dependency rule: xade-core ← xade-claude, xade-antigravity, xade-store ← xade-runtime ← xade. Only xade names concrete providers.
+- Dependency rule: xade-core ← xade-claude, xade-antigravity, xade-codex, xade-store ← xade-runtime ← xade. Only xade names concrete providers.
 - Only the store writer thread writes SQLite; only the session actor creates message WriteOps.
 - Persist every user prompt, finalized assistant block and tool result when it completes; never persist deltas.
 - Unknown CLI frames or fields are skipped, never fatal.
@@ -18,11 +18,12 @@
 - Code changes are reviewed only in the diff modal, never inline.
 
 ## Code
-- Rust stable, edition 2021. `cargo fmt`; `cargo clippy --workspace -- -D warnings` clean.
+- Rust pinned in `rust-toolchain.toml`, edition 2021. `cargo fmt`; `cargo clippy --workspace -- -D warnings` clean.
 - Packages are `xade-*` for crates and `xade` for the app (a crate named `core` shadows Rust's `core`); directories stay `crates/<name>` and `apps/desktop`.
 - No `unwrap`/`expect` outside tests and startup wiring; errors via `thiserror` in libs.
 - No trait without two implementations (FakeProvider counts for AgentProvider).
-- Pin exact versions (`=x.y.z`) when adding a crate; never upgrade/swap one without asking. egui-family crates move together.
+- Pin every version exactly (crates `=x.y.z`, npm packages, toolchains, CI actions and runners, tools): no ranges, `latest`, `stable` or floating tags.
+- Version updates are periodic and manual; never upgrade/swap a package without asking (CI builds with `--locked`). egui-family crates move together.
 - `tracing` for logs; never log prompt or message text above `debug`.
 - Never swallow an error: log it, or report it to the user (`App::report`); the UI never panics out of a frame.
 - UI colors only from `theme.rs` tokens.

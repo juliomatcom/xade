@@ -18,8 +18,9 @@ use crate::session_view::{self, ViewOut};
 use crate::widgets::markdown::markdown;
 use crate::widgets::path_links::PathLinks;
 use crate::widgets::scroll_nav;
+use crate::widgets::working;
 use crate::workspace::Env;
-use crate::{chrome, conversation, icons, theme};
+use crate::{chrome, composer, conversation, icons, theme};
 
 /// Matches standalone `composer.rs` input sizing and button geometry.
 const INPUT_MIN_ROWS: usize = 2;
@@ -129,7 +130,7 @@ pub fn show(
         })
     });
     let agg_status = vm.aggregate_status(members);
-    header(ui, vm, env, &agg_status, maximized, &mut out);
+    header(ui, vm, members, env, &agg_status, maximized, &mut out);
     if vm.collapsed {
         return out;
     }
@@ -242,9 +243,25 @@ fn approval_jump_strip(
         });
 }
 
+fn header_cli_providers(
+    member_ids: &[SessionId],
+    members: &HashMap<SessionId, SessionVm>,
+) -> Vec<ProviderId> {
+    let mut out = Vec::new();
+    for sid in member_ids {
+        if let Some(m) = members.get(sid) {
+            if !out.contains(&m.session.provider_id) {
+                out.push(m.session.provider_id);
+            }
+        }
+    }
+    out
+}
+
 fn header(
     ui: &mut egui::Ui,
     vm: &mut MultiSessionVm,
+    members: &HashMap<SessionId, SessionVm>,
     env: &Env,
     agg_status: &SessionStatus,
     maximized: bool,
@@ -260,6 +277,7 @@ fn header(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
+    let cli_providers = header_cli_providers(&vm.member_ids, members);
     let badge = |ui: &mut egui::Ui| chrome::header_badge(ui, "Multi");
     let mut renamed = None;
     chrome::header(
@@ -277,6 +295,15 @@ fn header(
             if !cwd.is_empty() {
                 ui.label(RichText::new(cwd).small().color(theme::text_muted()))
                     .on_hover_text(vm.cwd.display().to_string());
+            }
+            for pid in &cli_providers {
+                if let Some(tex) = conversation::cli_symbol(ui.ctx(), *pid) {
+                    ui.add(
+                        egui::Image::new(&tex)
+                            .tint(conversation::symbol_tint(*pid))
+                            .fit_to_exact_size(egui::vec2(14.0, 14.0)),
+                    );
+                }
             }
             renamed = multi_title_label(ui, vm, &title);
         },
@@ -398,11 +425,12 @@ fn tab_bar(ui: &mut egui::Ui, vm: &mut MultiSessionVm, members: &HashMap<Session
                     };
                     if tab_item(ui, ("multi_tab_member", vm.multi.id, sid), selected, |ui| {
                         session_view::status_dot(ui, &m.status);
-                        if let Some(tex) =
-                            conversation::company_symbol(ui.ctx(), m.session.provider_id)
+                        if let Some(tex) = conversation::cli_symbol(ui.ctx(), m.session.provider_id)
                         {
                             ui.add(
-                                egui::Image::new(&tex).fit_to_exact_size(egui::vec2(12.0, 12.0)),
+                                egui::Image::new(&tex)
+                                    .tint(conversation::symbol_tint(m.session.provider_id))
+                                    .fit_to_exact_size(egui::vec2(12.0, 12.0)),
                             );
                         }
                         ui.label(label);
@@ -645,6 +673,12 @@ fn team_feed(
             .get(sid)
             .is_some_and(|m| !m.live_text.is_empty() || m.thinking_tokens.is_some())
     });
+    let working_clis = working::clis(
+        vm.member_ids
+            .iter()
+            .filter_map(|id| members.get(id))
+            .map(|m| (m.session.provider_id, &m.status)),
+    );
     let mut open_file = None;
     let feed_id = ("team_feed", vm.multi.id);
     let nav_id = ui.make_persistent_id(feed_id);
@@ -697,7 +731,9 @@ fn team_feed(
                                 egui::Sense::hover(),
                             );
                             if let Some(tex) = conversation::cli_symbol(ui.ctx(), provider) {
-                                egui::Image::new(&tex).paint_at(ui, rect);
+                                egui::Image::new(&tex)
+                                    .tint(conversation::symbol_tint(provider))
+                                    .paint_at(ui, rect);
                             }
                             ui.vertical(|ui| {
                                 ui.horizontal(|ui| {
@@ -733,6 +769,7 @@ fn team_feed(
                         });
                         ui.add_space(8.0);
                     }
+                    working::show(ui, &working_clis);
                 });
             nav.jump_top(ui, content_top);
             if std::mem::take(&mut vm.scroll_to_end) || nav.bottom {
@@ -784,7 +821,9 @@ fn combined_entry_row(
                 let (rect, _) =
                     ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
                 if let Some(tex) = conversation::cli_symbol(ui.ctx(), *provider) {
-                    egui::Image::new(&tex).paint_at(ui, rect);
+                    egui::Image::new(&tex)
+                        .tint(conversation::symbol_tint(*provider))
+                        .paint_at(ui, rect);
                 }
                 ui.vertical(|ui| {
                     ui.label(
@@ -818,6 +857,7 @@ fn combined_entry_row(
                             {
                                 ui.add(
                                     egui::Image::new(&tex)
+                                        .tint(conversation::symbol_tint(*sender_provider))
                                         .fit_to_exact_size(egui::vec2(14.0, 14.0)),
                                 );
                             }
@@ -960,7 +1000,7 @@ fn unified_composer(
     }
 
     let pressed = if input_focused {
-        ui.input_mut(keymap::take_send)
+        ui.input_mut(|i| keymap::take_send(i, env.send_on_enter))
     } else {
         None
     };
@@ -996,7 +1036,7 @@ fn unified_composer(
 
     let hint = format!(
         "Message all models or #handle: ({} to {})",
-        keymap::shortcut_text(Action::Send),
+        keymap::send_hint_key(env.send_on_enter),
         if target_busy {
             "queue or steer"
         } else {
@@ -1103,8 +1143,7 @@ fn unified_composer(
     // composer controls).
     let box_width = input_box.response.rect.width();
     ui.add_space(4.0);
-    ui.scope(|ui| {
-        ui.set_max_width(box_width);
+    composer::controls_row(ui, box_width, |ui| {
         ui.horizontal_wrapped(|ui| {
             ui.label(RichText::new("To:").small().color(theme::text_muted()));
             let is_all = parsed_target.is_none();

@@ -1164,6 +1164,78 @@ fn prune_removes_throwaway_imports_and_empty_workspaces_only() {
 }
 
 #[test]
+fn codex_origin_round_trips_filters_and_prunes_throwaway() {
+    let f = Fixture::new();
+    let real_dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+
+    let mut codex_real = session(WorkspaceId::new(), "codex real", f.base);
+    codex_real.provider_id = ProviderId::Codex;
+    codex_real.provider_session_id = Some("cx-real".into());
+    codex_real.origin = SessionOrigin::Codex;
+    let codex_real_id = codex_real.id;
+    f.writer
+        .send(WriteOp::ImportSession {
+            session: codex_real,
+            messages: vec![message(codex_real_id, 1, Role::User, "hi codex")],
+            workspace_root: real_dir.path().to_path_buf(),
+        })
+        .unwrap();
+
+    let mut codex_tmp = session(
+        WorkspaceId::new(),
+        "codex tmp",
+        f.base - Duration::seconds(1),
+    );
+    codex_tmp.provider_id = ProviderId::Codex;
+    codex_tmp.provider_session_id = Some("cx-tmp".into());
+    codex_tmp.origin = SessionOrigin::Codex;
+    let codex_tmp_id = codex_tmp.id;
+    f.writer
+        .send(WriteOp::ImportSession {
+            session: codex_tmp,
+            messages: vec![message(codex_tmp_id, 1, Role::User, "junk codex")],
+            workspace_root: "/tmp/codex-throwaway".into(),
+        })
+        .unwrap();
+
+    let (_, cc_op) = import_op(&f, "cc-1", "claude imported", &["hi claude"], 2);
+    f.writer.send(cc_op).unwrap();
+    f.writer.flush().unwrap();
+
+    let (loaded, _) = block_on(f.reader.load_session(codex_real_id)).unwrap();
+    assert_eq!(loaded.origin, SessionOrigin::Codex);
+    assert_eq!(loaded.provider_id, ProviderId::Codex);
+
+    let codex_cards = block_on(
+        f.reader
+            .list_sessions(None, Some(SessionOrigin::Codex), 0, 24),
+    )
+    .unwrap();
+    assert_eq!(codex_cards.total, 2);
+    assert!(codex_cards
+        .items
+        .iter()
+        .all(|c| c.origin == SessionOrigin::Codex));
+
+    let cc_cards = block_on(
+        f.reader
+            .list_sessions(None, Some(SessionOrigin::ClaudeCode), 0, 24),
+    )
+    .unwrap();
+    assert_eq!(cc_cards.total, 1);
+    assert_eq!(cc_cards.items[0].origin, SessionOrigin::ClaudeCode);
+
+    // PruneThrowaway removes both throwaway ClaudeCode and throwaway Codex imports, keeping real.
+    let (tx, rx) = std::sync::mpsc::channel();
+    f.writer.send(WriteOp::PruneThrowaway(tx)).unwrap();
+    f.writer.flush().unwrap();
+    let counts = rx.recv().unwrap();
+    assert_eq!(counts.sessions, 2);
+    assert!(block_on(f.reader.load_session(codex_tmp_id)).is_err());
+    assert!(block_on(f.reader.load_session(codex_real_id)).is_ok());
+}
+
+#[test]
 fn a_dead_writer_thread_is_reported_once() {
     let f = Fixture::new();
     assert!(f.writer.take_failure().is_none(), "healthy writer");

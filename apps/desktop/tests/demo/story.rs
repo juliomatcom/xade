@@ -1,6 +1,6 @@
-//! What happens on screen. A solo session fixes a slow search while a three-model team adds rate
-//! limiting to the same shop: the lead plans and hands off, two teammates code in parallel, and
-//! their broadcasts bring the work back together. All names and code are made up.
+//! What happens on screen. A solo session fixes a slow search while a team of three CLIs adds rate
+//! limiting to the same shop: the lead plans and hands off, all three work at once, and a
+//! broadcast brings the work back together. All names and code are made up.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,12 +15,17 @@ use xade_core::{
     UsageTotals,
 };
 
-use crate::provider::{DemoProvider, Stage, FABLE, NEON, OPUS, SONNET};
+use crate::provider::{DemoProvider, Stage, FABLE, NEON, OPUS, SOL, SONNET};
 use crate::stage::{Camera, FPS, SCALE, SIZE};
+
+/// Frames a zoom takes, each way.
+const ZOOM: u32 = 27;
+/// Frames Codex's test run takes.
+const TESTS: u32 = 120;
 
 const SOLO_PROMPT: &str = "Product search takes 2s on big catalogs. Find out why and fix it.";
 const TEAM_PROMPT: &str =
-    "#opus-1: Add rate limiting to checkout. Plan it, then hand the UI and tests to the team.";
+    "#opus-1: Add rate limiting to checkout. Plan it, then hand the rest to the team.";
 
 const CHECKOUT_RS: &str = r#"pub async fn checkout(cart: Cart) -> Result<Order, CheckoutError> {
     let order = Order::from(cart);
@@ -91,6 +96,33 @@ fn the_window_slides() {
 }
 "#;
 
+const WIRED_RS: &str = r#"pub async fn checkout(cart: Cart, limits: &Limits) -> Result<Order, CheckoutError> {
+    limits
+        .check(cart.customer_id)
+        .map_err(|retry_after| CheckoutError::RateLimited { retry_after })?;
+    let order = Order::from(cart);
+    payments::charge(&order).await?;
+    Ok(order)
+}
+"#;
+
+const WIRED_DIFF: &str = "@@ -1,5 +1,8 @@\n\
+    -pub async fn checkout(cart: Cart) -> Result<Order, CheckoutError> {\n\
+    +pub async fn checkout(cart: Cart, limits: &Limits) -> Result<Order, CheckoutError> {\n\
+    +    limits\n\
+    +        .check(cart.customer_id)\n\
+    +        .map_err(|retry_after| CheckoutError::RateLimited { retry_after })?;\n     \
+    let order = Order::from(cart);\n     \
+    payments::charge(&order).await?;\n     \
+    Ok(order)\n }\n";
+
+const RUNBOOK_MD: &str = r#"# Checkout rate limit
+
+5 requests a minute per customer. Over the limit, checkout answers `429`
+with `Retry-After`. A spike of `429`s usually means a client is retrying
+without waiting.
+"#;
+
 const MIGRATION_SQL: &str = r#"CREATE EXTENSION IF NOT EXISTS pg_trgm;
 
 CREATE INDEX CONCURRENTLY products_name_trgm
@@ -127,7 +159,7 @@ pub fn record(out: &Path) {
     let shop = shop(&root);
 
     let stage = Arc::new(Stage::default());
-    let claude = history(&root, &shop);
+    let (claude, codex) = history(&root, &shop);
     let providers: Vec<Arc<dyn AgentProvider>> = vec![
         Arc::new(DemoProvider {
             id: ProviderId::Claude,
@@ -138,6 +170,11 @@ pub fn record(out: &Path) {
             id: ProviderId::Antigravity,
             stage: stage.clone(),
             history: Vec::new(),
+        }),
+        Arc::new(DemoProvider {
+            id: ProviderId::Codex,
+            stage: stage.clone(),
+            history: codex,
         }),
     ];
     let (_rt, launch) = xade::backend_with(&root.join("data"), providers).expect("backend");
@@ -212,8 +249,8 @@ fn team_and_solo(cam: &mut Camera, out: &Path) {
         .rows = vec![member(ProviderId::Claude, OPUS, Effort::High)];
     cam.run(18);
     for (provider, model, effort) in [
-        (ProviderId::Claude, SONNET, Effort::Medium),
         (ProviderId::Antigravity, NEON, Effort::High),
+        (ProviderId::Codex, SOL, Effort::High),
     ] {
         let state = cam.ui.state_mut().multi_create.as_mut().unwrap();
         state.rows.push(member(provider, model, effort));
@@ -235,78 +272,126 @@ fn team_and_solo(cam: &mut Camera, out: &Path) {
     cam.await_prompt(OPUS, 1);
     lead_plans(cam);
 
-    // The hand-off reaches both teammates at once.
-    cam.await_prompt(SONNET, 1);
+    // The hand-off reaches both teammates at once, while the lead keeps going.
     cam.await_prompt(NEON, 1);
+    cam.await_prompt(SOL, 1);
     let start = cam.now();
+    let neon_end = button(cam, start);
+    let lead_end = runbook(cam, start);
+    let tests_end = wiring(cam, start);
 
-    let neon_intro = "On it. I'll read `Retry-After` and keep the button off until it expires.";
-    let t = cam.think(start, NEON, 24, 210);
-    let t = cam.stream(t, NEON, neon_intro, 2);
-    let t = cam.say(t, NEON, neon_intro, None);
-    let t = cam.edit(t + 6, NEON, "web/CheckoutButton.tsx", BUTTON_TSX, 70);
-    let neon_done = "The button now counts down, **Try again in 42s**, then turns itself back on.\n\n\
-        ```tsx\n<button disabled={wait > 0}>\n  {wait > 0 ? `Try again in ${wait}s` : \"Pay now\"}\n</button>\n```";
-    let t = cam.think(t + 4, NEON, 20, 380);
-    let t = cam.stream(t, NEON, neon_done, 2);
-    let t = cam.say(t, NEON, neon_done, None);
-    let neon_end = cam.done(t + 2, NEON, 31_000);
-
-    let tests_intro = "I'll cover the limit, the wait time and the sliding window.";
-    let t = cam.think(start + 8, SONNET, 36, 260);
-    let t = cam.stream(t, SONNET, tests_intro, 2);
-    let t = cam.say(t, SONNET, tests_intro, None);
-    let read = serde_json::json!({ "file_path": "src/middleware/rate_limit.rs" }).to_string();
-    let t = cam.tool(t + 4, SONNET, "Read", read, RATE_LIMIT_RS, 16);
-    let t = cam.edit(t + 4, SONNET, "tests/rate_limit.rs", TESTS_RS, 45);
-    let test = serde_json::json!({ "command": "cargo test rate_limit" }).to_string();
-    let sonnet_tests = cam.tool(
-        t + 4,
-        SONNET,
-        "Bash",
-        test,
-        "running 4 tests\n....\ntest result: ok. 4 passed; 0 failed",
-        120,
-    );
-    let green = "Tests are green, **4 passed**. Request six gets `429` with `Retry-After: 60`.";
-    let t = cam.think(sonnet_tests, SONNET, 15, 520);
-    let t = cam.say(
-        t,
-        SONNET,
-        "I added two tests in `tests/rate_limit.rs`.",
-        Some(green),
-    );
-    let sonnet_end = cam.done(t + 2, SONNET, 28_000);
-
-    // Watch both teammates at once, then look over one's shoulder while it codes.
+    // All three at work: move in close on their replies and their hopping icons.
+    cam.run_until(start + 30);
+    let left = cam.ui.get_by_label("Team").rect().left();
+    let composer = cam.ui.get_by_label_contains("Stop All").rect();
+    let close = cam.close_up(left - 12.0, composer.bottom() + 54.0);
+    cam.zoom(close, ZOOM);
     cam.run_until(start + 105);
     cam.still(&out.join("team.png"));
-    cam.run_until(neon_end.max(sonnet_tests - 125));
-    cam.tab("#sonnet-1");
-    cam.run_until(sonnet_tests - 55);
+    cam.run_until(start + 30 + ZOOM + 4 * FPS + FPS / 2);
+    cam.zoom_out(ZOOM);
+
+    // Then look over Codex's shoulder while its tests run.
+    cam.run_until(tests_end - TESTS - 5);
+    cam.tab("#gpt-sol-1");
+    cam.run_until(tests_end - 45);
     cam.still(&out.join("member.png"));
-    cam.run_until(sonnet_tests - 10);
+    cam.run_until(tests_end - 20);
     cam.tab("Team");
 
-    // The green light goes back to the lead, who wraps up.
+    // The green light goes back to the team, and the lead wraps up.
     cam.await_prompt(OPUS, 2);
     cam.await_prompt(NEON, 2);
     let t = cam.now();
     cam.done(t + 8, NEON, 32_000);
     let summary = "Checkout is rate limited end to end:\n\n\
         | Piece | Owner |\n|---|---|\n\
-        | Sliding-window limiter, `429` | #opus-1 |\n\
+        | Sliding-window limiter and runbook | #opus-1 |\n\
         | Countdown on the pay button | #neon-1 |\n\
-        | 4 passing tests | #sonnet-1 |\n\n\
+        | Checkout wiring, 4 passing tests | #gpt-sol-1 |\n\n\
         Review the diff whenever you're ready.";
     let t = cam.think(t, OPUS, 28, 640);
     let t = cam.stream(t, OPUS, summary, 4);
     let t = cam.say(t, OPUS, summary, None);
     let end = cam.done(t + 2, OPUS, 44_000);
-    cam.run_until(end.max(sonnet_end) + 15);
+    cam.run_until(end.max(neon_end).max(lead_end) + 15);
     cam.still(&out.join("team-done.png"));
     cam.run(4 * FPS);
     cam.cut();
+}
+
+/// #neon-1 puts the countdown on the pay button.
+fn button(cam: &mut Camera, start: u32) -> u32 {
+    let intro = "On it. I'll read `Retry-After` and keep the button off until it expires.";
+    let t = cam.think(start, NEON, 18, 210);
+    let t = cam.stream(t, NEON, intro, 2);
+    let t = cam.say(t, NEON, intro, None);
+    let t = cam.edit(t + 4, NEON, "web/CheckoutButton.tsx", BUTTON_TSX, 30);
+    let done = "The button now counts down, **Try again in 42s**, then turns itself back on.\n\n\
+        ```tsx\n<button disabled={wait > 0}>\n  {wait > 0 ? `Try again in ${wait}s` : \"Pay now\"}\n</button>\n```";
+    let t = cam.think(t, NEON, 36, 380);
+    let t = cam.stream(t, NEON, done, 2);
+    let t = cam.say(t, NEON, done, None);
+    cam.done(t + 2, NEON, 31_000)
+}
+
+/// #opus-1 documents the limit while the others build.
+fn runbook(cam: &mut Camera, start: u32) -> u32 {
+    let intro = "While they build, I'll write a runbook note so on-call knows what a `429` means.";
+    let t = cam.think(start + 2, OPUS, 44, 420);
+    let t = cam.stream(t, OPUS, intro, 1);
+    let t = cam.say(t, OPUS, intro, None);
+    let t = cam.edit(t + 2, OPUS, "docs/rate-limit.md", RUNBOOK_MD, 30);
+    let added = "Runbook added. I'll wait for their results.";
+    let t = cam.think(t, OPUS, 22, 560);
+    let t = cam.stream(t, OPUS, added, 1);
+    let t = cam.say(t, OPUS, added, None);
+    cam.done(t + 2, OPUS, 41_000)
+}
+
+/// #gpt-sol-1 wires the limiter into checkout, tests it and tells the team. Returns the frame the
+/// test run ends on.
+fn wiring(cam: &mut Camera, start: u32) -> u32 {
+    let intro = "I'll wire the limiter into checkout, then prove it with tests.";
+    let t = cam.think(start + 6, SOL, 40, 290);
+    let t = cam.stream(t, SOL, intro, 1);
+    let t = cam.say(t, SOL, intro, None);
+    let t = cam.codex_run(t + 2, SOL, "cat src/routes/checkout.rs", CHECKOUT_RS, 14);
+    let plan = "`checkout` has one entry point, so the check goes first, before any charge.";
+    let t = cam.think(t, SOL, 24, 480);
+    let t = cam.stream(t, SOL, plan, 1);
+    let t = cam.say(t, SOL, plan, None);
+    let t = cam.codex_patch(
+        t + 4,
+        SOL,
+        "src/routes/checkout.rs",
+        "update",
+        WIRED_DIFF,
+        WIRED_RS,
+        34,
+    );
+    let t = cam.codex_patch(
+        t + 4,
+        SOL,
+        "tests/rate_limit.rs",
+        "add",
+        TESTS_RS,
+        TESTS_RS,
+        34,
+    );
+    let tests_end = cam.codex_run(
+        t + 4,
+        SOL,
+        "cargo test rate_limit",
+        "running 4 tests\n....\ntest result: ok. 4 passed; 0 failed",
+        TESTS,
+    );
+    let green = "Tests are green, **4 passed**. Request six gets `429` with `Retry-After: 60`.";
+    let report = "Checkout calls the limiter, and the tests are in `tests/rate_limit.rs`.";
+    let t = cam.think(tests_end, SOL, 15, 720);
+    let t = cam.say(t, SOL, report, Some(green));
+    cam.done(t + 2, SOL, 28_000);
+    tests_end
 }
 
 fn lead_plans(cam: &mut Camera) {
@@ -324,16 +409,15 @@ fn lead_plans(cam: &mut Camera) {
         26,
     );
     let plan =
-        "The limiter is in: **5 requests a minute** per customer. Handing off the UI and tests.";
+        "The limiter is in: **5 requests a minute** per customer. Handing off the UI and the wiring.";
     let t = cam.think(t, OPUS, 12, 910);
     let t = cam.stream(t, OPUS, plan, 3);
     let contract =
         "**Contract:** over the limit, `POST /checkout` answers `429` with `Retry-After`.\n\n\
         ```rust\nErr(CheckoutError::RateLimited { retry_after })\n```\n\
         - #neon-1: show a countdown on the pay button\n\
-        - #sonnet-1: test the limit and the wait time";
-    let t = cam.say(t, OPUS, plan, Some(contract));
-    cam.done(t + 2, OPUS, 38_000);
+        - #gpt-sol-1: wire it into checkout and test it";
+    cam.say(t, OPUS, plan, Some(contract));
 }
 
 /// The solo session's work, paced to run alongside the whole team story.
@@ -372,7 +456,7 @@ fn solo_turn(cam: &mut Camera, start: u32) {
         "Bash",
         again,
         "p95 before: 1874 ms\np95 after:    11 ms",
-        110,
+        260,
     );
     let fixed = "Search is down from **1.9s to 11ms** at p95:\n\n\
         - A GIN trigram index on `products.name`, built `CONCURRENTLY` so writes keep flowing.\n\
@@ -446,7 +530,7 @@ fn shop(root: &Path) -> PathBuf {
 }
 
 /// Older sessions for the Home grid.
-fn history(root: &Path, shop: &Path) -> Vec<ImportedSession> {
+fn history(root: &Path, shop: &Path) -> (Vec<ImportedSession>, Vec<ImportedSession>) {
     let web = root.join("web-app");
     let payments = root.join("payments-api");
     std::fs::create_dir_all(&web).unwrap();
@@ -482,5 +566,9 @@ fn history(root: &Path, shop: &Path) -> Vec<ImportedSession> {
         session(6, &web, "Audit accessibility of the nav", SONNET, 28, "Contrast passes. The menu button had no accessible name and focus was lost when the drawer closed. Both are fixed."),
         session(7, &payments, "Write release notes for v2.3", FABLE, 8, "Grouped the changes into Added, Changed and Fixed, with the user-facing items first, and linked each entry to its pull request."),
     ];
-    claude
+    let codex = vec![
+        session(8, &payments, "Add idempotency keys to refunds", SOL, 2, "Refunds now take an `Idempotency-Key`. A repeated request returns the first result, so a retry can no longer refund twice."),
+        session(9, shop, "Speed up the product image resize", SOL, 6, "Resizing moved off the request path into a worker, and the three sizes share one decode. Uploads answer in 80ms."),
+    ];
+    (claude, codex)
 }

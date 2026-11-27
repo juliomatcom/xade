@@ -1,5 +1,5 @@
 //! The camera: steps the app one video frame at a time, plays the scheduled model events and
-//! pipes each rendered frame to ffmpeg.
+//! pipes each rendered frame, through the zoom lens, to ffmpeg.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -8,23 +8,41 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use egui::{Event, Key, Modifiers};
+use egui::{pos2, vec2, Event, Key, Modifiers, Rect};
 use egui_kittest::kittest::Queryable;
 use egui_kittest::Harness;
 use xade::App;
+use xade_codex::Translator;
 use xade_core::{ProviderEvent, UsageTotals};
 
+use crate::lens;
 use crate::provider::Stage;
 
 pub const FPS: u32 = 30;
-/// Logical window size; frames are rendered at `SCALE` times this.
-pub const SIZE: [f32; 2] = [1480.0, 810.0];
-pub const SCALE: f32 = 2.0;
+/// Logical window size, wide enough for the top bar to show all three quotas. Frames are
+/// rendered at `SCALE` times this, which leaves the lens real pixels to zoom into.
+pub const SIZE: [f32; 2] = [1560.0, 854.0];
+pub const SCALE: f32 = 3.0;
+/// The video's size in pixels.
+pub const VIDEO: [usize; 2] = [1920, 1050];
 
 enum Cue {
     Model(&'static str, ProviderEvent),
     /// Writes a file into the workspace, so the turn's diff and git status are real.
     File(&'static str, &'static str),
+}
+
+/// A zoom in progress, from one view of the window to another.
+struct Zoom {
+    from: Rect,
+    to: Rect,
+    start: u32,
+    frames: u32,
+}
+
+/// The whole window, in logical points.
+fn full_view() -> Rect {
+    Rect::from_min_size(pos2(0.0, 0.0), vec2(SIZE[0], SIZE[1]))
 }
 
 pub struct Camera {
@@ -35,6 +53,9 @@ pub struct Camera {
     frame: u32,
     encoder: Option<Child>,
     tools: u32,
+    codex: Translator,
+    view: Rect,
+    zoom: Option<Zoom>,
 }
 
 impl Camera {
@@ -47,12 +68,56 @@ impl Camera {
             frame: 0,
             encoder: None,
             tools: 0,
+            codex: Translator::new(),
+            view: full_view(),
+            zoom: None,
+        }
+    }
+
+    /// Moves the lens over the next `frames` to `to` (logical points), eased at both ends.
+    pub fn zoom(&mut self, to: Rect, frames: u32) {
+        self.zoom = Some(Zoom {
+            from: self.view,
+            to,
+            start: self.frame,
+            frames,
+        });
+    }
+
+    pub fn zoom_out(&mut self, frames: u32) {
+        self.zoom(full_view(), frames);
+    }
+
+    /// The video-shaped view around a window's chat: its width plus a margin, ending just under
+    /// the composer's `bottom`.
+    pub fn close_up(&self, left: f32, bottom: f32) -> Rect {
+        let width = SIZE[0] - left + 24.0;
+        let height = width * VIDEO[1] as f32 / VIDEO[0] as f32;
+        let bottom = bottom.min(SIZE[1]);
+        Rect::from_min_max(
+            pos2(SIZE[0] - width, bottom - height),
+            pos2(SIZE[0], bottom),
+        )
+    }
+
+    fn aim(&mut self) {
+        let Some(z) = &self.zoom else {
+            return;
+        };
+        let t = ((self.frame - z.start + 1) as f32 / z.frames as f32).min(1.0);
+        let eased = t * t * t * (t * (t * 6.0 - 15.0) + 10.0);
+        self.view = Rect::from_min_max(
+            z.from.min + (z.to.min - z.from.min) * eased,
+            z.from.max + (z.to.max - z.from.max) * eased,
+        );
+        if t >= 1.0 {
+            self.zoom = None;
         }
     }
 
     /// Starts piping every later frame into a near-lossless master video.
     pub fn roll(&mut self, master: &Path) {
-        let [w, h] = SIZE.map(|v| (v * SCALE) as u32);
+        let [w, h] = VIDEO;
         let child = Command::new("ffmpeg")
             .args(["-y", "-loglevel", "error", "-f", "rawvideo"])
             .args(["-pix_fmt", "rgba", "-s", &format!("{w}x{h}")])
@@ -93,9 +158,15 @@ impl Camera {
             // Gives the session actors time to carry the events to the UI's channel.
             std::thread::sleep(Duration::from_millis(12));
             self.ui.step();
+            self.aim();
             if let Some(child) = &mut self.encoder {
                 let image = self.ui.render().expect("render a frame");
-                child.stdin.as_mut().unwrap().write_all(&image).unwrap();
+                let window = Rect::from_min_max(
+                    (self.view.min.to_vec2() * SCALE).to_pos2(),
+                    (self.view.max.to_vec2() * SCALE).to_pos2(),
+                );
+                let frame = lens::resample(&image, image.width() as usize, window, VIDEO);
+                child.stdin.as_mut().unwrap().write_all(&frame).unwrap();
             }
             self.frame += 1;
         }
@@ -245,6 +316,72 @@ impl Camera {
             ),
         );
         at + 1
+    }
+
+    // Codex cues: app-server items, turned into events by the app's own translator.
+
+    /// A Codex item that runs for `frames`: its `item/started` and `item/completed` shapes.
+    fn codex_item(
+        &mut self,
+        at: u32,
+        model: &'static str,
+        mut item: serde_json::Value,
+        done: serde_json::Value,
+        frames: u32,
+    ) -> u32 {
+        self.tools += 1;
+        item["id"] = format!("item-{}", self.tools).into();
+        let mut completed = item.clone();
+        for (key, value) in done.as_object().expect("an object") {
+            completed[key] = value.clone();
+        }
+        for (when, method, item) in [
+            (at, "item/started", item),
+            (at + frames, "item/completed", completed),
+        ] {
+            let params = serde_json::json!({ "item": item });
+            for event in self.codex.on_notification(method, &params) {
+                self.cue(when, Cue::Model(model, event));
+            }
+        }
+        at + frames + 2
+    }
+
+    pub fn codex_run(
+        &mut self,
+        at: u32,
+        model: &'static str,
+        command: &str,
+        output: &str,
+        frames: u32,
+    ) -> u32 {
+        let item = serde_json::json!({ "type": "commandExecution", "command": command });
+        let done = serde_json::json!({
+            "status": "completed", "exitCode": 0, "aggregatedOutput": output,
+        });
+        self.codex_item(at, model, item, done, frames)
+    }
+
+    /// A patch that really changes the file: `diff` is a unified diff for an `update`, and the
+    /// whole text for an `add`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn codex_patch(
+        &mut self,
+        at: u32,
+        model: &'static str,
+        file: &'static str,
+        kind: &str,
+        diff: &str,
+        text: &'static str,
+        frames: u32,
+    ) -> u32 {
+        self.cue(at + frames - 1, Cue::File(file, text));
+        let item = serde_json::json!({
+            "type": "fileChange",
+            "changes": [{ "path": file, "kind": { "type": kind }, "diff": diff }],
+        });
+        let done = serde_json::json!({ "status": "completed" });
+        self.codex_item(at, model, item, done, frames)
     }
 
     // A person at the keyboard.

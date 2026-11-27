@@ -517,10 +517,30 @@ async fn a_child_that_dies_reports_its_stderr_then_exits() {
     let evs = until(&mut h, is_exit).await;
     let errs = errors(&evs);
     assert_eq!(errs.len(), 1);
-    assert!(errs[0].contains("boom"), "{errs:?}");
+    assert_eq!(errs[0], "agy exited unexpectedly (exit code 3): boom");
     assert!(matches!(
         evs.last(),
         Some(ProviderEvent::Exited { code: Some(3) })
+    ));
+}
+
+#[tokio::test]
+async fn a_child_killed_by_signal_reports_the_signal_without_stderr() {
+    let f = fake("fake/signal_crash");
+    let mut h = f.spawn("", Effort::Default, false, None);
+    let evs = until(&mut h, is_exit).await;
+    let errs = errors(&evs);
+    assert_eq!(errs.len(), 1);
+    assert_eq!(
+        errs[0],
+        format!(
+            "agy exited unexpectedly (SIGKILL, signal {})",
+            libc::SIGKILL
+        )
+    );
+    assert!(matches!(
+        evs.last(),
+        Some(ProviderEvent::Exited { code: None })
     ));
 }
 

@@ -9,6 +9,7 @@ Xade reads `settings.json` from its data folder (`<data dir>/xade/`, or `XADE_DA
 | `font_family` | `"JetBrains Mono"` | The bundled font, an installed family name, or `null` for egui's default font. |
 | `font_size` | `13.5` | Text size, clamped to 9-28. |
 | `send_while_running` | `"queue"` | What Cmd+Enter does while a turn runs: `"queue"` sends it when the turn ends, `"steer"` sends it at once. Cmd+Shift+Enter does the other one. |
+| `send_on_enter` | `true` | When `true`, pressing Enter sends the prompt and Shift+Enter inserts a newline; set to `false` to require the `send` shortcut (Cmd+Enter). |
 | `show_fps` | `false` | Show the frame rate at the right of the status bar. |
 | `show_whitespace` | `true` | Mark every space (dot) and tab (dash) in file windows. Colored by `theme.whitespace`. |
 | `input_break_all` | `true` | The session text box breaks long words anywhere (like CSS `word-break: break-all`), saving space; `false` wraps only at word boundaries. |

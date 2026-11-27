@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 type Slide = { label: string; src: string; alt: string; video?: boolean };
 
 const slides: Slide[] = [
-  { label: "Multi-Session", src: "/app.webp", video: true, alt: "Xade demo: a Multi-Session of three models, #opus-1, #sonnet-1 and #neon-1, plans, codes and tests a feature in one window while a solo session fixes a slow query beside it" },
+  { label: "Multi-Session", src: "/app.webp", video: true, alt: "Xade demo: a Multi-Session of #opus-1 on Claude Code, #neon-1 on Antigravity and #gpt-sol-1 on Codex plans, codes and tests a feature in one window while a solo session fixes a slow query beside it" },
   { label: "Home", src: "/app-home.webp", alt: "Xade Home view: a grid of searchable sessions, including a Multi-Session card with its member handles, with status and prompt-cache timers" },
 ];
 

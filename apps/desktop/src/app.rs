@@ -25,6 +25,7 @@ use crate::diff::{is_code_change, DiffData};
 use crate::editor::{self, CloseChoice, EditorId, Editors, SaveOutcome};
 use crate::errors::{self, ErrorQueue, ErrorReport, ModalAction};
 use crate::file_tree::{self, FileTree, Listing, TreeAction};
+use crate::guide::GuideVm;
 use crate::home::HomeState;
 use crate::keymap::{self, Action, Chord};
 use crate::multi_view::{MultiSessionVm, MultiTab};
@@ -305,6 +306,10 @@ pub struct App {
     pub focused: Option<WindowKind>,
     pub editors: Editors,
     pub tree: FileTree,
+    /// The "Get started" window while it is open.
+    pub guide: Option<GuideVm>,
+    /// The startup checks have reported and the guide was opened if none passed.
+    guide_offered: bool,
     /// Last quota window per provider and kind, in draw order (session before weekly).
     pub quota: Vec<(ProviderId, QuotaWindow)>,
     /// Quota providers report on request (`AgentProvider::quota`), by provider.
@@ -320,7 +325,7 @@ pub struct App {
     /// A non-fatal notice for the status bar, with when it appeared.
     warning: Option<(String, Instant)>,
     /// Where the log files live; `None` in headless tests.
-    log_dir: Option<PathBuf>,
+    pub(crate) log_dir: Option<PathBuf>,
     pub providers: Vec<Arc<dyn AgentProvider>>,
     pub writer: WriterHandle,
     pub reader: StoreReader,
@@ -339,6 +344,7 @@ pub struct App {
     pub keymaps_open: bool,
     pub about_open: bool,
     pub status_open: bool,
+    pub help_open: bool,
     /// The Cmd+F bar, when open.
     pub find: Option<crate::find::FindState>,
     /// The session picker, when open.
@@ -440,6 +446,8 @@ impl App {
             focused: None,
             editors: Editors::default(),
             tree: FileTree::default(),
+            guide: None,
+            guide_offered: false,
             quota: Vec::new(),
             provider_quota: HashMap::new(),
             quota_checked: HashMap::new(),
@@ -469,6 +477,7 @@ impl App {
             keymaps_open: false,
             about_open: false,
             status_open: false,
+            help_open: false,
             find: None,
             picker: None,
             picker_generation: 0,
@@ -514,6 +523,7 @@ impl App {
         } else {
             app.restore_windows(crate::windows_state::path(&config_path));
         }
+        app.offer_guide();
         if app.any_available() {
             app.start_import();
         }
@@ -540,6 +550,8 @@ impl App {
             focused: None,
             editors: Editors::default(),
             tree: FileTree::default(),
+            guide: None,
+            guide_offered: false,
             quota: Vec::new(),
             provider_quota: HashMap::new(),
             quota_checked: HashMap::new(),
@@ -565,6 +577,7 @@ impl App {
             keymaps_open: false,
             about_open: false,
             status_open: false,
+            help_open: false,
             find: None,
             picker: None,
             picker_generation: 0,
@@ -793,6 +806,7 @@ impl App {
         match action {
             TreeAction::Toggle(path) => self.toggle_dir(&path),
             TreeAction::Open(path) => self.open_path(path),
+            TreeAction::Reveal(dir) => logging::open_dir(&dir),
         }
     }
 
@@ -872,7 +886,7 @@ impl App {
         });
     }
 
-    /// Imports Claude Code history; one run at a time, finished by `ImportDone`.
+    /// Imports every provider's history; one run at a time, finished by the first `ImportDone`.
     pub fn start_import(&mut self) {
         if self.home.importing {
             return;
@@ -1172,6 +1186,41 @@ impl App {
         }
     }
 
+    /// Once per run, when every startup check has reported: opens the guide if none passed.
+    fn offer_guide(&mut self) {
+        if self.guide_offered || !self.home.pending.is_empty() {
+            return;
+        }
+        self.guide_offered = true;
+        if !self.any_available() {
+            self.open_guide();
+        }
+    }
+
+    pub fn open_guide(&mut self) {
+        self.guide.get_or_insert_with(GuideVm::default);
+        self.focus(WindowKind::Guide);
+    }
+
+    pub fn close_guide(&mut self) {
+        self.guide = None;
+        self.drop_window(WindowKind::Guide);
+    }
+
+    /// Re-runs every failed preflight, showing those providers as checking until they report.
+    pub fn recheck_providers(&mut self) {
+        let failed: Vec<_> = self
+            .providers
+            .iter()
+            .map(|p| p.id())
+            .filter(|id| !self.available(*id) && !self.home.pending.contains(id))
+            .collect();
+        for id in failed {
+            self.home.pending.insert(id);
+            self.retry_preflight(id);
+        }
+    }
+
     /// Re-runs only `id`'s preflight, off the UI thread.
     pub fn retry_preflight(&self, id: ProviderId) {
         let (provider, bridge) = (self.provider(id).cloned(), self.bridge.clone());
@@ -1302,6 +1351,24 @@ impl App {
                 return;
             };
             add_workspace(&writer, &reader, &bridge, folder.path().to_path_buf()).await;
+        });
+    }
+
+    /// The guide's last step: pick a folder, then `open_folder` it.
+    pub fn open_chosen_folder(&self) {
+        let (writer, reader, bridge) = (
+            self.writer.clone(),
+            self.reader.clone(),
+            self.bridge.clone(),
+        );
+        self.rt.spawn(async move {
+            let Some(folder) = rfd::AsyncFileDialog::new().pick_folder().await else {
+                return;
+            };
+            let root = folder.path().to_path_buf();
+            if let Some(id) = add_workspace(&writer, &reader, &bridge, root).await {
+                bridge.send(UiMsg::OpenWorkspace(id));
+            }
         });
     }
 
@@ -1439,11 +1506,20 @@ impl App {
             WindowKind::Session(id) => self.sessions.contains_key(&id),
             WindowKind::MultiSession(id) => self.multi_sessions.contains_key(&id),
             WindowKind::Editor(id) => self.editors.map.contains_key(&id),
+            WindowKind::Guide => self.guide.is_some(),
         }
     }
 
     fn add_window(&mut self, kind: WindowKind) {
         if !self.open_windows.contains(&kind) {
+            // The guide has done its job once a chat opens.
+            let chat = matches!(kind, WindowKind::Session(_) | WindowKind::MultiSession(_));
+            if chat && self.guide.take().is_some() {
+                self.open_windows.retain(|k| *k != WindowKind::Guide);
+                if self.focused == Some(WindowKind::Guide) {
+                    self.focused = Some(kind);
+                }
+            }
             self.open_windows.push(kind);
             self.maximized = None;
             self.tiling.retile();
@@ -1489,6 +1565,7 @@ impl App {
                 WindowKind::Session(id) => Some(Saved::Session(*id)),
                 WindowKind::MultiSession(id) => Some(Saved::MultiSession(*id)),
                 WindowKind::Editor(id) => self.editors.map.get(id)?.path.clone().map(Saved::File),
+                WindowKind::Guide => None,
             })
             .collect();
         if now == self.windows_saved {
@@ -1918,7 +1995,7 @@ impl App {
                         return Some(parent.map_or_else(|| self.target_dir(), PathBuf::from));
                     }
                 }
-                None => {}
+                Some(WindowKind::Guide) | None => {}
             }
         }
         let ws = &self.home.workspaces;
@@ -2025,6 +2102,8 @@ impl App {
                     self.close_multi_session(mid);
                 } else if let (true, Some(id)) = (in_workspace, focused_editor) {
                     self.request_close_editor(id);
+                } else if in_workspace && self.focused == Some(WindowKind::Guide) {
+                    self.close_guide();
                 }
             }
             Action::FocusWindow(n) => {
@@ -2215,6 +2294,7 @@ impl App {
                         self.restore_windows(file);
                     }
                 }
+                self.offer_guide();
             }
             UiMsg::ProviderQuota(id, result) => {
                 self.quota_inflight.remove(&id);
@@ -3045,7 +3125,7 @@ impl App {
                     WindowKind::MultiSession(mid) => {
                         Some((k, self.multi_sessions.get(&mid)?.window_rect?))
                     }
-                    WindowKind::Editor(_) => None,
+                    WindowKind::Editor(_) | WindowKind::Guide => None,
                 })
                 .collect();
             let chat_windows: Vec<WindowKind> = self
@@ -3118,6 +3198,7 @@ impl App {
         self.saving_overlay(&ctx);
         about_modal::show(self, &ctx);
         crate::widgets::status_modal::show(self, &ctx);
+        crate::widgets::help_modal::show(self, &ctx);
         crate::find::show(self, &ctx);
         self.editor_modal(&ctx);
         if self.keymaps_open && keymaps_modal::show(&ctx) {
@@ -3154,6 +3235,10 @@ impl StubProvider {
 
     pub(crate) fn antigravity() -> Self {
         Self::new(ProviderId::Antigravity, "Antigravity", &["gemini-4-neon"])
+    }
+
+    pub(crate) fn codex() -> Self {
+        Self::new(ProviderId::Codex, "Codex", &["gpt-6-luna"])
     }
 
     fn new(id: ProviderId, name: &'static str, models: &[&str]) -> Self {
@@ -4255,6 +4340,74 @@ mod tests {
         assert!(app.deferred_restore.is_none());
         assert_eq!(app.windows_file, Some(file));
         assert!(matches!(cmds.try_recv(), Ok(ManagerCmd::Import)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_guide_opens_once_when_no_provider_passes_and_goes_when_a_chat_opens() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        let missing = || Err(ProviderError::NotInstalled);
+        fail(&mut app, claude, ProviderError::NotInstalled);
+        app.home.pending.insert(agy);
+        app.offer_guide();
+        assert!(app.guide.is_none(), "waits for every check");
+        app.on_msg(UiMsg::Preflight(agy, missing()));
+        assert_eq!(app.open_windows, vec![WindowKind::Guide]);
+        assert!(app.view == View::Workspace);
+
+        app.close_guide();
+        assert!(app.view == View::Home && app.open_windows.is_empty());
+        app.recheck_providers();
+        assert_eq!(app.home.pending.len(), 2, "both show as checking");
+        app.on_msg(UiMsg::Preflight(claude, missing()));
+        app.on_msg(UiMsg::Preflight(agy, missing()));
+        assert!(app.guide.is_none(), "a closed guide stays closed");
+
+        app.open_guide();
+        let id = SessionId::new();
+        app.focus(WindowKind::Session(id));
+        assert!(app.guide.is_none());
+        assert_eq!(app.open_windows, vec![WindowKind::Session(id)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn three_providers_filter_and_select_codex_independently() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        app.providers.push(Arc::new(StubProvider::codex()));
+        let (claude, agy, codex) = (
+            ProviderId::Claude,
+            ProviderId::Antigravity,
+            ProviderId::Codex,
+        );
+        assert_eq!(app.visible_providers(), vec![claude, agy, codex]);
+        assert_eq!(app.selectable_providers(), vec![claude, agy, codex]);
+
+        // Missing Antigravity still leaves Claude + Codex selectable.
+        fail(&mut app, agy, ProviderError::NotInstalled);
+        assert_eq!(app.visible_providers(), vec![claude, codex]);
+        assert_eq!(app.selectable_providers(), vec![claude, codex]);
+
+        // Picking Codex creates a Codex session with its own default model.
+        let ws = WorkspaceId::new();
+        app.home.workspaces = vec![Workspace {
+            id: ws,
+            root_path: dir.clone(),
+            display_name: "w".into(),
+            last_opened_at: OffsetDateTime::now_utc(),
+            is_open: true,
+        }];
+        app.home.scope = Some(ws);
+        app.writer
+            .send(WriteOp::UpsertWorkspace(app.home.workspaces[0].clone()))
+            .unwrap();
+        app.home.provider_pick = Some(codex);
+        let (p, model, _, _) = created(&rt, &mut app);
+        assert_eq!(p, codex);
+        assert_eq!(model, "gpt-6-luna");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

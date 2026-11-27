@@ -28,6 +28,7 @@ fn history(provider: ProviderId) -> &'static str {
     match provider {
         ProviderId::Claude => "Claude Code transcript",
         ProviderId::Antigravity => "Antigravity history",
+        ProviderId::Codex => "Codex history",
     }
 }
 
@@ -165,5 +166,6 @@ mod tests {
     fn the_history_named_follows_the_provider() {
         assert_eq!(history(ProviderId::Claude), "Claude Code transcript");
         assert_eq!(history(ProviderId::Antigravity), "Antigravity history");
+        assert_eq!(history(ProviderId::Codex), "Codex history");
     }
 }

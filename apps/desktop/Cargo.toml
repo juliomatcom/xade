@@ -1,6 +1,6 @@
 [package]
 name = "xade"
-version = "0.5.1"
+version = "0.6.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 xade-antigravity = { path = "../../crates/antigravity" }
 xade-claude = { path = "../../crates/claude" }
+xade-codex = { path = "../../crates/codex" }
 xade-core = { path = "../../crates/core" }
 xade-runtime = { path = "../../crates/runtime" }
 xade-store = { path = "../../crates/store" }

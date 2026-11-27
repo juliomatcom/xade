@@ -13,6 +13,7 @@ use xade_runtime::ManagerCmd;
 use crate::app::{App, SessionVm};
 use crate::config::SendMode;
 use crate::editor::{self, EditorId, EditorVm};
+use crate::guide::{self, GuideVm};
 use crate::multi_view::{self, MultiSessionVm};
 use crate::session_view;
 use crate::theme;
@@ -26,19 +27,20 @@ const MIN_TILE: [f32; 2] = [380.0, 300.0];
 /// How far a window may drift from its tile before auto-tiling turns off.
 const MOVE_TOLERANCE: f32 = 3.0;
 
-/// An open window: a session, multi-session or editor, tiled alike in open order.
+/// An open window: a session, multi-session, editor or the guide, tiled alike in open order.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum WindowKind {
     Session(SessionId),
     MultiSession(MultiSessionId),
     Editor(EditorId),
+    Guide,
 }
 
 impl WindowKind {
     pub fn session(self) -> Option<SessionId> {
         match self {
             WindowKind::Session(id) => Some(id),
-            WindowKind::MultiSession(_) | WindowKind::Editor(_) => None,
+            WindowKind::MultiSession(_) | WindowKind::Editor(_) | WindowKind::Guide => None,
         }
     }
 }
@@ -55,6 +57,7 @@ enum Taken {
         members: HashMap<SessionId, SessionVm>,
     },
     Editor(Box<EditorVm>),
+    Guide(GuideVm),
 }
 
 type Geom<'a> = (&'a mut bool, &'a mut Option<Rect>, &'a mut Option<Rect>);
@@ -66,6 +69,7 @@ impl Taken {
             Taken::Session(vm) => (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect),
             Taken::Multi { vm, .. } => (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect),
             Taken::Editor(vm) => (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect),
+            Taken::Guide(vm) => (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect),
         }
     }
 }
@@ -85,6 +89,10 @@ pub(crate) fn geom_of(app: &mut App, kind: WindowKind) -> Option<Geom<'_>> {
             .map
             .get_mut(&id)
             .map(|vm| (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect)),
+        WindowKind::Guide => app
+            .guide
+            .as_mut()
+            .map(|vm| (&mut vm.collapsed, &mut vm.window_rect, &mut vm.apply_rect)),
     }
 }
 
@@ -97,6 +105,8 @@ pub struct Env<'a> {
     pub vscode: Option<&'a Path>,
     pub maximized: Option<SessionId>,
     pub send_mode: SendMode,
+    /// When true, plain Enter sends the prompt and Shift+Enter inserts a newline.
+    pub send_on_enter: bool,
     /// The text box breaks long words anywhere (`input_break_all`).
     pub break_all: bool,
     /// `<ide_opened_file>` tag for the file the user last had open, sent ahead of prompts.
@@ -293,6 +303,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .filter(|_| pointer_down)
         .and_then(|p| ctx.layer_id_at(p));
     let fork_targets = app.selectable_providers();
+    let guide_rows = match app.guide {
+        Some(_) => guide::rows(app),
+        None => Vec::new(),
+    };
+    let mut guide_action = None;
     for (i, kind) in kinds.iter().enumerate() {
         let taken = match *kind {
             WindowKind::Session(id) => app
@@ -316,6 +331,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .map
                 .remove(&id)
                 .map(|vm| Taken::Editor(Box::new(vm))),
+            WindowKind::Guide => app.guide.take().map(Taken::Guide),
         };
         let Some(mut taken) = taken else {
             continue;
@@ -329,6 +345,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             vscode: app.vscode.as_deref(),
             maximized: app.maximized.and_then(WindowKind::session),
             send_mode: app.config.send_while_running,
+            send_on_enter: app.config.send_on_enter,
             break_all: app.config.input_break_all,
             ide_context: ide_context.as_deref(),
             focused,
@@ -342,7 +359,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             prev_min
         };
         let fill = match kind {
-            WindowKind::Session(_) | WindowKind::MultiSession(_) => theme::bg_window(),
+            WindowKind::Session(_) | WindowKind::MultiSession(_) | WindowKind::Guide => {
+                theme::bg_window()
+            }
             WindowKind::Editor(_) => theme::bg_file(),
         };
         let win = window(win_id(*kind), fill, collapsed, area, applying, default_pos);
@@ -357,6 +376,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     let o = editor::show(ui, vm, is_maximized, focused, show_whitespace);
                     out = o.view;
                     errors.extend(o.error);
+                }
+                Taken::Guide(vm) => {
+                    out = guide::show(ui, vm, &guide_rows, is_maximized, focused);
                 }
             })
         }));
@@ -376,6 +398,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     (Taken::Editor(vm), WindowKind::Editor(id)) => {
                         app.editors.map.insert(id, *vm);
                     }
+                    (Taken::Guide(vm), WindowKind::Guide) => app.guide = Some(vm),
                     _ => {}
                 }
                 resume_unwind(payload)
@@ -439,6 +462,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             indexes.push(id);
         }
         opens.extend(out.open_file.take());
+        guide_action = guide_action.or(out.guide);
         {
             let (c, w, a) = taken.geom();
             *c = collapsed;
@@ -459,6 +483,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                             vscode: app.vscode.as_deref(),
                             maximized: app.maximized.and_then(WindowKind::session),
                             send_mode: app.config.send_while_running,
+                            send_on_enter: app.config.send_on_enter,
                             break_all: app.config.input_break_all,
                             ide_context: ide_context.as_deref(),
                             focused,
@@ -485,6 +510,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                                         vscode: app.vscode.as_deref(),
                                         maximized: app.maximized.and_then(WindowKind::session),
                                         send_mode: app.config.send_while_running,
+                                        send_on_enter: app.config.send_on_enter,
                                         break_all: app.config.input_break_all,
                                         ide_context: ide_context.as_deref(),
                                         focused,
@@ -502,6 +528,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     app.editors.map.insert(id, *vm);
                 }
             }
+            Taken::Guide(vm) => app.guide = Some(vm),
         }
     }
     if let Some(e) = errors.pop() {
@@ -534,7 +561,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             WindowKind::Session(id) => app.close_session(id),
             WindowKind::MultiSession(id) => app.close_multi_session(id),
             WindowKind::Editor(id) => app.request_close_editor(id),
+            WindowKind::Guide => app.close_guide(),
         }
+    }
+    match guide_action {
+        Some(guide::GuideAction::CheckAgain) => app.recheck_providers(),
+        Some(guide::GuideAction::OpenFolder) => app.open_chosen_folder(),
+        None => {}
     }
     for (id, title) in multi_renames {
         app.rename_multi_session(id, title);
@@ -882,6 +915,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
+            send_on_enter: false,
             break_all: true,
             ide_context: None,
             focused: false,
@@ -929,6 +963,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
+            send_on_enter: false,
             break_all: true,
             ide_context: None,
             focused: false,
@@ -1054,6 +1089,7 @@ mod tests {
                 vscode: None,
                 maximized: None,
                 send_mode: SendMode::Queue,
+                send_on_enter: false,
                 break_all: true,
                 ide_context: None,
                 focused,
@@ -1090,6 +1126,7 @@ mod tests {
         for (origin, label) in [
             (xade_core::SessionOrigin::Xade, "Xade"),
             (xade_core::SessionOrigin::ClaudeCode, "Claude Code"),
+            (xade_core::SessionOrigin::Codex, "Codex"),
         ] {
             for focused in [true, false] {
                 let ((color, badge), (_, title)) = probe(origin, focused, label);
@@ -1122,6 +1159,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
+            send_on_enter: false,
             break_all: true,
             ide_context: None,
             focused: true,
@@ -1184,9 +1222,14 @@ mod tests {
 
     #[test]
     fn an_imported_session_title_stays_read_only() {
-        let (v, renames) = rename_run(xade_core::SessionOrigin::ClaudeCode, |at| vec![click(at)]);
-        assert_eq!(v.renaming, None);
-        assert!(renames.iter().all(Option::is_none));
+        for origin in [
+            xade_core::SessionOrigin::ClaudeCode,
+            xade_core::SessionOrigin::Codex,
+        ] {
+            let (v, renames) = rename_run(origin, |at| vec![click(at)]);
+            assert_eq!(v.renaming, None, "{origin:?}");
+            assert!(renames.iter().all(Option::is_none), "{origin:?}");
+        }
     }
 
     fn key(k: egui::Key) -> Vec<egui::Event> {
@@ -1248,6 +1291,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: SendMode::Queue,
+            send_on_enter: false,
             break_all: true,
             ide_context: None,
             focused: true,
@@ -1322,6 +1366,7 @@ mod tests {
         for origin in [
             xade_core::SessionOrigin::Xade,
             xade_core::SessionOrigin::ClaudeCode,
+            xade_core::SessionOrigin::Codex,
         ] {
             assert!(!header_selection_settles(origin), "{origin:?}");
         }

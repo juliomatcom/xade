@@ -1,0 +1,19 @@
+{"dir":"in","frame":{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}}
+{"dir":"out","frame":{"id":1,"result":{"userAgent":"xade"}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","method":"initialized"}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":2,"method":"thread/start","params":{}}}
+{"dir":"out","frame":{"id":2,"result":{"thread":{"id":"t1"},"model":"gpt-6-luna"}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":3,"method":"turn/start","params":{}}}
+{"dir":"out","frame":{"id":3,"result":{"turn":{"id":"turn1","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn1","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"turn1","itemId":"m1","delta":"one"}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":4,"method":"turn/steer","params":{}}}
+{"dir":"out","frame":{"method":"item/completed","params":{"threadId":"t1","turnId":"turn1","item":{"type":"agentMessage","id":"m1","text":"one"}}}}
+{"dir":"out","frame":{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn1","status":"completed"}}}}
+{"dir":"out","frame":{"id":4,"error":{"code":-32600,"message":"no active turn to steer"}}}
+{"dir":"in","frame":{"jsonrpc":"2.0","id":5,"method":"turn/start","params":{}}}
+{"dir":"out","frame":{"id":5,"result":{"turn":{"id":"turn2","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"turn/started","params":{"threadId":"t1","turn":{"id":"turn2","status":"inProgress"}}}}
+{"dir":"out","frame":{"method":"item/agentMessage/delta","params":{"threadId":"t1","turnId":"turn2","itemId":"m2","delta":"two"}}}
+{"dir":"out","frame":{"method":"item/completed","params":{"threadId":"t1","turnId":"turn2","item":{"type":"agentMessage","id":"m2","text":"two"}}}}
+{"dir":"out","frame":{"method":"turn/completed","params":{"threadId":"t1","turn":{"id":"turn2","status":"completed"}}}}

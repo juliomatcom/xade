@@ -325,6 +325,19 @@ fn session_controls(app: &mut App, ui: &mut egui::Ui) {
         });
 }
 
+/// A provider's CLI symbol sized for a text row, tinted like everywhere else.
+fn provider_icon(ctx: &egui::Context, id: ProviderId) -> Option<egui::Image<'static>> {
+    let tex = crate::conversation::cli_symbol(ctx, id)?;
+    let size = egui::vec2(PROVIDER_ICON_SIZE, PROVIDER_ICON_SIZE);
+    Some(
+        egui::Image::new((tex.id(), size))
+            .tint(crate::conversation::symbol_tint(id))
+            .fit_to_exact_size(size),
+    )
+}
+
+const PROVIDER_ICON_SIZE: f32 = 14.0;
+
 /// Picks the provider of new sessions; hidden unless two or more providers are available.
 fn provider_dropdown(app: &mut App, ui: &mut egui::Ui) {
     let ids = app.selectable_providers();
@@ -332,14 +345,19 @@ fn provider_dropdown(app: &mut App, ui: &mut egui::Ui) {
         return;
     };
     let mut picked = None;
+    if let Some(icon) = provider_icon(ui.ctx(), current) {
+        ui.add(icon);
+    }
     egui::ComboBox::from_id_salt("provider")
         .selected_text(app.provider_name(current))
         .show_ui(ui, |ui| {
             for id in ids {
-                if ui
-                    .selectable_label(id == current, app.provider_name(id))
-                    .clicked()
-                {
+                let name = app.provider_name(id);
+                let row = match provider_icon(ui.ctx(), id) {
+                    Some(icon) => egui::Button::selectable(id == current, (icon, name)),
+                    None => egui::Button::selectable(id == current, name),
+                };
+                if ui.add(row).clicked() {
                     picked = Some(id);
                 }
             }
@@ -349,11 +367,11 @@ fn provider_dropdown(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Label colour of a provider on cards; Antigravity has no theme colour of its own.
+/// Label colour of a provider on cards; Antigravity and Codex have no theme colour of their own.
 fn provider_color(id: ProviderId) -> egui::Color32 {
     match id {
         ProviderId::Claude => theme::claude(),
-        ProviderId::Antigravity => theme::text_muted(),
+        ProviderId::Antigravity | ProviderId::Codex => theme::text_muted(),
     }
 }
 
@@ -441,7 +459,7 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[Qu
             tex.id(),
             r,
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            egui::Color32::WHITE,
+            crate::conversation::symbol_tint(provider),
         );
     }
     let pairs = groups.len().max(1);
@@ -583,6 +601,10 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                                     actions.push(TreeAction::Toggle(root.clone()));
                                 }
                                 resp.context_menu(|ui| {
+                                    if ui.button("View in explorer").clicked() {
+                                        actions.push(TreeAction::Reveal(root.clone()));
+                                        ui.close();
+                                    }
                                     if ui.button("Close workspace").clicked() {
                                         close = Some(*id);
                                         ui.close();
@@ -624,7 +646,7 @@ fn refresh_button(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// The top-left menu: adding a folder, Status and About.
+/// The top-left menu: adding a folder, About, Status, the setup guide and Help.
 fn app_menu(app: &mut App, ui: &mut egui::Ui) {
     ui.menu_button(icons::MENU, |ui| {
         if ui
@@ -639,6 +661,15 @@ fn app_menu(app: &mut App, ui: &mut egui::Ui) {
         if ui.button(icons::with(icons::STATUS, "Status")).clicked() {
             app.status_open = true;
         }
+        if ui
+            .button(icons::with(icons::GUIDE, "Setup guide"))
+            .clicked()
+        {
+            app.open_guide();
+        }
+        if ui.button(icons::with(icons::HELP, "Help")).clicked() {
+            app.help_open = true;
+        }
         ui.separator();
         if ui.button(icons::with(icons::EXIT, "Exit")).clicked() {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
@@ -652,6 +683,7 @@ pub(crate) fn origin_label(o: SessionOrigin) -> &'static str {
     match o {
         SessionOrigin::Xade => "Xade",
         SessionOrigin::ClaudeCode => "Claude Code",
+        SessionOrigin::Codex => "Codex",
     }
 }
 
@@ -660,6 +692,7 @@ pub fn origin_badge(ui: &mut egui::Ui, origin: SessionOrigin) {
     let color = match origin {
         SessionOrigin::Xade => theme::accent(),
         SessionOrigin::ClaudeCode => theme::claude(),
+        SessionOrigin::Codex => theme::text_muted(),
     };
     crate::chrome::badge(ui, origin_label(origin), color);
 }
@@ -671,6 +704,7 @@ fn origin_filter(app: &mut App, ui: &mut egui::Ui) {
             ("All", None),
             ("Xade", Some(SessionOrigin::Xade)),
             ("Claude Code", Some(SessionOrigin::ClaudeCode)),
+            ("Codex", Some(SessionOrigin::Codex)),
         ] {
             if ui
                 .selectable_label(app.home.origin == value, label)
@@ -702,6 +736,7 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
             .filter_map(|id| Some((id, app.unavailable_text(id)?)))
             .collect(),
     };
+    let none_usable = !failing.is_empty();
     for (id, text) in failing {
         egui::Frame::new()
             .fill(theme::bg_raised())
@@ -714,6 +749,15 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
                     app.retry_preflight(id);
                 }
             });
+        ui.add_space(12.0);
+    }
+    if none_usable {
+        if ui
+            .button(icons::with(icons::GUIDE, "Setup guide"))
+            .clicked()
+        {
+            app.open_guide();
+        }
         ui.add_space(12.0);
     }
     origin_filter(app, ui);
@@ -957,7 +1001,9 @@ fn card_ui(
             egui::vec2(CLI_ICON_SIZE, CLI_ICON_SIZE),
         );
         if let Some(tex) = crate::conversation::cli_symbol(ui.ctx(), pid) {
-            egui::Image::new(&tex).paint_at(ui, icon_rect);
+            egui::Image::new(&tex)
+                .tint(crate::conversation::symbol_tint(pid))
+                .paint_at(ui, icon_rect);
         }
         icon_right -= CLI_ICON_SIZE + CLI_ICON_GAP;
     }
@@ -1722,7 +1768,7 @@ mod tests {
     }
 
     #[test]
-    fn the_menu_status_item_opens_the_status_dialog() {
+    fn the_menu_items_open_the_status_dialog_and_the_setup_guide() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
@@ -1775,6 +1821,17 @@ mod tests {
         let item = find(&texts, "Status").expect("menu item drawn");
         run(&mut app, click(item));
         assert!(app.status_open);
+
+        // The click on Status may leave the menu open; open it only when it closed.
+        run(&mut app, vec![]);
+        if find(&run(&mut app, vec![]), "Setup guide").is_none() {
+            run(&mut app, click(menu));
+            run(&mut app, vec![]);
+        }
+        let texts = run(&mut app, vec![]);
+        let item = find(&texts, "Setup guide").expect("menu item drawn");
+        run(&mut app, click(item));
+        assert!(app.guide.is_some() && app.view == View::Workspace);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1802,6 +1859,11 @@ mod tests {
             .preflight
             .insert(ProviderId::Claude, Err(ProviderError::NotLoggedIn));
         assert_eq!(banners(&mut app, &ctx).len(), 2);
+        let texts = painted(&mut app, &ctx, grid);
+        assert!(
+            texts.iter().any(|t| t.ends_with("Setup guide")),
+            "{texts:?}"
+        );
         // Not installed hides Antigravity: the Claude banner is exactly today's.
         app.home
             .preflight
@@ -1842,6 +1904,11 @@ mod tests {
         );
         assert_eq!(
             provider_color(ProviderId::Antigravity),
+            theme::text_muted(),
+            "no theme colour of its own"
+        );
+        assert_eq!(
+            provider_color(ProviderId::Codex),
             theme::text_muted(),
             "no theme colour of its own"
         );

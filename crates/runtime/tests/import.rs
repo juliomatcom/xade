@@ -15,8 +15,8 @@ use xade_core::{
 use xade_runtime::{AppEventKind, ManagerCmd};
 
 /// Replies to a prompt with a short scripted turn and serves a mutable list of importable sessions.
-#[derive(Default)]
 struct FakeProvider {
+    provider_id: ProviderId,
     import: Mutex<Vec<ImportedSession>>,
     spawns: Mutex<Vec<SpawnConfig>>,
     /// Provider session ids passed to `delete_session`; a success also drops the transcript.
@@ -24,9 +24,27 @@ struct FakeProvider {
     delete_fails: AtomicBool,
 }
 
+impl Default for FakeProvider {
+    fn default() -> Self {
+        Self::for_provider(ProviderId::Claude)
+    }
+}
+
+impl FakeProvider {
+    fn for_provider(provider_id: ProviderId) -> Self {
+        Self {
+            provider_id,
+            import: Mutex::default(),
+            spawns: Mutex::default(),
+            deleted: Mutex::default(),
+            delete_fails: AtomicBool::new(false),
+        }
+    }
+}
+
 impl AgentProvider for FakeProvider {
     fn id(&self) -> ProviderId {
-        ProviderId::Claude
+        self.provider_id
     }
     fn display_name(&self) -> &'static str {
         "Fake"
@@ -129,14 +147,27 @@ fn non_temp_dir() -> tempfile::TempDir {
 }
 
 async fn import(h: &mut common::Harness) -> (u32, u32) {
+    import_from(h, 1).await
+}
+
+/// Each provider's batch is applied as it arrives and ends with its own `ImportDone`.
+async fn import_from(h: &mut common::Harness, providers: usize) -> (u32, u32) {
     h.tx.send(ManagerCmd::Import).unwrap();
-    let ev = h
-        .until(5, |e| matches!(e.kind, AppEventKind::ImportDone { .. }))
-        .await;
-    match ev.last().unwrap().kind {
-        AppEventKind::ImportDone { imported, updated } => (imported, updated),
-        _ => unreachable!(),
+    let (mut imported, mut updated) = (0, 0);
+    for _ in 0..providers {
+        let ev = h
+            .until(5, |e| matches!(e.kind, AppEventKind::ImportDone { .. }))
+            .await;
+        if let AppEventKind::ImportDone {
+            imported: i,
+            updated: u,
+        } = ev.last().unwrap().kind
+        {
+            imported += i;
+            updated += u;
+        }
     }
+    (imported, updated)
 }
 
 #[tokio::test]
@@ -392,4 +423,48 @@ async fn delete_refuses_sessions_not_created_in_xade() {
         .await;
     assert!(provider.deleted.lock().unwrap().is_empty());
     assert!(h.reader.load_session(cc_id).await.is_ok());
+}
+
+#[tokio::test]
+async fn codex_import_gets_codex_origin_while_claude_keeps_claude_code() {
+    let dir = non_temp_dir();
+    let claude = Arc::new(FakeProvider::for_provider(ProviderId::Claude));
+    let codex = Arc::new(FakeProvider::for_provider(ProviderId::Codex));
+    let mut h = common::start_with(dir.path(), vec![claude.clone(), codex.clone()]).await;
+
+    *claude.import.lock().unwrap() = vec![imported("cc-1", "from claude", &h.cwd, 20)];
+    *codex.import.lock().unwrap() = vec![imported("cx-1", "from codex", &h.cwd, 10)];
+
+    assert_eq!(import_from(&mut h, 2).await, (2, 0));
+
+    let cc_page = h
+        .reader
+        .list_sessions(None, Some(SessionOrigin::ClaudeCode), 0, 24)
+        .await
+        .unwrap();
+    assert_eq!(cc_page.total, 1);
+    assert_eq!(cc_page.items[0].title, "from claude");
+    assert_eq!(cc_page.items[0].origin, SessionOrigin::ClaudeCode);
+
+    let cx_page = h
+        .reader
+        .list_sessions(None, Some(SessionOrigin::Codex), 0, 24)
+        .await
+        .unwrap();
+    assert_eq!(cx_page.total, 1);
+    assert_eq!(cx_page.items[0].title, "from codex");
+    assert_eq!(cx_page.items[0].origin, SessionOrigin::Codex);
+
+    let cx_id = cx_page.items[0].session_id().unwrap();
+    let (row, _) = h.reader.load_session(cx_id).await.unwrap();
+    assert_eq!(row.provider_id, ProviderId::Codex);
+    assert_eq!(row.origin, SessionOrigin::Codex);
+
+    // Imported Codex sessions cannot be deleted from Xade, matching Claude Code imports.
+    h.tx.send(ManagerCmd::DeleteSession { session_id: cx_id })
+        .unwrap();
+    h.until(5, |e| matches!(e.kind, AppEventKind::Error(_)))
+        .await;
+    assert!(codex.deleted.lock().unwrap().is_empty());
+    assert!(h.reader.load_session(cx_id).await.is_ok());
 }

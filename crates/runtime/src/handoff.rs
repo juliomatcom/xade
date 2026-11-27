@@ -103,13 +103,18 @@ fn provider_name(p: ProviderId) -> &'static str {
     match p {
         ProviderId::Claude => "claude",
         ProviderId::Antigravity => "antigravity",
+        ProviderId::Codex => "codex",
     }
 }
 
 fn parse_provider(s: &str) -> Option<ProviderId> {
-    [ProviderId::Claude, ProviderId::Antigravity]
-        .into_iter()
-        .find(|p| provider_name(*p) == s)
+    [
+        ProviderId::Claude,
+        ProviderId::Antigravity,
+        ProviderId::Codex,
+    ]
+    .into_iter()
+    .find(|p| provider_name(*p) == s)
 }
 
 /// Records a snapshot turn's conversation (`<provider id> <provider session id>`) so a later
@@ -283,6 +288,14 @@ mod tests {
         assert_eq!(found[0].psid, "s 1");
         remove_marker(tmp.path(), id);
         assert!(read_markers(tmp.path()).is_empty());
+
+        let codex_id = SessionId::new();
+        write_marker(tmp.path(), codex_id, ProviderId::Codex, "thr-1").unwrap();
+        let found = read_markers(tmp.path());
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].provider, Some(ProviderId::Codex));
+        assert_eq!(found[0].psid, "thr-1");
+        remove_marker(tmp.path(), codex_id);
     }
 
     #[test]

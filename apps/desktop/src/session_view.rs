@@ -31,6 +31,8 @@ pub struct ViewOut {
     pub fork: Option<ProviderId>,
     /// The title the user committed in the header.
     pub rename: Option<String>,
+    /// A button of the guide window.
+    pub guide: Option<crate::guide::GuideAction>,
 }
 
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ViewOut {
@@ -104,8 +106,12 @@ fn header(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env, out: &mut ViewOut) {
             }
             // Before the truncating labels, which take all the width left.
             fork = fork_button(ui, vm, env);
-            if let Some(tex) = conversation::company_symbol(ui.ctx(), vm.session.provider_id) {
-                ui.add(egui::Image::new(&tex).fit_to_exact_size(egui::vec2(14.0, 14.0)));
+            if let Some(tex) = conversation::cli_symbol(ui.ctx(), vm.session.provider_id) {
+                ui.add(
+                    egui::Image::new(&tex)
+                        .tint(conversation::symbol_tint(vm.session.provider_id))
+                        .fit_to_exact_size(egui::vec2(14.0, 14.0)),
+                );
             }
             ui.add(
                 egui::Label::new(RichText::new(model).strong())
@@ -268,7 +274,10 @@ pub(crate) fn status_dot(ui: &mut egui::Ui, status: &SessionStatus) {
         SessionStatus::Idle => (theme::text_muted(), "Idle".to_string()),
         SessionStatus::Streaming => (theme::accent(), "Streaming".to_string()),
         SessionStatus::NeedsApproval => (theme::warn(), "Needs approval".to_string()),
-        SessionStatus::Error(e) => (theme::danger(), format!("Error: {e}")),
+        SessionStatus::Error(e) => (
+            theme::danger(),
+            format!("Error: {}", conversation::error_summary(e)),
+        ),
         SessionStatus::Starting => (theme::text_muted(), "Starting".to_string()),
         SessionStatus::Closed => (theme::text_muted(), "Closed".to_string()),
     };

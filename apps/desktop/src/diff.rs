@@ -141,6 +141,7 @@ impl DiffData {
         let patch = result
             .as_ref()
             .and_then(|r| r.get("structuredPatch"))
+            .or_else(|| input.get("structuredPatch"))
             .and_then(Value::as_array)
             .filter(|h| !h.is_empty());
         let rows = if let Some(hunks) = patch {
@@ -500,6 +501,12 @@ mod tests {
         assert_eq!(d.language, "rust");
         let d = DiffData::build("Edit", input, None, Path::new("/")).unwrap();
         assert_eq!(d.first_changed_line, 1);
+
+        // Pending Codex fileChange approval carries `structuredPatch` on input (no result yet).
+        let codex_pending = r#"{"file_path":"/tmp/notes.txt","structuredPatch":[{"oldStart":1,"newStart":1,"lines":[" alpha","-beta","+BETA"," gamma"]}]}"#;
+        let d = DiffData::build("Edit", codex_pending, None, Path::new("/")).unwrap();
+        assert_eq!((d.added, d.removed), (1, 1));
+        assert_eq!(d.first_changed_line, 2);
     }
 
     #[test]

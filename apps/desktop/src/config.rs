@@ -53,6 +53,8 @@ pub struct Config {
     pub font_family: Option<String>,
     pub font_size: f32,
     pub send_while_running: SendMode,
+    /// When true, plain Enter sends the prompt and Shift+Enter inserts a newline.
+    pub send_on_enter: bool,
     /// Whether the status bar shows the frame rate.
     pub show_fps: bool,
     /// Whether file windows mark every space and tab (`theme.whitespace` colors them).
@@ -77,6 +79,7 @@ impl Default for Config {
             font_family: Some(BUNDLED_FONT.to_string()),
             font_size: DEFAULT_FONT_SIZE,
             send_while_running: SendMode::default(),
+            send_on_enter: true,
             show_fps: false,
             show_whitespace: true,
             input_break_all: true,
@@ -117,6 +120,11 @@ impl Config {
             Some("queue") => cfg.send_while_running = SendMode::Queue,
             Some("steer") => cfg.send_while_running = SendMode::Steer,
             _ => return Err("send_while_running must be \"queue\" or \"steer\"".into()),
+        }
+        match obj.get("send_on_enter") {
+            None => {}
+            Some(Value::Bool(b)) => cfg.send_on_enter = *b,
+            Some(_) => return Err("send_on_enter must be true or false".into()),
         }
         match obj.get("show_fps") {
             None => {}
@@ -186,6 +194,7 @@ fn defaults_json() -> String {
         "font_family": BUNDLED_FONT,
         "font_size": DEFAULT_FONT_SIZE,
         "send_while_running": "queue",
+        "send_on_enter": true,
         "show_fps": false,
         "show_whitespace": true,
         "input_break_all": true,
@@ -415,6 +424,18 @@ mod tests {
         assert_eq!(steer.send_while_running.other(), SendMode::Queue);
         assert!(Config::parse(r#"{"send_while_running":"now"}"#).is_err());
         assert!(Config::parse(r#"{"send_while_running":null}"#).is_err());
+    }
+
+    #[test]
+    fn send_on_enter_defaults_to_true_and_must_be_a_bool() {
+        assert!(Config::default().send_on_enter);
+        assert!(
+            !Config::parse(r#"{"send_on_enter":false}"#)
+                .unwrap()
+                .send_on_enter
+        );
+        assert!(Config::parse(r#"{"send_on_enter":"yes"}"#).is_err());
+        assert!(Config::parse(r#"{"send_on_enter":null}"#).is_err());
     }
 
     #[test]

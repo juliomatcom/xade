@@ -9,6 +9,7 @@ mod editor;
 mod errors;
 mod file_tree;
 mod find;
+mod guide;
 mod home;
 mod icons;
 mod keymap;
@@ -31,6 +32,7 @@ use std::sync::Arc;
 
 use xade_antigravity::AntigravityProvider;
 use xade_claude::ClaudeProvider;
+use xade_codex::CodexProvider;
 use xade_core::{AgentProvider, ProviderError, ProviderId};
 use xade_runtime::SessionManager;
 use xade_store::{StoreReader, StoreWriter};
@@ -182,7 +184,8 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         options,
         Box::new(move |cc| Ok(Box::new(launch.into_app(cc, initial_workspace)))),
     )?;
-    drop(rt);
+    // Bounded: a blocking import or quota call on a hung CLI must not stall quit.
+    rt.shutdown_timeout(std::time::Duration::from_secs(2));
     Ok(())
 }
 
@@ -232,6 +235,7 @@ pub fn backend(
         vec![
             Arc::new(ClaudeProvider::new()),
             Arc::new(AntigravityProvider::new()),
+            Arc::new(CodexProvider::new()),
         ],
     )
 }

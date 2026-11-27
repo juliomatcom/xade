@@ -33,6 +33,8 @@ const INPUT_MIN_ROWS: usize = 2;
 const INPUT_MAX_ROWS: usize = 10;
 /// Side of the (square) send button, and height of Stop.
 const BUTTON_SIZE: f32 = 48.0;
+/// Space left and right of the row under the input box.
+const CONTROLS_INSET: i8 = 8;
 
 /// What the composer asks of the app after drawing.
 #[derive(Default)]
@@ -56,16 +58,9 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
     let mut send: Option<bool> = None;
     let input_id = ui.scope_id().with("composer_input");
     let focused = ui.memory(|m| m.has_focus(input_id));
-    let pressed = if focused {
-        ui.input_mut(keymap::take_send)
-    } else {
-        None
-    };
     if focused {
         crate::widgets::selection_menu::mark_text_box(ui.ctx());
     }
-    let hotkey_other = pressed == Some(Action::SendOther);
-    let hotkey = pressed == Some(Action::Send);
     // Pasting copied files or an image attaches them, like the attach button.
     if focused {
         if let Some(files) = ui.input_mut(|i| take_pasted_files(&mut i.events, clipboard_files)) {
@@ -73,7 +68,15 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
         }
         out.pasted_image = ui.input_mut(|i| take_pasted_image(&mut i.events));
     }
+    // Mention popup runs before `take_send` so plain Enter accepts a match when `send_on_enter` is on.
     let popup = mention_popup_start(ui, vm, input_id, focused, &mut out);
+    let pressed = if focused {
+        ui.input_mut(|i| keymap::take_send(i, env.send_on_enter))
+    } else {
+        None
+    };
+    let hotkey_other = pressed == Some(Action::SendOther);
+    let hotkey = pressed == Some(Action::Send);
     if let Some((text, at)) = &vm.attach_note {
         if at.elapsed() >= ATTACH_NOTE_TTL {
             vm.attach_note = None;
@@ -93,14 +96,9 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
         vm.view_subagents = !vm.view_subagents;
     }
     if idle {
-        let last = vm
-            .sync
-            .transcript
-            .mtime
-            .map_or(vm.session.updated_at, time::OffsetDateTime::from);
         if let Some(text) = send_note(
             vm.session.usage.context_tokens_used,
-            last,
+            last_activity(vm),
             time::OffsetDateTime::now_utc(),
         ) {
             note_frame(ui, &text);
@@ -153,7 +151,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
                                         .layouter(&mut layouter)
                                         .hint_text(format!(
                                             "Message ({} to {})",
-                                            keymap::shortcut_text(Action::Send),
+                                            keymap::send_hint_key(env.send_on_enter),
                                             if running { "queue or steer" } else { "send" }
                                         )),
                                 );
@@ -226,15 +224,24 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
     }
     queued_rows(ui, vm);
 
-    // The row under the box ends where the box does, not at the panel edge.
     let box_width = input_box.response.rect.width();
-    out.attach = ui
-        .scope(|ui| {
-            ui.set_max_width(box_width);
-            controls(ui, vm, env)
-        })
-        .inner;
+    out.attach = controls_row(ui, box_width, |ui| controls(ui, vm, env));
     out
+}
+
+/// The row under the input box, inset from the box's sides rather than reaching the panel edge.
+pub(crate) fn controls_row<R>(
+    ui: &mut egui::Ui,
+    box_width: f32,
+    add: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(CONTROLS_INSET, 0))
+        .show(ui, |ui| {
+            ui.set_max_width(box_width - 2.0 * f32::from(CONTROLS_INSET));
+            add(ui)
+        })
+        .inner
 }
 
 /// Shows the user's message and hands it to the session.
@@ -248,6 +255,18 @@ pub fn send_now(vm: &mut SessionVm, env_cmd: &Env, text: String, delivery: Optio
         delivery,
         context: env_cmd.ide_context.map(str::to_owned),
     });
+}
+
+/// When the prompt cache was last written: the latest of the Claude transcript's mtime (only
+/// Claude has one), the session's stored timestamp, and the newest message. Without the message
+/// time, providers lacking a transcript read as expired an hour after the session opened.
+fn last_activity(vm: &SessionVm) -> time::OffsetDateTime {
+    let mtime = vm.sync.transcript.mtime.map(time::OffsetDateTime::from);
+    let newest = vm.messages.iter().map(|m| m.created_at).max();
+    [mtime, newest]
+        .into_iter()
+        .flatten()
+        .fold(vm.session.updated_at, std::cmp::max)
 }
 
 /// One row per queued message, each cancellable.
@@ -294,6 +313,7 @@ mod tests {
             vscode: None,
             maximized: None,
             send_mode: crate::config::SendMode::Queue,
+            send_on_enter: false,
             break_all: true,
             ide_context: None,
             focused: false,
@@ -302,6 +322,17 @@ mod tests {
         set_attach_note(&mut v, "x".into());
         send_now(&mut v, &env, "hi".into(), None);
         assert!(v.attach_note.is_none());
+    }
+
+    #[test]
+    fn last_activity_follows_the_newest_message_without_a_transcript() {
+        let mut v = vm(String::new());
+        v.sync.transcript.mtime = None;
+        v.session.updated_at = time::OffsetDateTime::now_utc() - time::Duration::hours(3);
+        let m = crate::app::new_message(&v, xade_core::Role::Assistant, "ok".into(), None);
+        let at = m.created_at;
+        v.messages.push(m);
+        assert_eq!(last_activity(&v), at);
     }
 
     #[test]

@@ -81,6 +81,7 @@ impl AgentProvider for SharedProvider {
         match self.id {
             ProviderId::Claude => "Claude",
             ProviderId::Antigravity => "Antigravity",
+            ProviderId::Codex => "Codex",
         }
     }
     fn models(&self) -> Vec<xade_core::ModelOption> {

@@ -11,9 +11,10 @@ const RELEASES = `${REPO}/releases/latest`;
 const INSTALL = `curl -fsSL https://raw.githubusercontent.com/juliomatcom/xade/main/scripts/install.sh | sh`;
 
 const pillars = [
-  ["100% free, no subscription required", "Xade has no subscription, account, or paywall. It drives the agent CLIs you already have installed and signed in, with no API keys to paste and nothing new to configure."],
-  ["Hand work between providers", "Fork a session to the other provider when you hit a limit or want a second opinion. The new agent continues from a summary of the work, without leaving the workspace."],
-  ["Cloud or local models", "One interface for hosted agents and models running on your own machine. Pick the right brain for each job."],
+  ["Your setup, as is", "Xade drives the agent CLIs you already have installed and signed in, with your settings, MCP servers and skills. No API keys to paste and nothing new to configure."],
+  ["Hit a limit? Switch providers", "Fork a session to another provider when you hit a limit or want a second opinion. The new agent starts from a summary of the work, without leaving the workspace."],
+  ["100% free and open source", "MIT licensed, with no Xade subscription, account, or paywall. Read it, change it, fork it."],
+  ["Coming soon: OpenCode and local models", "One interface for hosted agents and models running on your own machine. Pick the right brain for each job."],
 ];
 
 const team = [
@@ -113,13 +114,16 @@ export default function App() {
 
       <main className="relative mx-auto max-w-6xl px-6">
         <section className="pb-20 pt-10 text-center md:pt-16">
-          <p className="mb-5 font-mono text-base font-medium uppercase tracking-[0.2em] text-jade sm:text-xl">X-provider Agentic Development Environment</p>
+          <p className="mb-5 font-mono text-base font-medium uppercase tracking-[0.2em] text-jade sm:text-xl">Native Rust · Free · MIT</p>
           <h1 className="mx-auto max-w-4xl text-4xl font-semibold leading-[1.08] tracking-tight text-white sm:text-6xl">
-            All your AI coding agents,{" "}
-            <span className="bg-gradient-to-r from-emerald-300 to-jade-deep bg-clip-text text-transparent">in one fast workspace.</span>
+            Your coding agents,{" "}
+            <span className="bg-gradient-to-r from-emerald-300 to-jade-deep bg-clip-text text-transparent">side by side or on one team.</span>
           </h1>
           <p className="mx-auto mt-6 max-w-2xl text-lg text-slate-400">
-            Run your Agents side by side or as one multi-model team, with no extra install or setup. 100% free. Bring your own CLI or subscription, change it, fork it. Runs native, built in Rust.
+            Run them in separate windows, or let them plan, build and review together. A native Rust app, no Electron, that uses your installed CLIs. Free and open source.
+          </p>
+          <p className="mt-4 font-mono text-sm text-slate-300">
+            Works with Claude Code, Codex and Antigravity <span className="text-slate-500">· OpenCode and local models coming soon</span>
           </p>
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <a href="#download" className="rounded-lg bg-jade px-6 py-3 text-sm font-semibold text-ink transition hover:bg-emerald-300">Download Xade</a>
@@ -129,7 +133,7 @@ export default function App() {
           </div>
           <p className="mx-auto mt-4 inline-flex items-center justify-center gap-2 text-sm text-slate-400">
             <ShieldIcon className="size-4 shrink-0 text-jade" />
-            <span>Zero telemetry, zero tracking. Everything stays 100% local on your machine.</span>
+            <span>Zero telemetry, zero tracking. Xade saves your session history on your machine.</span>
           </p>
 
           <figure className="mx-auto mt-14 max-w-6xl">
@@ -158,7 +162,7 @@ export default function App() {
               ))}
             </ol>
             <figure>
-              <img src="/multi-session-new.webp" alt="Xade's New Multi-Session dialog with three members: #opus-1 and #sonnet-1 on Claude and #neon-1 on Antigravity" width={1620} height={940} loading="lazy" className="w-full rounded-xl border border-edge" />
+              <img src="/multi-session-new.webp" alt="Xade's New Multi-Session dialog with three members: #opus-1 on Claude, #neon-1 on Antigravity and #gpt-sol-1 on Codex" width={1620} height={940} loading="lazy" className="w-full rounded-xl border border-edge" />
               <figcaption className="mt-3 text-center text-sm text-slate-500">
                 Open it with the Multi button, or Cmd+Shift+T (Ctrl+Shift+T on Linux). All members share one working folder.{" "}
                 <a href={`${REPO}/blob/main/docs/multi-session.md`} rel="noopener" className="underline hover:text-white">Read the guide</a>
@@ -173,7 +177,7 @@ export default function App() {
               <p className="font-mono text-sm uppercase tracking-widest text-jade">Powered by Rust</p>
               <h2 id="speed" className="mt-3 text-3xl font-semibold tracking-tight text-white sm:text-4xl">Super fast, because it is native</h2>
               <p className="mt-3 leading-relaxed text-slate-400">
-                No browser engine and no web runtime. Xade is a single native Rust binary that renders on the GPU, so windows open instantly and long sessions stay smooth while several agents stream at once.
+                No browser engine and no web runtime. Xade is a single native Rust binary that renders on the GPU, built to stay responsive while several agents stream at once.
               </p>
             </div>
             <dl className="grid grid-cols-3 gap-4 text-center">
@@ -194,9 +198,9 @@ export default function App() {
         <section id="why" className="scroll-mt-24 pb-24">
           <h2 className="mx-auto max-w-3xl text-center text-3xl font-semibold tracking-tight text-white sm:text-4xl">One place for every agent and model</h2>
           <p className="mx-auto mt-3 max-w-2xl text-center text-slate-400">
-            Today Xade drives Claude Code and Antigravity, and sessions can be forked between them. It is built to take more providers, so the workspace you learn now is the one you keep.
+            Today Xade drives Claude Code, Codex and Antigravity, and sessions can be forked between them. It is built to take more providers, so the workspace you learn now is the one you keep.
           </p>
-          <div className="mt-12 grid gap-px overflow-hidden rounded-2xl border border-edge bg-edge md:grid-cols-3">
+          <div className="mt-12 grid gap-px overflow-hidden rounded-2xl border border-edge bg-edge md:grid-cols-2">
             {pillars.map(([t, d]) => (
               <article key={t} className="bg-ink p-8">
                 <h3 className="text-xl font-semibold text-white">{t}</h3>
@@ -204,13 +208,12 @@ export default function App() {
               </article>
             ))}
           </div>
-          <p className="mt-3 text-center text-xs uppercase tracking-widest text-slate-600">More providers and local models are on the roadmap</p>
         </section>
 
         <section className="pb-24" aria-labelledby="features">
           <h2 id="features" className="text-3xl font-semibold tracking-tight text-white">Everything you need, nothing you don't</h2>
           <p className="mt-3 max-w-2xl text-slate-400">
-            Simple, opinionated and really fast. Everything stays local; it runs the official CLIs you already have.
+            Simple, opinionated and really fast. History is saved locally; it runs the official CLIs you already have.
           </p>
           <div className="mt-10 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {features.map(([t, d]) => (
@@ -230,7 +233,7 @@ export default function App() {
             <Copy text={INSTALL} />
           </div>
           <p className="mt-4 text-sm text-slate-500">
-            Requires the Claude Code CLI, installed and logged in, and/or the Antigravity CLI <code className="font-mono">agy</code>, signed in, plus git. VS Code with the <code className="font-mono">code</code> command is optional. Linux needs a Vulkan-capable GPU driver.
+            Requires git and at least one of these, installed and signed in: Claude Code, Codex (<code className="font-mono">codex</code>) or Antigravity (<code className="font-mono">agy</code>). VS Code with the <code className="font-mono">code</code> command is optional. Linux needs a Vulkan-capable GPU driver.
           </p>
         </section>
 
@@ -308,7 +311,7 @@ export default function App() {
                 <img src="/favicon.svg" alt="" className="size-7" /> Xade
               </a>
               <p className="mt-4 max-w-sm text-sm leading-relaxed text-slate-400">
-                One fast, native workspace for all your AI coding agents. 100% free, open source, no subscription required.
+                Your coding agents, side by side or on one team. Native Rust, free and open source.
               </p>
               <a href={REPO} rel="noopener" className="mt-5 inline-flex items-center gap-2 rounded-lg border border-edge px-4 py-2 text-sm font-medium text-white transition hover:border-slate-500">
                 <GitHubIcon className="size-4" /> Star on GitHub

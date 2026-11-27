@@ -1,11 +1,12 @@
 //! The scrolling transcript of one session.
 
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use egui::RichText;
 use egui_commonmark::CommonMarkCache;
-use xade_core::{Delivery, Message, ProviderId, Role, SessionStatus};
+use xade_core::{Delivery, Message, ProviderId, Role, SessionId, SessionStatus};
 
 use crate::app::SessionVm;
 use crate::theme;
@@ -14,6 +15,7 @@ use crate::widgets::markdown::markdown;
 use crate::widgets::path_links::PathLinks;
 use crate::widgets::scroll_nav;
 use crate::widgets::tool_card::{self, CardStatus};
+use crate::widgets::working;
 
 /// Draws the transcript; returns a file path the user clicked.
 pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
@@ -253,8 +255,9 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                         .request_repaint_after(std::time::Duration::from_secs(30));
                 }
                 if let Some(e) = error {
-                    ui.label(RichText::new(&*e).color(theme::danger()));
+                    error_block(ui, session_id, e);
                 }
+                working::show(ui, &working::clis([(provider, &*status)]));
             });
         // After a send: land on the end, which also re-arms `stick_to_bottom`.
         nav.jump_top(ui, content_top);
@@ -273,6 +276,73 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
         vm.open_changes(&calls);
     }
     open
+}
+
+const ERROR_SUMMARY_CHARS: usize = 160;
+const ERROR_DETAILS_MAX_HEIGHT: f32 = 160.0;
+
+/// Single-line summary of an error message, suitable for chat lines and hover tooltips.
+pub(crate) fn error_summary(msg: &str) -> Cow<'_, str> {
+    split_error(msg).0
+}
+
+/// Splits an error into its single-line summary and any remaining detail (from extra lines, or the
+/// full message when a single line exceeds `ERROR_SUMMARY_CHARS`).
+fn split_error(msg: &str) -> (Cow<'_, str>, Option<&str>) {
+    let trimmed = msg.trim();
+    if let Some((first, rest)) = trimmed.split_once('\n') {
+        let first = first.trim_end();
+        let rest = rest.trim();
+        let details = (!rest.is_empty()).then_some(rest);
+        if first.chars().count() > ERROR_SUMMARY_CHARS {
+            let cut: String = first.chars().take(ERROR_SUMMARY_CHARS).collect();
+            return (Cow::Owned(format!("{cut}…")), Some(trimmed));
+        }
+        return (Cow::Borrowed(first), details);
+    }
+    if trimmed.chars().count() > ERROR_SUMMARY_CHARS {
+        let cut: String = trimmed.chars().take(ERROR_SUMMARY_CHARS).collect();
+        return (Cow::Owned(format!("{cut}…")), Some(trimmed));
+    }
+    (Cow::Borrowed(trimmed), None)
+}
+
+/// Renders a session error at the bottom of the transcript: always one concise line, with any
+/// multi-line or long detail collapsed under an inline `Details` toggle.
+fn error_block(ui: &mut egui::Ui, session_id: SessionId, msg: &str) {
+    let (summary, details) = split_error(msg);
+    ui.label(RichText::new(summary.as_ref()).color(theme::danger()));
+    let Some(details) = details else {
+        return;
+    };
+    let id = egui::Id::unique(("session_error_details", session_id));
+    let state =
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false);
+    state
+        .show_header(ui, |ui| {
+            ui.label(RichText::new("Details").small().color(theme::text_muted()));
+        })
+        .body(|ui| {
+            egui::Frame::new()
+                .fill(theme::bg_terminal())
+                .stroke(egui::Stroke::new(1.0, theme::border()))
+                .corner_radius(6)
+                .inner_margin(egui::Margin::symmetric(8, 6))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    egui::ScrollArea::vertical()
+                        .id_salt((id, "scroll"))
+                        .max_height(ERROR_DETAILS_MAX_HEIGHT)
+                        .show(ui, |ui| {
+                            ui.label(
+                                RichText::new(details)
+                                    .small()
+                                    .monospace()
+                                    .color(theme::text_muted()),
+                            );
+                        });
+                });
+        });
 }
 
 /// Runs of two or more consecutive tool calls other than code changes (their results
@@ -467,6 +537,9 @@ fn avatar_provider(m: &Message, session: ProviderId) -> ProviderId {
     m.provider_id.unwrap_or(session)
 }
 
+/// Side of the CLI mark beside a message.
+pub(crate) const AVATAR: f32 = 20.0;
+
 /// The assistant avatar beside `body`, which draws the text.
 fn assistant(
     ui: &mut egui::Ui,
@@ -474,9 +547,11 @@ fn assistant(
     body: impl FnOnce(&mut egui::Ui) -> Option<PathBuf>,
 ) -> Option<PathBuf> {
     ui.horizontal_top(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(20.0, 20.0), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(egui::Vec2::splat(AVATAR), egui::Sense::hover());
         if let Some(tex) = cli_symbol(ui.ctx(), provider) {
-            egui::Image::new(&tex).paint_at(ui, rect);
+            egui::Image::new(&tex)
+                .tint(symbol_tint(provider))
+                .paint_at(ui, rect);
         }
         ui.vertical(body).inner
     })
@@ -489,6 +564,16 @@ const ANTHROPIC_SYMBOL: &[u8] = include_bytes!("../../../assets/anthropic-symbol
 const GOOGLE_SYMBOL: &[u8] = include_bytes!("../../../assets/google-symbol.png");
 const CLAUDE_CODE_SYMBOL: &[u8] = include_bytes!("../../../assets/claude-code-symbol.png");
 const ANTIGRAVITY_SYMBOL: &[u8] = include_bytes!("../../../assets/antigravity-symbol.png");
+const OPENAI_SYMBOL: &[u8] = include_bytes!("../../../assets/openai-symbol.png");
+
+/// Tint applied when drawing a provider's symbol: the OpenAI PNG is white-on-transparent so
+/// `theme::text()` keeps it legible on both dark and light themes.
+pub(crate) fn symbol_tint(provider: ProviderId) -> egui::Color32 {
+    match provider {
+        ProviderId::Codex => theme::text(),
+        ProviderId::Claude | ProviderId::Antigravity => egui::Color32::WHITE,
+    }
+}
 
 /// The logo of the company behind a provider, for window headers and the top bar.
 pub(crate) fn company_symbol(
@@ -498,6 +583,7 @@ pub(crate) fn company_symbol(
     let (name, png) = match provider {
         ProviderId::Claude => ("anthropic_symbol", ANTHROPIC_SYMBOL),
         ProviderId::Antigravity => ("google_symbol", GOOGLE_SYMBOL),
+        ProviderId::Codex => ("openai_symbol", OPENAI_SYMBOL),
     };
     symbol(ctx, name, png)
 }
@@ -507,6 +593,7 @@ pub(crate) fn cli_symbol(ctx: &egui::Context, provider: ProviderId) -> Option<eg
     let (name, png) = match provider {
         ProviderId::Claude => ("claude_code_symbol", CLAUDE_CODE_SYMBOL),
         ProviderId::Antigravity => ("antigravity_symbol", ANTIGRAVITY_SYMBOL),
+        ProviderId::Codex => ("openai_symbol", OPENAI_SYMBOL),
     };
     symbol(ctx, name, png)
 }
@@ -537,7 +624,11 @@ mod symbol_tests {
     fn every_company_and_cli_symbol_decodes_into_its_own_cached_texture() {
         let ctx = egui::Context::default();
         let mut ids = std::collections::HashSet::new();
-        for p in [ProviderId::Claude, ProviderId::Antigravity] {
+        for p in [
+            ProviderId::Claude,
+            ProviderId::Antigravity,
+            ProviderId::Codex,
+        ] {
             for load in [super::company_symbol, super::cli_symbol] {
                 let tex = load(&ctx, p).expect("symbol");
                 assert_eq!(tex.size(), [80, 80]);
@@ -546,11 +637,10 @@ mod symbol_tests {
                 ids.insert(tex.id());
             }
         }
-        assert_eq!(
-            ids.len(),
-            4,
-            "company and CLI logos differ for every provider"
-        );
+        // Claude and Antigravity have distinct company + CLI marks; Codex shares the OpenAI mark.
+        assert_eq!(ids.len(), 5);
+        assert_eq!(super::symbol_tint(ProviderId::Codex), crate::theme::text());
+        assert_eq!(super::symbol_tint(ProviderId::Claude), egui::Color32::WHITE);
     }
 }
 
@@ -1191,5 +1281,75 @@ mod tests {
         }
         // Each line belongs to its own message: the second time is below the first message.
         assert!(times[1].1.top() > body("zzuser").bottom());
+    }
+
+    #[test]
+    fn split_error_keeps_short_lines_inline_and_folds_multiline_or_long_errors() {
+        let short = "agy exited unexpectedly (SIGBUS, signal 7)";
+        assert_eq!(split_error(short), (Cow::Borrowed(short), None));
+
+        let multi = "agy exited unexpectedly (exit code 1)\nstack frame 1\nstack frame 2";
+        assert_eq!(
+            split_error(multi),
+            (
+                Cow::Borrowed("agy exited unexpectedly (exit code 1)"),
+                Some("stack frame 1\nstack frame 2")
+            )
+        );
+
+        assert_eq!(
+            split_error("only one line\n   \n"),
+            (Cow::Borrowed("only one line"), None)
+        );
+
+        let long = "é".repeat(ERROR_SUMMARY_CHARS + 20);
+        let (summary, details) = split_error(&long);
+        assert_eq!(summary.chars().count(), ERROR_SUMMARY_CHARS + 1);
+        assert!(summary.ends_with('…'));
+        assert_eq!(details, Some(long.as_str()));
+    }
+
+    #[test]
+    fn multiline_error_starts_collapsed_in_conversation() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let mut v = vm(vec![]);
+        v.error = Some("agy exited unexpectedly (exit code 1)\nhidden stderr line".into());
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(500.0, 400.0),
+            )),
+            ..Default::default()
+        };
+        fn collect_texts(s: &egui::Shape, out: &mut Vec<String>) {
+            match s {
+                egui::Shape::Text(t) => out.push(t.galley.text().to_string()),
+                egui::Shape::Vec(v) => v.iter().for_each(|c| collect_texts(c, out)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        for _ in 0..2 {
+            let out = ctx.run_ui(input.clone(), |ui| {
+                show(ui, &mut v);
+            });
+            texts.clear();
+            out.shapes
+                .iter()
+                .for_each(|c| collect_texts(&c.shape, &mut texts));
+            out.drop_without_applying_deltas();
+        }
+        assert!(
+            texts
+                .iter()
+                .any(|t| t.contains("agy exited unexpectedly (exit code 1)")),
+            "{texts:?}"
+        );
+        assert!(texts.iter().any(|t| t == "Details"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t.contains("hidden stderr line")),
+            "details must start collapsed: {texts:?}"
+        );
     }
 }

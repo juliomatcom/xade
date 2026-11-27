@@ -313,6 +313,7 @@ pub(crate) fn provider_str(p: ProviderId) -> &'static str {
     match p {
         ProviderId::Claude => "claude",
         ProviderId::Antigravity => "antigravity",
+        ProviderId::Codex => "codex",
     }
 }
 
@@ -320,6 +321,7 @@ pub(crate) fn parse_provider(idx: usize, s: &str) -> rusqlite::Result<ProviderId
     match s {
         "claude" => Ok(ProviderId::Claude),
         "antigravity" => Ok(ProviderId::Antigravity),
+        "codex" => Ok(ProviderId::Codex),
         other => Err(conversion_error(idx, UnknownValue(other.to_string()))),
     }
 }
@@ -372,6 +374,7 @@ pub(crate) fn origin_str(o: SessionOrigin) -> &'static str {
     match o {
         SessionOrigin::Xade => "xade",
         SessionOrigin::ClaudeCode => "claude_code",
+        SessionOrigin::Codex => "codex",
     }
 }
 
@@ -379,6 +382,7 @@ pub(crate) fn parse_origin(idx: usize, s: &str) -> rusqlite::Result<SessionOrigi
     match s {
         "xade" => Ok(SessionOrigin::Xade),
         "claude_code" => Ok(SessionOrigin::ClaudeCode),
+        "codex" => Ok(SessionOrigin::Codex),
         other => Err(conversion_error(idx, UnknownValue(other.to_string()))),
     }
 }

@@ -252,7 +252,7 @@ pub fn update(app: &mut App, ctx: &egui::Context) {
                 crate::multi_view::MultiTab::Team => None,
             })
             .unwrap_or(0),
-        None => 0,
+        Some(WindowKind::Guide) | None => 0,
     };
     let key: MatchKey = (f.query.clone(), target, revision);
     if f.key.as_ref() != Some(&key) {
@@ -279,7 +279,7 @@ pub fn update(app: &mut App, ctx: &egui::Context) {
                     .map(|vm| find_messages(&vm.messages, &f.query)),
                 crate::multi_view::MultiTab::Team => None,
             }),
-            None => None,
+            Some(WindowKind::Guide) | None => None,
         };
         f.matches = Arc::new(found.unwrap_or_default());
         if moved {
