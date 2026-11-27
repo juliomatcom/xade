@@ -1,0 +1,8 @@
+{"dir": "meta", "frame": {"scenario": "bad_resume", "model": "gpt-6-luna"}}
+{"dir": "meta", "frame": {"argv": ["app-server"]}}
+{"dir": "in", "frame": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "xade", "title": "Xade", "version": "0.0.0"}}}}
+{"dir": "out", "frame": {"id": 1, "result": {"userAgent": "xade/0.172.0 (Linux Unknown; aarch64) xterm-256color (xade; 0.0.0)", "codexHome": "/HOME/.codex", "platformFamily": "unix", "platformOs": "linux"}}}
+{"dir": "in", "frame": {"jsonrpc": "2.0", "method": "initialized"}}
+{"dir": "in", "frame": {"jsonrpc": "2.0", "id": 2, "method": "thread/resume", "params": {"threadId": "00000000-0000-0000-0000-000000000000", "cwd": "/tmp/xade-codex-rec.8D2K/bad_resume"}}}
+{"dir": "out", "frame": {"error": {"code": -32600, "message": "no rollout found for thread id 00000000-0000-0000-0000-000000000000"}, "id": 2}}
+{"dir": "meta", "frame": {"exit_code": 0, "stderr_tail": ""}}
