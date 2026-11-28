@@ -158,6 +158,7 @@ pub fn show(
             if let MultiTab::Member(sid) = vm.active_tab {
                 if let Some(member) = members.get_mut(&sid) {
                     session_view::banner(ui, member, env);
+                    composer::cost_notes(ui, member, env);
                 }
             }
             unified_composer(ui, vm, &handles, members, any_busy, env);
@@ -519,16 +520,6 @@ fn member_subbar(ui: &mut egui::Ui, member: &mut SessionVm, env: &Env) {
                         session_id: member.session.id,
                         on: member.session.auto_mode,
                     });
-                }
-                let u = &member.session.usage;
-                if u.context_window_max > 0 {
-                    let pct = (u.context_tokens_used as f64 / u.context_window_max as f64 * 100.0)
-                        .round() as u64;
-                    ui.label(
-                        RichText::new(format!("ctx {pct}%"))
-                            .small()
-                            .color(theme::text_muted()),
-                    );
                 }
                 if matches!(
                     member.status,
@@ -1140,7 +1131,11 @@ fn unified_composer(
         });
 
     // Quick target pills sit directly under the input box (same row position as standalone
-    // composer controls).
+    // composer controls). A member tab adds that session's stats; the Team tab has none.
+    let tab_usage = match vm.active_tab {
+        MultiTab::Team => None,
+        MultiTab::Member(sid) => members.get(&sid).map(|m| &m.session.usage),
+    };
     let box_width = input_box.response.rect.width();
     ui.add_space(4.0);
     composer::controls_row(ui, box_width, |ui| {
@@ -1197,6 +1192,9 @@ fn unified_composer(
                     steer = alt_steer;
                 }
             }
+            if let Some(usage) = tab_usage {
+                composer::session_stats(ui, usage);
+            }
         });
     });
 
@@ -1250,6 +1248,7 @@ fn set_target_prefix(input: &mut String, handles: &[String], handle: &str) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -1268,5 +1267,96 @@ mod tests {
         assert_eq!(input, "#neon-1: plan feature x");
         strip_target_prefix(&mut input, &handles);
         assert_eq!(input, "plan feature x");
+    }
+
+    /// Every text painted by the window on `tab`, with where it landed.
+    fn painted(tab: MultiTab, member: SessionVm) -> Vec<(String, egui::Rect)> {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            fork_targets: &[],
+            vscode: None,
+            maximized: None,
+            send_mode: SendMode::Queue,
+            send_on_enter: false,
+            break_all: true,
+            ide_context: None,
+            focused: false,
+        };
+        let sid = member.session.id;
+        let now = member.session.created_at;
+        let multi = MultiSession {
+            id: xade_core::MultiSessionId::new(),
+            workspace_id: member.session.workspace_id,
+            title: "t".into(),
+            preview_snippet: String::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let mut vm = MultiSessionVm::new(multi, "/tmp".into(), vec![sid], Vec::new());
+        if tab != MultiTab::Team {
+            vm.active_tab = MultiTab::Member(sid);
+        }
+        let mut members = HashMap::from([(sid, member)]);
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(700.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            ctx.run_ui(input(), |ui| {
+                show(ui, &mut vm, &mut members, &env, false);
+            })
+            .drop_without_applying_deltas();
+        }
+        let mut out = ctx.run_ui(input(), |ui| {
+            show(ui, &mut vm, &mut members, &env, false);
+        });
+        out.textures_delta.clear();
+        fn walk(s: &egui::Shape, t: &mut Vec<(String, egui::Rect)>) {
+            match s {
+                egui::Shape::Text(x) => {
+                    t.push((x.galley.text().to_string(), s.visual_bounding_rect()))
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, t)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        out.shapes.iter().for_each(|c| walk(&c.shape, &mut texts));
+        texts
+    }
+
+    #[test]
+    fn only_a_member_tab_shows_usage_and_the_expired_cache_note() {
+        let member = || {
+            let mut m = crate::composer::test_support::vm(String::new());
+            m.session.agent_handle = Some("opus-1".into());
+            m.session.updated_at -= time::Duration::hours(2);
+            m.session.usage.context_tokens_used = 42_000;
+            m.session.usage.input_tokens = 1_200;
+            m
+        };
+        let find = |texts: &[(String, egui::Rect)], s: &str| {
+            texts.iter().find(|(t, _)| t.contains(s)).map(|(_, r)| *r)
+        };
+
+        let texts = painted(MultiTab::Member(SessionId::new()), member());
+        assert!(find(&texts, "Cache expired").is_some(), "{texts:?}");
+        let stats = find(&texts, "in 1.2k").unwrap();
+        let to = find(&texts, "To:").unwrap();
+        assert!(
+            stats.y_range().intersects(to.y_range()) && stats.left() > to.right(),
+            "stats sit right of the target pills: {stats:?} {to:?}"
+        );
+
+        let texts = painted(MultiTab::Team, member());
+        assert!(find(&texts, "Cache expired").is_none(), "{texts:?}");
+        assert!(find(&texts, "in 1.2k").is_none(), "{texts:?}");
     }
 }

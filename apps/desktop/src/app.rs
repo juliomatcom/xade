@@ -2576,6 +2576,9 @@ impl App {
                 if let Some(vm) = self.sessions.get_mut(&id) {
                     // Only a new prompt jumps to the end; replies follow `stick_to_bottom`.
                     vm.scroll_to_end |= msg.role == Role::User;
+                    if msg.role == Role::User {
+                        mark_sent(vm);
+                    }
                     vm.messages.push(msg);
                     vm.error = None;
                 }
@@ -2993,14 +2996,19 @@ pub(crate) fn new_message(
     }
 }
 
+/// A prompt went out with the current model and effort, so changing them is no longer pending.
+fn mark_sent(vm: &mut SessionVm) {
+    vm.sent_model.clone_from(&vm.session.model_id);
+    vm.sent_effort = vm.session.effort;
+}
+
 /// Appends the user's prompt to the local transcript.
 pub fn push_user_message(vm: &mut SessionVm, text: String, delivery: Option<Delivery>) {
     // The runtime titles the stored row the same way; this keeps the window in step.
     if vm.session.title.is_empty() {
         vm.session.title = xade_core::Session::derive_title(&text);
     }
-    vm.sent_model.clone_from(&vm.session.model_id);
-    vm.sent_effort = vm.session.effort;
+    mark_sent(vm);
     let mut m = new_message(vm, Role::User, text, None);
     m.tool_name = delivery.map(|d| d.tag().to_string());
     vm.messages.push(m);

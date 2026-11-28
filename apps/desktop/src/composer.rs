@@ -10,6 +10,7 @@ pub(super) mod test_support;
 
 pub(crate) use controls::effort_choices;
 pub use mention_popup::{append_mentions, insert_mentions};
+pub(crate) use meters::session_stats;
 pub use notes::set_attach_note;
 
 use egui::RichText;
@@ -86,24 +87,13 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
             note_frame(ui, text);
         }
     }
-    if let Some(text) = settings_note(vm, env) {
-        note_frame(ui, &text);
-    }
     let agents = running_subagents(vm);
     if agents == 0 {
         vm.view_subagents = false;
     } else if subagent_badge(ui, agents, vm.view_subagents) {
         vm.view_subagents = !vm.view_subagents;
     }
-    if idle {
-        if let Some(text) = send_note(
-            vm.session.usage.context_tokens_used,
-            last_activity(vm),
-            time::OffsetDateTime::now_utc(),
-        ) {
-            note_frame(ui, &text);
-        }
-    }
+    cost_notes(ui, vm, env);
     if std::mem::take(&mut vm.focus_input) {
         let ctx = ui.ctx();
         let mut state = egui::TextEdit::load_state(ctx, input_id).unwrap_or_default();
@@ -227,6 +217,24 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
     let box_width = input_box.response.rect.width();
     out.attach = controls_row(ui, box_width, |ui| controls(ui, vm, env));
     out
+}
+
+/// Warns above the input when the next message resends the whole context at full price: the
+/// model or effort changed, or the prompt cache of an idle session expired.
+pub(crate) fn cost_notes(ui: &mut egui::Ui, vm: &SessionVm, env: &Env) {
+    if let Some(text) = settings_note(vm, env) {
+        note_frame(ui, &text);
+    }
+    if vm.status != SessionStatus::Idle {
+        return;
+    }
+    if let Some(text) = send_note(
+        vm.session.usage.context_tokens_used,
+        last_activity(vm),
+        time::OffsetDateTime::now_utc(),
+    ) {
+        note_frame(ui, &text);
+    }
 }
 
 /// The row under the input box, inset from the box's sides rather than reaching the panel edge.
