@@ -5057,6 +5057,7 @@ dependencies = [
  "xade-claude",
  "xade-codex",
  "xade-core",
+ "xade-opencode",
  "xade-runtime",
  "xade-store",
 ]
@@ -5143,6 +5144,7 @@ dependencies = [
  "xade-claude",
  "xade-codex",
  "xade-core",
+ "xade-opencode",
  "xade-store",
 ]
 

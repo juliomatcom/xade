@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::time::timeout;
-use xade_core::{Effort, ProviderEvent, SessionCommand, SessionHandle, SpawnConfig};
+use xade_core::{AgentProvider, Effort, ProviderEvent, SessionCommand, SessionHandle, SpawnConfig};
 use xade_opencode::OpenCodeProvider;
 
 const MODEL: &str = "opencode-go/glm-5.3-flash";

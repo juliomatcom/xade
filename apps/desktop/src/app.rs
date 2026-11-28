@@ -3241,6 +3241,14 @@ impl StubProvider {
         Self::new(ProviderId::Codex, "Codex", &["gpt-6-luna"])
     }
 
+    pub(crate) fn opencode() -> Self {
+        Self::new(
+            ProviderId::OpenCode,
+            "OpenCode",
+            &["opencode-go/glm-5.3-flash"],
+        )
+    }
+
     fn new(id: ProviderId, name: &'static str, models: &[&str]) -> Self {
         let models = models
             .iter()
@@ -4408,6 +4416,46 @@ mod tests {
         let (p, model, _, _) = created(&rt, &mut app);
         assert_eq!(p, codex);
         assert_eq!(model, "gpt-6-luna");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn four_providers_hide_and_select_opencode_independently() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        app.providers.push(Arc::new(StubProvider::codex()));
+        app.providers.push(Arc::new(StubProvider::opencode()));
+        let (claude, agy, codex, opencode) = (
+            ProviderId::Claude,
+            ProviderId::Antigravity,
+            ProviderId::Codex,
+            ProviderId::OpenCode,
+        );
+        let all = vec![claude, agy, codex, opencode];
+        assert_eq!(app.visible_providers(), all);
+        assert_eq!(app.selectable_providers(), all);
+
+        fail(&mut app, opencode, ProviderError::NotInstalled);
+        assert_eq!(app.visible_providers(), vec![claude, agy, codex]);
+        assert_eq!(app.selectable_providers(), vec![claude, agy, codex]);
+        app.home.preflight.insert(opencode, Ok(()));
+
+        let ws = WorkspaceId::new();
+        app.home.workspaces = vec![Workspace {
+            id: ws,
+            root_path: dir.clone(),
+            display_name: "w".into(),
+            last_opened_at: OffsetDateTime::now_utc(),
+            is_open: true,
+        }];
+        app.home.scope = Some(ws);
+        app.writer
+            .send(WriteOp::UpsertWorkspace(app.home.workspaces[0].clone()))
+            .unwrap();
+        app.home.provider_pick = Some(opencode);
+        let (p, model, _, _) = created(&rt, &mut app);
+        assert_eq!(p, opencode);
+        assert_eq!(model, "opencode-go/glm-5.3-flash");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -367,11 +367,11 @@ fn provider_dropdown(app: &mut App, ui: &mut egui::Ui) {
     }
 }
 
-/// Label colour of a provider on cards; Antigravity and Codex have no theme colour of their own.
+/// Label colour of a provider on cards; only Claude has a theme colour of its own.
 fn provider_color(id: ProviderId) -> egui::Color32 {
     match id {
         ProviderId::Claude => theme::claude(),
-        ProviderId::Antigravity | ProviderId::Codex => theme::text_muted(),
+        ProviderId::Antigravity | ProviderId::Codex | ProviderId::OpenCode => theme::text_muted(),
     }
 }
 

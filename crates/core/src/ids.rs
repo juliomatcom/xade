@@ -52,4 +52,5 @@ pub enum ProviderId {
     Claude,
     Antigravity,
     Codex,
+    OpenCode,
 }

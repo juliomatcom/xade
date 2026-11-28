@@ -74,6 +74,7 @@ impl AgentProvider for DemoProvider {
             ProviderId::Claude => "Claude",
             ProviderId::Antigravity => "Antigravity",
             ProviderId::Codex => "Codex",
+            ProviderId::OpenCode => "OpenCode",
         }
     }
     fn models(&self) -> Vec<ModelOption> {
@@ -85,6 +86,8 @@ impl AgentProvider for DemoProvider {
             ],
             ProviderId::Antigravity => vec![model(NEON, "Gemini 4 Neon")],
             ProviderId::Codex => vec![model(SOL, "GPT-6.2-Sol"), model("gpt-6-luna", "GPT-6-Luna")],
+            // Not part of the demo story.
+            ProviderId::OpenCode => Vec::new(),
         }
     }
     fn default_model(&self) -> String {
@@ -101,8 +104,8 @@ impl AgentProvider for DemoProvider {
     }
     fn quota(&self) -> Result<Vec<QuotaGroup>, ProviderError> {
         Ok(match self.id {
-            // Claude reports quota in its event stream.
-            ProviderId::Claude => Vec::new(),
+            // Claude reports quota in its event stream; OpenCode reports none.
+            ProviderId::Claude | ProviderId::OpenCode => Vec::new(),
             ProviderId::Codex => vec![QuotaGroup {
                 name: String::new(),
                 windows: vec![

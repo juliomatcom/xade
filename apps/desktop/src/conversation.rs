@@ -571,11 +571,12 @@ const OPENAI_SYMBOL: &[u8] = include_bytes!("../../../assets/openai-symbol.png")
 pub(crate) fn symbol_tint(provider: ProviderId) -> egui::Color32 {
     match provider {
         ProviderId::Codex => theme::text(),
-        ProviderId::Claude | ProviderId::Antigravity => egui::Color32::WHITE,
+        ProviderId::Claude | ProviderId::Antigravity | ProviderId::OpenCode => egui::Color32::WHITE,
     }
 }
 
-/// The logo of the company behind a provider, for window headers and the top bar.
+/// The logo of the company behind a provider, for window headers and the top bar. `None` for a
+/// provider without one.
 pub(crate) fn company_symbol(
     ctx: &egui::Context,
     provider: ProviderId,
@@ -584,6 +585,7 @@ pub(crate) fn company_symbol(
         ProviderId::Claude => ("anthropic_symbol", ANTHROPIC_SYMBOL),
         ProviderId::Antigravity => ("google_symbol", GOOGLE_SYMBOL),
         ProviderId::Codex => ("openai_symbol", OPENAI_SYMBOL),
+        ProviderId::OpenCode => return None,
     };
     symbol(ctx, name, png)
 }
@@ -594,6 +596,7 @@ pub(crate) fn cli_symbol(ctx: &egui::Context, provider: ProviderId) -> Option<eg
         ProviderId::Claude => ("claude_code_symbol", CLAUDE_CODE_SYMBOL),
         ProviderId::Antigravity => ("antigravity_symbol", ANTIGRAVITY_SYMBOL),
         ProviderId::Codex => ("openai_symbol", OPENAI_SYMBOL),
+        ProviderId::OpenCode => return None,
     };
     symbol(ctx, name, png)
 }
@@ -639,6 +642,14 @@ mod symbol_tests {
         }
         // Claude and Antigravity have distinct company + CLI marks; Codex shares the OpenAI mark.
         assert_eq!(ids.len(), 5);
+        // OpenCode has no mark yet: its places stay empty.
+        for load in [super::company_symbol, super::cli_symbol] {
+            assert!(load(&ctx, ProviderId::OpenCode).is_none());
+        }
+        assert_eq!(
+            super::symbol_tint(ProviderId::OpenCode),
+            egui::Color32::WHITE
+        );
         assert_eq!(super::symbol_tint(ProviderId::Codex), crate::theme::text());
         assert_eq!(super::symbol_tint(ProviderId::Claude), egui::Color32::WHITE);
     }

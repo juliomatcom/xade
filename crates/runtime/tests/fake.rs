@@ -35,6 +35,8 @@ struct FakeProvider {
     spawn_panics: AtomicBool,
     /// What `import_sessions` returns.
     import: Mutex<Vec<ImportedSession>>,
+    /// What `respawn_on_auto_change` answers.
+    respawns_on_auto: AtomicBool,
 }
 
 #[derive(Clone, Copy)]
@@ -86,6 +88,7 @@ impl FakeProvider {
             delete_calls: AtomicUsize::new(0),
             spawn_panics: AtomicBool::new(false),
             import: Mutex::default(),
+            respawns_on_auto: AtomicBool::new(false),
         }
     }
 
@@ -115,6 +118,9 @@ impl AgentProvider for FakeProvider {
     }
     fn import_sessions(&self) -> Vec<ImportedSession> {
         self.import.lock().unwrap().clone()
+    }
+    fn respawn_on_auto_change(&self) -> bool {
+        self.respawns_on_auto.load(Ordering::SeqCst)
     }
     fn delete_session(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         self.delete_calls.fetch_add(1, Ordering::SeqCst);
@@ -1583,4 +1589,140 @@ async fn an_imported_session_forks_into_an_xade_session() {
     let t = std::fs::read_to_string(transcript_file(&h, new)).unwrap();
     assert!(t.contains("[user] an old task"));
     assert!(agy.prompts()[0].starts_with(&snapshot_line(&h, new)));
+}
+
+// ---- Auto changes on a provider whose process is built for one mode ----------------------------
+
+/// A session (Auto on) of a provider that answers `respawns` to `respawn_on_auto_change`.
+async fn auto_session(
+    dir: &std::path::Path,
+    respawns: bool,
+) -> (common::Harness, Arc<FakeProvider>, SessionId) {
+    let provider = Arc::new(FakeProvider::default());
+    provider.respawns_on_auto.store(respawns, Ordering::SeqCst);
+    let mut h = common::start(dir, provider.clone()).await;
+    let id = create(&mut h, ProviderId::Claude).await;
+    (h, provider, id)
+}
+
+fn set_auto(h: &Harness, id: SessionId, on: bool) {
+    h.tx.send(ManagerCmd::SetAutoMode { session_id: id, on })
+        .unwrap();
+}
+
+/// `(auto_mode, resume)` of every spawn so far, once there are at least `n`.
+async fn spawned(provider: &FakeProvider, n: usize) -> Vec<(bool, Option<String>)> {
+    for _ in 0..100 {
+        if provider.spawns.lock().unwrap().len() >= n {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    // Long enough for one more that should not happen.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    provider
+        .spawns
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|c| (c.auto_mode, c.resume.clone()))
+        .collect()
+}
+
+/// The id of the session the first spawn starts.
+fn resumed() -> Option<String> {
+    Some("fake-session".into())
+}
+
+/// The id of the session started by the child that replaced it before any prompt.
+fn resumed_second() -> Option<String> {
+    Some("fake-session-1".into())
+}
+
+#[tokio::test]
+async fn an_idle_auto_change_respawns_with_the_new_mode_and_resumes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, provider, id) = auto_session(dir.path(), true).await;
+    // Before the first prompt there is nothing to resume.
+    set_auto(&h, id, false);
+    assert_eq!(spawned(&provider, 2).await, [(true, None), (false, None)]);
+    send(&mut h, id, "hello").await;
+    set_auto(&h, id, true);
+    assert_eq!(spawned(&provider, 3).await[2], (true, resumed_second()));
+    // Setting the mode it already has changes nothing.
+    set_auto(&h, id, true);
+    assert_eq!(spawned(&provider, 3).await.len(), 3);
+    send(&mut h, id, "again").await;
+    assert_eq!(provider.prompts(), ["hello", "again"]);
+    xade_runtime::flush(&h.writer).await;
+    assert!(h.reader.load_session(id).await.unwrap().0.auto_mode);
+}
+
+#[tokio::test]
+async fn a_mid_turn_auto_change_respawns_only_after_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, provider, id) = auto_session(dir.path(), true).await;
+    send(&mut h, id, "hello").await;
+    *provider.next_turn.lock().unwrap() = Some(Turn::Hold);
+    h.tx.send(ManagerCmd::Send {
+        session_id: id,
+        text: "long".into(),
+        delivery: None,
+        context: None,
+    })
+    .unwrap();
+    h.until_status(5, SessionStatus::Streaming).await;
+    set_auto(&h, id, false);
+    assert_eq!(spawned(&provider, 1).await.len(), 1, "the turn goes on");
+    h.tx.send(ManagerCmd::Interrupt { session_id: id }).unwrap();
+    h.until_status(5, SessionStatus::Idle).await;
+    // Done by the time the session reads as idle.
+    let spawns = provider.spawns.lock().unwrap().len();
+    assert_eq!(spawns, 2);
+    assert_eq!(spawned(&provider, 2).await[1], (false, resumed()));
+}
+
+#[tokio::test]
+async fn approve_and_enable_auto_answers_first_and_respawns_after_the_turn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, provider, id) = auto_session(dir.path(), true).await;
+    set_auto(&h, id, false);
+    spawned(&provider, 2).await;
+    *provider.next_turn.lock().unwrap() = Some(Turn::AskPermission);
+    h.tx.send(ManagerCmd::Send {
+        session_id: id,
+        text: "run it".into(),
+        delivery: None,
+        context: None,
+    })
+    .unwrap();
+    h.until_status(5, SessionStatus::NeedsApproval).await;
+    h.tx.send(ManagerCmd::RespondPermission {
+        session_id: id,
+        request_id: "r1".into(),
+        allow: true,
+        enable_auto: true,
+    })
+    .unwrap();
+    h.until_status(5, SessionStatus::Idle).await;
+    assert_eq!(
+        *provider.responses.lock().unwrap(),
+        [("r1".to_string(), true)],
+        "the child that asked got the answer"
+    );
+    let spawns = spawned(&provider, 3).await;
+    assert_eq!(spawns.len(), 3);
+    assert_eq!(spawns[2], (true, resumed_second()));
+}
+
+#[tokio::test]
+async fn other_providers_take_an_auto_change_without_a_respawn() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut h, provider, id) = auto_session(dir.path(), false).await;
+    send(&mut h, id, "hello").await;
+    set_auto(&h, id, false);
+    set_auto(&h, id, true);
+    assert_eq!(spawned(&provider, 1).await.len(), 1);
+    send(&mut h, id, "again").await;
+    assert_eq!(provider.spawns.lock().unwrap().len(), 1);
 }

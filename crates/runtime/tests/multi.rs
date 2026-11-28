@@ -82,6 +82,7 @@ impl AgentProvider for SharedProvider {
             ProviderId::Claude => "Claude",
             ProviderId::Antigravity => "Antigravity",
             ProviderId::Codex => "Codex",
+            ProviderId::OpenCode => "OpenCode",
         }
     }
     fn models(&self) -> Vec<xade_core::ModelOption> {

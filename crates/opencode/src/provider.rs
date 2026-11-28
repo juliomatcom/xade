@@ -1,11 +1,14 @@
-//! `OpenCodeProvider`: binary resolution, model catalog, preflight, spawn, delete.
+//! `OpenCodeProvider`: binary resolution, model catalog, preflight, spawn, delete. It reads no
+//! OpenCode account or credential, so it has no account label.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{OnceLock, RwLock, RwLockReadGuard};
 use std::time::Duration;
 
-use xade_core::{Effort, ModelOption, ProviderError, SessionHandle, SpawnConfig};
+use xade_core::{
+    AgentProvider, Effort, ModelOption, ProviderError, ProviderId, SessionHandle, SpawnConfig,
+};
 
 use crate::models::{
     default_model, mentions_auth, parse_models, run_models, run_opencode, Fetch, EFFORT_LEVELS,
@@ -78,26 +81,31 @@ impl OpenCodeProvider {
         }
         self.binary()
     }
+}
 
-    pub fn models(&self) -> Vec<ModelOption> {
+impl AgentProvider for OpenCodeProvider {
+    fn id(&self) -> ProviderId {
+        ProviderId::OpenCode
+    }
+
+    fn display_name(&self) -> &'static str {
+        "OpenCode"
+    }
+
+    fn models(&self) -> Vec<ModelOption> {
         self.catalog().clone()
     }
 
-    pub fn default_model(&self) -> String {
+    fn default_model(&self) -> String {
         default_model(&self.catalog())
     }
 
-    pub fn effort_levels(&self) -> Vec<Effort> {
+    fn effort_levels(&self) -> Vec<Effort> {
         EFFORT_LEVELS.to_vec()
     }
 
-    /// Always `None`: Xade reads no OpenCode account or credential.
-    pub fn account_label(&self) -> Option<String> {
-        None
-    }
-
     /// Lists the models, which also fills the catalog. Blocking.
-    pub fn preflight(&self) -> Result<(), ProviderError> {
+    fn preflight(&self) -> Result<(), ProviderError> {
         let binary = self.find_binary().ok_or(ProviderError::NotInstalled)?;
         match run_models(binary, MODELS_TIMEOUT) {
             Fetch::SpawnFailed(e) => Err(ProviderError::Spawn(e)),
@@ -130,14 +138,14 @@ impl OpenCodeProvider {
     }
 
     /// Starts a session process. Must be called inside a tokio runtime.
-    pub fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
+    fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError> {
         let binary = self.binary().ok_or(ProviderError::NotInstalled)?;
         spawn_session(binary, cfg, self.quiet)
     }
 
     /// Removes OpenCode's copy of a session, its subagent sessions included. Already gone is Ok.
     /// Blocking.
-    pub fn delete_session(&self, provider_session_id: &str) -> Result<(), ProviderError> {
+    fn delete_session(&self, provider_session_id: &str) -> Result<(), ProviderError> {
         let id = provider_session_id;
         let plain = !id.is_empty()
             && id.len() <= 128
@@ -176,6 +184,11 @@ impl OpenCodeProvider {
                 )))
             }
         }
+    }
+
+    /// Auto OFF is permission rules in the process's environment.
+    fn respawn_on_auto_change(&self) -> bool {
+        true
     }
 }
 
@@ -276,6 +289,8 @@ mod tests {
         assert_eq!(p.default_model(), "");
         assert!(p.models().is_empty());
         assert_eq!(p.account_label(), None);
+        assert_eq!(p.id(), ProviderId::OpenCode);
+        assert!(p.respawn_on_auto_change());
         assert_eq!(p.delete_session("ses_1"), Err(ProviderError::NotInstalled));
         assert!(matches!(
             p.spawn(SpawnConfig {

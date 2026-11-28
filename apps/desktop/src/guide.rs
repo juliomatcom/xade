@@ -72,6 +72,12 @@ fn setup(id: ProviderId) -> Setup {
             sign_in: "agy",
             docs: "https://antigravity.google/docs/install?tab=cli",
         },
+        ProviderId::OpenCode => Setup {
+            name: "OpenCode",
+            install: "curl -fsSL https://opencode.ai/v2/install | bash",
+            sign_in: "opencode auth login",
+            docs: "https://opencode.ai/docs",
+        },
     }
 }
 
@@ -309,6 +315,18 @@ mod tests {
 
     fn row(id: ProviderId, state: State) -> Row {
         Row { id, state }
+    }
+
+    #[test]
+    fn opencode_shows_its_own_install_and_sign_in_commands() {
+        let texts = painted(&[row(ProviderId::OpenCode, State::NotInstalled)]);
+        for want in [
+            "OpenCode",
+            "curl -fsSL https://opencode.ai/v2/install | bash",
+            "opencode auth login",
+        ] {
+            assert!(texts.iter().any(|t| t == want), "{want}: {texts:?}");
+        }
     }
 
     #[test]

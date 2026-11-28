@@ -8,7 +8,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tokio::time::timeout;
-use xade_core::{Effort, ProviderError, ProviderEvent, SessionCommand, SessionHandle, SpawnConfig};
+use xade_core::{
+    AgentProvider, Effort, ProviderError, ProviderEvent, SessionCommand, SessionHandle, SpawnConfig,
+};
 use xade_opencode::OpenCodeProvider;
 
 const WAIT: Duration = Duration::from_secs(20);
