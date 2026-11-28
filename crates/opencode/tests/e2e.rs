@@ -579,14 +579,16 @@ async fn a_background_subagents_report_is_a_turn_that_ends() {
     e2e!();
     let c = Ctx::new().await;
     let mut h = c.spawn(MODEL, true, None);
-    c.turn(
-        &mut h,
-        "Start a subagent (agent 'general') in the background whose task is to run the shell \
-         command `sleep 8; echo bgmark`. Do NOT wait for it: immediately reply with the single \
-         word started and end your turn.",
-    )
-    .await;
-    let mut evs = Vec::new();
+    // The command prints `bgmark` without the prompt ever spelling it.
+    let mut evs = c
+        .turn(
+            &mut h,
+            "Start a subagent (agent 'general') in the background whose task is to run the \
+             shell command `sleep 8; printf 'bg%s' mark`. Do NOT wait for it: immediately \
+             reply with the single word started and end your turn.",
+        )
+        .await;
+    // The report usually follows as a turn of its own; a model that waited has already given it.
     while !said(&evs).contains("bgmark") {
         evs.extend(c.until(&mut h, is_turn).await);
     }

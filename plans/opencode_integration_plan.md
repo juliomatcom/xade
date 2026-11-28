@@ -5,6 +5,8 @@ Branch: `feat/opencode-provider` (shared worktree; one branch for everything). I
 Goal: OpenCode is a fourth provider, additive, zero breaking changes: Claude, Antigravity, and Codex behave identically to today, existing DBs open unchanged.
 Spirit: pragmatic and simple. Mirror `crates/antigravity` (ACP over JSON-RPC 2.0) + `crates/codex` (Claude-shaped tool mapping, diff modal support, and steer fallback); rough edges in §8 are accepted for v1.
 
+Status: implemented (2026-11-28); P1–P4 on `feat/opencode-provider`.
+
 ---
 
 ## 0. TL;DR of decisions
@@ -19,7 +21,7 @@ Spirit: pragmatic and simple. Mirror `crates/antigravity` (ACP over JSON-RPC 2.0
 | D6 | Mid-turn steer uses **`_session/steering`** (not a second `session/prompt`). On `outcome:"promptRequired"` or RPC error, fall back to a fresh `session/prompt` once idle. | A second `session/prompt` while active fails with `-32603 "Session already has an active ACP prompt"`. `_session/steering` injects into the running turn (`outcome:"injected"`) and resolves with one `session/prompt` response. |
 | D7 | **Auto OFF** sets `OPENCODE_CONFIG_CONTENT` with **only `ask` rules** for `shell`, `edit`, `write`, `patch`, `webfetch`, `websearch`, `execute`, `generate_image` (resource `*`) in both top-level `permissions` and `agents.{build,explore,general}.permissions` (appending to any user-set `OPENCODE_CONFIG_CONTENT`; invalid JSON fails the spawn). **Auto ON** leaves the env untouched and auto-answers `session/request_permission` with `allow_once`. | OpenCode defaults to `* * allow` (only `.env` reads ask), so leaving env untouched on Auto OFF gates nothing. Rules are last-match-wins (built-in → global → project → `OPENCODE_CONFIG_CONTENT`), and project agent-level rules otherwise override top-level rules. Because `OPENCODE_CONFIG_CONTENT` lands last, with Auto OFF any user `deny` rule for a guarded action becomes an `ask` prompt instead of a silent block; therefore a process spawned with Auto OFF never auto-allows on `SetAutoMode(true)` (toggling Auto ON takes effect after the idle respawn starts a clean process where user `deny` rules apply again). Leaving `read` and `external_directory` out of the injected `ask` list keeps read-only ops and fork snapshots (which read `/tmp/xade-forks-<uid>`) working cleanly. |
 | D8 | `preflight()` runs `opencode models --standalone` (15 s timeout, ~0.4 s live). `delete_session(id)` runs `opencode session delete --standalone <id>` (10 s timeout, ~0.2 s live). | Without `--standalone`, both commands try to contact/start the managed background daemon (verified: hangs 20 s then fails in isolated HOME, or leaves a daemon outliving Xade). With `--standalone`, both are fast, isolated, and leave no daemon. |
-| D9 | Defer history import, running-sessions polling, quota bar, and custom logo asset out of v1 (`company_symbol`/`cli_symbol` return `None`). | Keeps v1 small and focused; every UI call site already handles `Option<TextureHandle>` (`None`). |
+| D9 | Xade ships its own neutral monochrome mark for OpenCode (`assets/opencode-symbol.{svg,png}`); only history import, running-sessions polling and quota are deferred out of v1. | Xade's own neutral glyph is not OpenCode's trademark; import, running-session polling and quota keep v1 small. |
 
 ---
 
@@ -344,7 +346,7 @@ Workflow per phase:
 8. `crates/runtime/src/multi.rs`: `team_preamble` label `"OpenCode"`.
 9. `apps/desktop/Cargo.toml`: add `xade-opencode = { version = "0.6.0", path = "../../crates/opencode" }`.
 10. `apps/desktop/src/lib.rs`: register `Arc::new(OpenCodeProvider::new())` in `backend()` after Codex (startup still waits only for Claude; OpenCode preflights in background).
-11. `apps/desktop/src/conversation.rs`: `symbol_tint` → `Color32::WHITE`; `company_symbol` and `cli_symbol` return `None` for `ProviderId::OpenCode`. Update `symbol_tests`.
+11. `apps/desktop/src/conversation.rs`: `symbol_tint` is `theme::text()`; `company_symbol` and `cli_symbol` return the neutral mark for `ProviderId::OpenCode`. Update `symbol_tests`.
 12. `apps/desktop/src/home.rs`: `provider_color` → `theme::text_muted()`.
 13. `apps/desktop/src/widgets/delete_modal.rs`: `history` → `"OpenCode history"` + test.
 14. `apps/desktop/src/guide.rs`: add `ProviderId::OpenCode` setup row (`name: "OpenCode"`, `install: "curl -fsSL https://opencode.ai/v2/install | bash"`, `sign_in: "opencode auth login"`, `docs: "https://opencode.ai/docs"`).
@@ -408,7 +410,6 @@ Workflow per phase:
 - Importing past OpenCode-native sessions (`session/list` + `session/load` / `opencode session export`).
 - Running-sessions detection (`running_sessions()`).
 - Quota meter (`quota()`).
-- Custom OpenCode SVG/PNG logo asset in `assets/`.
 - Live model/effort change without respawning the ACP process.
 - Exposing OpenCode's `plan` mode (v1 stays on `build`).
 - Gating MCP tools (`<server>_<tool>`) under Auto OFF (using `*_*` would also match `external_directory` and break fork snapshots reading `/tmp/xade-forks-<uid>`).
