@@ -1419,6 +1419,10 @@ mod tests {
             },
         ];
         step(&mut v, wheel, "filler row 39");
+        // Let egui's wheel smoother finish before the user sends.
+        for _ in 0..30 {
+            step(&mut v, vec![], "filler row 39");
+        }
         assert!(!visible(step(&mut v, vec![], "filler row 39")));
 
         v.messages.push(msg(Role::User, "zzsent", None, None));

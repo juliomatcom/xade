@@ -1371,8 +1371,9 @@ mod tests {
         let opus_id = opus.session.id;
         let sonnet_id = sonnet.session.id;
         let now = opus.session.created_at;
+        let multi_id = xade_core::MultiSessionId::new();
         let multi = MultiSession {
-            id: xade_core::MultiSessionId::new(),
+            id: multi_id,
             workspace_id: opus.session.workspace_id,
             title: "t".into(),
             preview_snippet: String::new(),
@@ -1381,7 +1382,7 @@ mod tests {
         };
         let team_msg = |seq: i64, kind: TeamMessageKind, text: &str| TeamMessage {
             id: uuid::Uuid::new_v4(),
-            multi_session_id: multi.id,
+            multi_session_id: multi_id,
             seq,
             kind,
             content_text: text.into(),
@@ -1479,7 +1480,16 @@ mod tests {
             },
         ];
         step(&mut vm, &mut members, wheel, "zzall_prompt");
-        assert!(!visible(step(&mut vm, &mut members, vec![], "zzall_prompt")));
+        // Let egui's wheel smoother finish before the broadcast and next send.
+        for _ in 0..30 {
+            step(&mut vm, &mut members, vec![], "zzall_prompt");
+        }
+        assert!(!visible(step(
+            &mut vm,
+            &mut members,
+            vec![],
+            "zzall_prompt"
+        )));
         vm.team_messages.push(team_msg(
             31,
             TeamMessageKind::Broadcast {
