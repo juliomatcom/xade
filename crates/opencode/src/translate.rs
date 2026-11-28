@@ -100,15 +100,19 @@ impl Tool {
 
     fn path(&self) -> &str {
         self.arg("path")
+            .or_else(|| self.arg("filePath"))
             .filter(|p| !p.is_empty())
             .unwrap_or(&self.location)
     }
 
     fn mapped(&self) -> Mapped {
         let (name, input) = match self.name.as_str() {
-            "shell" => (
+            "shell" | "bash" => (
                 "Bash",
-                json!({"command": self.arg("command").unwrap_or(&self.title), "description": ""}),
+                json!({
+                    "command": self.arg("command").or_else(|| self.arg("cmd")).unwrap_or(&self.title),
+                    "description": "",
+                }),
             ),
             "read" => ("Read", json!({"file_path": self.path()})),
             "write" => (
@@ -119,11 +123,11 @@ impl Tool {
                 "Edit",
                 json!({
                     "file_path": self.path(),
-                    "old_string": self.arg("oldString").unwrap_or_default(),
-                    "new_string": self.arg("newString").unwrap_or_default(),
+                    "old_string": self.arg("oldString").or_else(|| self.arg("old_string")).unwrap_or_default(),
+                    "new_string": self.arg("newString").or_else(|| self.arg("new_string")).unwrap_or_default(),
                 }),
             ),
-            "patch" => self.mapped_patch(),
+            "patch" | "apply_patch" => self.mapped_patch(),
             other => {
                 let name = [other, &self.title]
                     .into_iter()
@@ -155,10 +159,11 @@ impl Tool {
             return ("Write", json!({"file_path": path, "content": content}));
         }
         let path = files.first().map_or("", |f| f.path.as_str());
-        (
-            "Edit",
-            json!({"file_path": path, "structuredPatch": patch::structured_hunks(&files)}),
-        )
+        let mut hunks = patch::structured_hunks(&files);
+        if hunks.is_empty() && !text.is_empty() {
+            hunks.push(patch::raw_hunk(text));
+        }
+        ("Edit", json!({"file_path": path, "structuredPatch": hunks}))
     }
 
     /// What the diff modal needs besides the input once a call succeeded. Only a `Write` needs it:
@@ -232,9 +237,14 @@ impl Translator {
         let mut out = Vec::new();
         self.flush(&mut out);
         let call = params.get("toolCall").unwrap_or(&Value::Null);
-        // The request is what gets approved, so it is what is shown.
+        // The request is what gets approved, so it is what is shown. When OpenCode sends a
+        // permission that is not tied to any tool call (unknown id and no `name`), emit only the
+        // request so no orphan `ToolUse` is left without a result.
         let (tool_use_id, mapped) = match non_empty(call, "toolCallId") {
-            Some(acp_id) => {
+            Some(acp_id)
+                if self.tools.get(acp_id).is_some_and(|t| !t.finished)
+                    || non_empty(call, "name").is_some() =>
+            {
                 let tool = self.entry(acp_id);
                 if tool.finished {
                     tool.reuse(acp_id);
@@ -244,7 +254,7 @@ impl Translator {
                 self.announce(acp_id, &mut out);
                 shown
             }
-            None => {
+            _ => {
                 let mut tool = Tool::default();
                 tool.merge(call);
                 (String::new(), tool.mapped())
@@ -1087,5 +1097,104 @@ mod tests {
             ]
         ));
         assert!(t.flush_text().is_empty());
+    }
+
+    #[test]
+    fn tool_aliases_and_input_fallbacks_map_to_claude_names() {
+        let mut t = Translator::new();
+        let ev = t.on_update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "b1",
+            "name": "bash",
+            "status": "in_progress",
+            "rawInput": {"cmd": "pwd"}
+        }));
+        assert_eq!(
+            ev,
+            vec![ProviderEvent::ToolUse {
+                tool_use_id: "b1".into(),
+                name: "Bash".into(),
+                input_json: json!({"command": "pwd", "description": ""}).to_string(),
+            }]
+        );
+
+        let ev = t.on_update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "r1",
+            "name": "read",
+            "status": "in_progress",
+            "rawInput": {"filePath": "src/lib.rs"}
+        }));
+        assert_eq!(
+            ev,
+            vec![ProviderEvent::ToolUse {
+                tool_use_id: "r1".into(),
+                name: "Read".into(),
+                input_json: json!({"file_path": "src/lib.rs"}).to_string(),
+            }]
+        );
+
+        let ev = t.on_update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "p1",
+            "name": "apply_patch",
+            "status": "in_progress",
+            "rawInput": {"patchText": "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n"}
+        }));
+        assert_eq!(
+            ev,
+            vec![ProviderEvent::ToolUse {
+                tool_use_id: "p1".into(),
+                name: "Write".into(),
+                input_json: json!({"file_path": "a.txt", "content": "hi\n"}).to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn empty_update_patch_falls_back_to_raw_hunk() {
+        let mut t = Translator::new();
+        let patch_text = "*** Begin Patch\n*** Update File: empty.rs\n*** End Patch\n";
+        let ev = t.on_update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "p2",
+            "name": "patch",
+            "status": "in_progress",
+            "rawInput": {"patchText": patch_text}
+        }));
+        let ProviderEvent::ToolUse {
+            name, input_json, ..
+        } = &ev[0]
+        else {
+            panic!("{ev:?}");
+        };
+        assert_eq!(name, "Edit");
+        let v: Value = serde_json::from_str(input_json).expect("json");
+        assert_eq!(v["file_path"], "empty.rs");
+        assert_eq!(v["structuredPatch"].as_array().map(Vec::len), Some(1));
+    }
+
+    #[test]
+    fn permission_without_a_tool_emits_no_orphan_tool_use() {
+        let mut t = Translator::new();
+        let params = json!({
+            "sessionId": "s",
+            "toolCall": {
+                "toolCallId": "perm_evt_1",
+                "title": "external_directory /etc",
+                "status": "pending"
+            },
+            "options": []
+        });
+        let ev = t.on_permission_request("0".into(), &params);
+        assert_eq!(
+            ev,
+            vec![ProviderEvent::PermissionRequest {
+                request_id: "0".into(),
+                tool_use_id: String::new(),
+                tool_name: "external_directory /etc".into(),
+                input_json: "{}".into(),
+            }]
+        );
     }
 }

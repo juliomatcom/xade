@@ -82,13 +82,15 @@ pub fn run_models(binary: &Path, timeout: Duration) -> Fetch {
     run_opencode(binary, &["models", "--standalone"], timeout)
 }
 
-/// Runs `opencode <args>` with stdin closed and a deadline, outside any project folder. The child
-/// leads its own process group so a timeout kills it along with what it started in that group.
-/// Callers pass `--standalone`: without it the command reaches for the user's background server.
+/// Runs `opencode <args>` with stdin closed and a deadline, from `/` (never `/tmp`: OpenCode
+/// executes `.opencode/plugin(s)/*.js` found in ancestors of its cwd, and `/tmp` is world-writable
+/// on shared Linux). The child leads its own process group so a timeout kills it along with what it
+/// started in that group. Callers pass `--standalone`: without it the command reaches for the
+/// user's background server.
 pub fn run_opencode(binary: &Path, args: &[&str], timeout: Duration) -> Fetch {
     let mut child = match Command::new(binary)
         .args(args)
-        .current_dir(std::env::temp_dir())
+        .current_dir("/")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

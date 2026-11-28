@@ -124,7 +124,7 @@ All facts below were verified live against `opencode v2.4.2` (`opencode-go/glm-5
   - `result.outcome == "promptRequired"` (`reason: "noRunningTurn"` when idle, fixture `steer_idle`) or RPC error (and steer was NOT invalidated by `Interrupt`) → if idle, send `session/prompt(text)` now; else push to `queued`.
 
 ### 2.5 Preflight (`opencode models --standalone`)
-- `opencode models --standalone` exits 0 in ~0.4 s, printing one model ID per line (`opencode-go/...`, `opencode/...`, etc.).
+- `opencode models --standalone` runs with `current_dir("/")` (never `/tmp`: OpenCode executes `.opencode/plugin(s)/*.js` in ancestors of cwd, and `/tmp` is world-writable on shared Linux) and exits 0 in ~0.4 s, printing one model ID per line (`opencode-go/...`, `opencode/...`, etc.).
 - Works even with zero auth (returns free `opencode/*` models).
 - Non-zero exit mentioning auth/login/sign-in → `ProviderError::NotLoggedIn`; other non-zero exit or timeout → `ProviderError::Protocol(...)`; empty stdout on exit 0 → `ProviderError::Protocol(...)`.
 - Every `ModelOption` sets `effort_levels: vec![Effort::Low, Effort::Medium, Effort::High, Effort::XHigh, Effort::Max]` (required so Xade's `effort_choices()` shows all levels instead of only `Default`; `process.rs` filters against the live model's `configOptions.effort`).
@@ -232,7 +232,7 @@ crates/opencode/
 
 ### `delete_session(id)` in `provider.rs`
 - Validate `id` against `[A-Za-z0-9_-]{1,128}` and `!id.starts_with('-')`.
-- Spawn `opencode session delete --standalone <id>` with 10 s timeout, stdin null, capturing stdout/stderr.
+- Spawn `opencode session delete --standalone <id>` via `run_opencode` (`current_dir("/")`, never `/tmp`) with 10 s timeout, stdin null, capturing stdout/stderr.
 - Exit 0, OR stderr/stdout containing `"Session not found"` (case-insensitive) → `Ok(())`.
 - Timeout or other error → `Err(ProviderError::Protocol(...))`.
 
