@@ -4,7 +4,7 @@ use egui::RichText;
 use xade_core::{Effort, ModelOption};
 use xade_runtime::ManagerCmd;
 
-use super::meters::{context_donut, usage_text};
+use super::meters::session_stats;
 use crate::app::SessionVm;
 use crate::workspace::Env;
 use crate::{icons, theme};
@@ -115,8 +115,7 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
         };
         let pill = egui::Button::new(RichText::new(text).small().color(fg))
             .fill(fill)
-            .stroke(egui::Stroke::new(1.0, stroke))
-            .corner_radius(3);
+            .stroke(egui::Stroke::new(1.0, stroke));
         if ui.add(pill).clicked() {
             vm.session.auto_mode = !on;
             let _ = env.cmd_tx.send(ManagerCmd::SetAutoMode {
@@ -131,18 +130,7 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
                     .color(theme::warn()),
             );
         }
-        // Session stats take the rest of the row, right-aligned; they are cut with "…" when
-        // narrow (never a second row) and show in full on hover.
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let u = &vm.session.usage;
-            context_donut(ui, u);
-            let stats = usage_text(u);
-            ui.add(
-                egui::Label::new(RichText::new(&stats).small().color(theme::text_muted()))
-                    .truncate(),
-            )
-            .on_hover_text(stats);
-        });
+        session_stats(ui, &vm.session.usage);
         attach
     })
     .inner

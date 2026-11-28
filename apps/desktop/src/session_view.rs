@@ -305,7 +305,6 @@ pub(crate) fn banner(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) {
     egui::Frame::new()
         .fill(theme::bg_raised())
         .stroke(egui::Stroke::new(1.0, theme::warn()))
-        .corner_radius(6)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

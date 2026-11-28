@@ -141,8 +141,6 @@ palette! {
     claude = "#d97757";
 }
 
-const RADIUS: u8 = 3;
-
 /// Applied once at startup; dark only.
 pub fn apply(ctx: &egui::Context) {
     ctx.set_theme(Theme::Dark);
@@ -175,7 +173,6 @@ pub fn refresh(ctx: &egui::Context) {
 
 fn visuals() -> Visuals {
     let mut v = Visuals::dark();
-    let r = CornerRadius::same(RADIUS);
     v.panel_fill = bg_panel();
     v.window_fill = bg_raised();
     v.extreme_bg_color = bg_raised();
@@ -184,8 +181,8 @@ fn visuals() -> Visuals {
     v.weak_text_color = Some(text_muted());
     v.hyperlink_color = accent();
     v.window_stroke = Stroke::new(1.0, border());
-    v.window_corner_radius = CornerRadius::same(8);
-    v.menu_corner_radius = r;
+    v.window_corner_radius = CornerRadius::ZERO;
+    v.menu_corner_radius = CornerRadius::ZERO;
     v.selection.bg_fill = bg_header_focus();
     v.selection.stroke = Stroke::new(1.0, text());
     let w = &mut v.widgets;
@@ -213,7 +210,7 @@ fn visuals() -> Visuals {
         &mut w.active,
         &mut w.open,
     ] {
-        s.corner_radius = r;
+        s.corner_radius = CornerRadius::ZERO;
     }
     v
 }

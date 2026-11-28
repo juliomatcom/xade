@@ -211,7 +211,6 @@ fn card(ui: &mut egui::Ui, row: &Row) {
     egui::Frame::new()
         .fill(theme::bg_raised())
         .stroke(egui::Stroke::new(1.0, theme::border()))
-        .corner_radius(6)
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -225,7 +224,9 @@ fn card(ui: &mut egui::Ui, row: &Row) {
                 }
                 ui.label(RichText::new(setup.name).strong());
                 ui.label(RichText::new(status).small().color(color));
-                ui.hyperlink_to(RichText::new("Docs").small(), setup.docs);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.hyperlink_to(RichText::new("Docs").small(), setup.docs);
+                });
             });
             match &row.state {
                 State::Checking | State::Ready => {}
@@ -255,7 +256,6 @@ fn command(ui: &mut egui::Ui, step: &str, text: &str) {
         );
         egui::Frame::new()
             .fill(theme::bg_terminal())
-            .corner_radius(6)
             .inner_margin(Margin::symmetric(8, 4))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {

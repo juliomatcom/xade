@@ -111,7 +111,6 @@ fn auto_toggle_button(ui: &mut egui::Ui, on: &mut bool) {
     let btn = egui::Button::new(RichText::new(text).small().color(fg))
         .fill(fill)
         .stroke(egui::Stroke::new(1.0, stroke))
-        .corner_radius(3)
         .min_size(egui::vec2(COL_AUTO, ROW_HEIGHT));
     if ui
         .add(btn)
@@ -206,7 +205,6 @@ pub fn show(app: &mut App, ctx: &egui::Context) {
                         egui::Frame::new()
                             .fill(theme::bg_raised())
                             .stroke(egui::Stroke::new(1.0, theme::border()))
-                            .corner_radius(4)
                             .inner_margin(egui::Margin::symmetric(10, 8))
                             .show(ui, |ui| {
                                 ui.set_width(ui.available_width());

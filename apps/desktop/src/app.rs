@@ -72,6 +72,8 @@ pub enum UiMsg {
     OpenWorkspace(WorkspaceId),
     /// One provider's preflight (startup, or its Retry).
     Preflight(ProviderId, Result<(), ProviderError>),
+    /// The store holds no session at all, after the first import.
+    NoSessions,
     /// Provider of the latest Xade session, the default for a new one.
     LastProvider(Option<ProviderId>),
     /// The fork prompts, read off the UI thread; `warning` says why a bundled one is used.
@@ -308,8 +310,10 @@ pub struct App {
     pub tree: FileTree,
     /// The "Get started" window while it is open.
     pub guide: Option<GuideVm>,
-    /// The startup checks have reported and the guide was opened if none passed.
+    /// The startup checks have reported and the guide was opened if none passed or no sessions exist.
     guide_offered: bool,
+    /// The first import of the run finished, so the stored session count is final.
+    first_import_done: bool,
     /// Last quota window per provider and kind, in draw order (session before weekly).
     pub quota: Vec<(ProviderId, QuotaWindow)>,
     /// Quota providers report on request (`AgentProvider::quota`), by provider.
@@ -448,6 +452,7 @@ impl App {
             tree: FileTree::default(),
             guide: None,
             guide_offered: false,
+            first_import_done: false,
             quota: Vec::new(),
             provider_quota: HashMap::new(),
             quota_checked: HashMap::new(),
@@ -552,6 +557,7 @@ impl App {
             tree: FileTree::default(),
             guide: None,
             guide_offered: false,
+            first_import_done: false,
             quota: Vec::new(),
             provider_quota: HashMap::new(),
             quota_checked: HashMap::new(),
@@ -894,9 +900,11 @@ impl App {
         self.home.importing = self.cmd_tx.send(ManagerCmd::Import).is_ok();
     }
 
-    /// The Refresh button: imports every provider's history now and re-reads the lists, the
-    /// running sessions included, without waiting for their timers.
+    /// The Refresh button: re-checks the providers that failed (so a fresh login shows without a
+    /// restart), imports every provider's history now and re-reads the lists, the running
+    /// sessions included, without waiting for their timers.
     pub fn refresh_sessions(&mut self) {
+        self.recheck_providers();
         self.start_import();
         self.refresh_workspaces();
         self.refresh_cards();
@@ -1186,15 +1194,36 @@ impl App {
         }
     }
 
-    /// Once per run, when every startup check has reported: opens the guide if none passed.
+    /// Once per run, when every startup check has reported: opens the guide if none passed, or
+    /// (once the first import is done) if the store holds no session at all, as on a new install.
     fn offer_guide(&mut self) {
         if self.guide_offered || !self.home.pending.is_empty() {
             return;
         }
-        self.guide_offered = true;
         if !self.any_available() {
+            self.guide_offered = true;
             self.open_guide();
+        } else if self.first_import_done && !self.home.importing {
+            self.guide_offered = true;
+            self.check_no_sessions();
         }
+    }
+
+    /// Sends `UiMsg::NoSessions` when no session exists in any workspace or origin.
+    fn check_no_sessions(&self) {
+        let (writer, reader, bridge) = (
+            self.writer.clone(),
+            self.reader.clone(),
+            self.bridge.clone(),
+        );
+        self.rt.spawn(async move {
+            xade_runtime::flush(&writer).await;
+            match reader.list_sessions(None, None, 0, 1).await {
+                Ok(page) if page.total == 0 => bridge.send(UiMsg::NoSessions),
+                Ok(_) => {}
+                Err(e) => read_failed(&bridge, "sessions", &e),
+            }
+        });
     }
 
     pub fn open_guide(&mut self) {
@@ -2296,6 +2325,11 @@ impl App {
                 }
                 self.offer_guide();
             }
+            UiMsg::NoSessions => {
+                if self.sessions.is_empty() && self.multi_sessions.is_empty() {
+                    self.open_guide();
+                }
+            }
             UiMsg::ProviderQuota(id, result) => {
                 self.quota_inflight.remove(&id);
                 match result {
@@ -2478,6 +2512,8 @@ impl App {
             }
             (_, AppEventKind::ImportDone { imported, updated }) => {
                 self.home.importing = false;
+                self.first_import_done = true;
+                self.offer_guide();
                 tracing::info!(imported, updated, "import done");
                 self.refresh_workspaces();
                 self.refresh_cards();
@@ -2576,6 +2612,9 @@ impl App {
                 if let Some(vm) = self.sessions.get_mut(&id) {
                     // Only a new prompt jumps to the end; replies follow `stick_to_bottom`.
                     vm.scroll_to_end |= msg.role == Role::User;
+                    if msg.role == Role::User {
+                        mark_sent(vm);
+                    }
                     vm.messages.push(msg);
                     vm.error = None;
                 }
@@ -2993,14 +3032,19 @@ pub(crate) fn new_message(
     }
 }
 
+/// A prompt went out with the current model and effort, so changing them is no longer pending.
+fn mark_sent(vm: &mut SessionVm) {
+    vm.sent_model.clone_from(&vm.session.model_id);
+    vm.sent_effort = vm.session.effort;
+}
+
 /// Appends the user's prompt to the local transcript.
 pub fn push_user_message(vm: &mut SessionVm, text: String, delivery: Option<Delivery>) {
     // The runtime titles the stored row the same way; this keeps the window in step.
     if vm.session.title.is_empty() {
         vm.session.title = xade_core::Session::derive_title(&text);
     }
-    vm.sent_model.clone_from(&vm.session.model_id);
-    vm.sent_effort = vm.session.effort;
+    mark_sent(vm);
     let mut m = new_message(vm, Role::User, text, None);
     m.tool_name = delivery.map(|d| d.tag().to_string());
     vm.messages.push(m);
@@ -3177,10 +3221,17 @@ impl App {
         status_bar::show(self, ui);
         if self.sidebar_visible {
             home::sidebar(self, ui);
+        } else {
+            home::sidebar_collapsed(self, ui);
         }
+        // Session windows sit close to the edge, but the Home grid keeps its breathing room.
+        let margin = match self.view {
+            View::Home => 16,
+            View::Workspace => 6,
+        };
         let frame = egui::Frame::new()
             .fill(theme::bg_panel())
-            .inner_margin(egui::Margin::same(16));
+            .inner_margin(egui::Margin::same(margin));
         egui::CentralPanel::default()
             .frame(frame)
             .show(ui, |ui| match self.view {
@@ -4295,6 +4346,28 @@ mod tests {
     }
 
     #[test]
+    fn refresh_sessions_rechecks_failed_providers_before_importing() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        fail(&mut app, agy, ProviderError::NotLoggedIn);
+        app.refresh_sessions();
+        assert!(app.home.pending.contains(&agy), "the failed one re-checks");
+        assert!(!app.home.pending.contains(&claude), "a passing one is left");
+        assert!(matches!(cmds.try_recv(), Ok(ManagerCmd::Import)));
+        let msg = app.events_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let UiMsg::Preflight(id, result) = msg else {
+            panic!("not a Preflight");
+        };
+        assert_eq!(id, agy);
+        app.on_msg(UiMsg::Preflight(id, result));
+        assert!(app.available(agy), "the new login shows without a restart");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_provider_still_checking_is_neither_offered_nor_an_error_until_it_reports() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (mut app, dir) = two_provider_app(&rt);
@@ -4370,6 +4443,73 @@ mod tests {
         app.focus(WindowKind::Session(id));
         assert!(app.guide.is_none());
         assert_eq!(app.open_windows, vec![WindowKind::Session(id)]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Delivers the first `ImportDone`, then returns whether the empty-store check reported.
+    fn import_done_reports_no_sessions(app: &mut App) -> bool {
+        app.on_app_event(AppEvent {
+            session_id: None,
+            kind: AppEventKind::ImportDone {
+                imported: 0,
+                updated: 0,
+            },
+        });
+        let deadline = Instant::now() + Duration::from_millis(500);
+        while let Some(left) = deadline.checked_duration_since(Instant::now()) {
+            match app.events_rx.recv_timeout(left) {
+                Ok(UiMsg::NoSessions) => return true,
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn the_guide_opens_after_the_first_import_when_no_session_exists() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, _cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        assert!(app.any_available());
+        app.offer_guide();
+        assert!(app.guide.is_none(), "waits for the first import");
+        assert!(import_done_reports_no_sessions(&mut app));
+        assert!(app.guide.is_none(), "the count alone opens nothing");
+        app.on_msg(UiMsg::NoSessions);
+        assert_eq!(app.open_windows, vec![WindowKind::Guide]);
+        // Once per run: a later import does not look again.
+        app.close_guide();
+        assert!(!import_done_reports_no_sessions(&mut app));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_guide_stays_closed_when_any_session_is_stored() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, _cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let ws = WorkspaceId::new();
+        app.writer
+            .send(WriteOp::UpsertWorkspace(Workspace {
+                id: ws,
+                root_path: dir.clone(),
+                display_name: "w".into(),
+                last_opened_at: OffsetDateTime::now_utc(),
+                is_open: false,
+            }))
+            .unwrap();
+        stored(
+            &app,
+            ws,
+            ProviderId::Claude,
+            "opus",
+            xade_core::Effort::High,
+        );
+        assert!(!import_done_reports_no_sessions(&mut app));
+        assert!(app.guide.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -42,6 +42,11 @@ fn create_multi_session_send_targeted_broadcast_and_persist_card() {
                 .is_some()
     });
 
+    // Usage stats belong to one session: the Team tab adds none to the one that the startup
+    // session window already shows.
+    let stats = "in 0 \u{b7} out 0 \u{b7} cache 0";
+    assert_eq!(x.ui.query_all_by_label(stats).count(), 1);
+
     // Click the #fake-model-1 tab (on the same row as the "Team" tab) and check that its private
     // note is shown in its own transcript.
     let tab_y = x.ui.get_by_label("Team").rect().center().y;
@@ -54,6 +59,7 @@ fn create_multi_session_send_targeted_broadcast_and_persist_card() {
     x.wait_for("#fake-model-1 private reply", |ui| {
         ui.query_by_label_contains("Private note to user.")
             .is_some()
+            && ui.query_all_by_label(stats).count() == 2
     });
 
     // Switch to #fake-model-2 and confirm the broadcast was routed to it and produced a turn.

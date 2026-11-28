@@ -174,7 +174,6 @@ pub fn show(
     egui::Frame::new()
         .fill(theme::bg_terminal())
         .stroke(Stroke::new(1.0, theme::border()))
-        .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(8, 5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -326,7 +325,6 @@ pub fn group(ui: &mut egui::Ui, cache: &mut CommonMarkCache, calls: &[GroupCall]
     let header = egui::Frame::new()
         .fill(theme::bg_terminal())
         .stroke(Stroke::new(1.0, theme::border()))
-        .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(8, 5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

@@ -129,7 +129,6 @@ fn file_row(ui: &mut egui::Ui, name: &str, selected: bool) -> egui::Response {
     };
     egui::Frame::new()
         .fill(fill)
-        .corner_radius(4)
         .inner_margin(egui::Margin::symmetric(8, 5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -151,7 +150,6 @@ fn row(app: &App, ui: &mut egui::Ui, card: &SessionCard, selected: bool) -> egui
     };
     let inner = egui::Frame::new()
         .fill(fill)
-        .corner_radius(4)
         .inner_margin(egui::Margin::symmetric(8, 5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

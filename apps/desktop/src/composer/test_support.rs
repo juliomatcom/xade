@@ -7,7 +7,7 @@ use egui::Modifiers;
 use time::OffsetDateTime;
 use xade_core::{Effort, ProviderId, Session, SessionId, SessionStatus, UsageTotals, WorkspaceId};
 
-pub(super) fn vm(input: String) -> SessionVm {
+pub(crate) fn vm(input: String) -> SessionVm {
     let now = OffsetDateTime::now_utc();
     SessionVm {
         session: Session {
