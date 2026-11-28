@@ -457,7 +457,7 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[Qu
             tex.id(),
             r,
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-            crate::conversation::symbol_tint(provider),
+            crate::conversation::company_symbol_tint(provider),
         );
     }
     let pairs = groups.len().max(1);

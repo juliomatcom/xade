@@ -650,8 +650,9 @@ fn assistant(
     .inner
 }
 
-// 80x80 PNGs (4x the avatar) pre-rendered from the unmodified SVG beside each in `assets/`; the
-// marks are their owners' trademarks (sources: wiki-llm/ui.md).
+// 80x80 PNGs (4x the avatar) pre-rendered from the unmodified SVG beside each in `assets/`
+// (except `anomaly-symbol.png`, fetched directly as an 80x80 PNG); the marks are their owners'
+// trademarks (sources: wiki-llm/ui.md).
 const ANTHROPIC_SYMBOL: &[u8] = include_bytes!("../../../assets/anthropic-symbol.png");
 const GOOGLE_SYMBOL: &[u8] = include_bytes!("../../../assets/google-symbol.png");
 const CLAUDE_CODE_SYMBOL: &[u8] = include_bytes!("../../../assets/claude-code-symbol.png");
@@ -660,9 +661,18 @@ const OPENAI_SYMBOL: &[u8] = include_bytes!("../../../assets/openai-symbol.png")
 const ANOMALY_SYMBOL: &[u8] = include_bytes!("../../../assets/anomaly-symbol.png");
 const OPENCODE_SYMBOL: &[u8] = include_bytes!("../../../assets/opencode-symbol.png");
 
-/// Tint applied when drawing a provider's symbol: the OpenAI PNG is white-on-transparent so
-/// `theme::text()` keeps it legible on both dark and light themes.
+/// Tint applied when drawing a provider's CLI symbol: white-on-transparent PNGs (OpenAI, OpenCode)
+/// tint with `theme::text()` so they stay legible on both dark and light themes.
 pub(crate) fn symbol_tint(provider: ProviderId) -> egui::Color32 {
+    match provider {
+        ProviderId::Codex | ProviderId::OpenCode => theme::text(),
+        ProviderId::Claude | ProviderId::Antigravity => egui::Color32::WHITE,
+    }
+}
+
+/// Tint applied when drawing a provider's company symbol: Anomaly's PNG is white on opaque black,
+/// so only OpenAI's white-on-transparent mark is tinted.
+pub(crate) fn company_symbol_tint(provider: ProviderId) -> egui::Color32 {
     match provider {
         ProviderId::Codex => theme::text(),
         ProviderId::Claude | ProviderId::Antigravity | ProviderId::OpenCode => egui::Color32::WHITE,
@@ -738,9 +748,17 @@ mod symbol_tests {
         assert_eq!(ids.len(), 7);
         assert_eq!(
             super::symbol_tint(ProviderId::OpenCode),
+            crate::theme::text()
+        );
+        assert_eq!(
+            super::company_symbol_tint(ProviderId::OpenCode),
             egui::Color32::WHITE
         );
         assert_eq!(super::symbol_tint(ProviderId::Codex), crate::theme::text());
+        assert_eq!(
+            super::company_symbol_tint(ProviderId::Codex),
+            crate::theme::text()
+        );
         assert_eq!(super::symbol_tint(ProviderId::Claude), egui::Color32::WHITE);
     }
 }
