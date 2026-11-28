@@ -1,9 +1,9 @@
 # Antigravity
 
-Xade can run sessions on the Antigravity CLI (`agy`) next to Claude Code.
+Xade can run sessions on the Antigravity CLI (`agy`) next to Claude Code, Codex and OpenCode.
 
 - Install `agy` and sign in by running `agy` once in a terminal. Xade never reads its credentials.
-- On Home, pick the provider for a new session in the top bar. The picker shows only when both providers are available; with one, Xade behaves as before.
+- On Home, pick the provider for a new session in the top bar. The picker shows whenever two or more providers are available; with one, Xade behaves as before.
 - Auto OFF gates shell commands and URLs. `agy` does not ask before editing files in the workspace, so edits are not gated.
 - The top bar shows Antigravity's 5-hour and weekly quota per model group (Gemini models, and Claude and GPT models), read from `agy /usage`. The context and token meters work as for Claude sessions.
 - The top-bar quota shows a group for every available provider.

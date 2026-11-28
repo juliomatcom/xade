@@ -14,7 +14,7 @@ const pillars = [
   ["Your setup, as is", "Xade drives the agent CLIs you already have installed and signed in, with your settings, MCP servers and skills. No API keys to paste and nothing new to configure."],
   ["Hit a limit? Switch providers", "Fork a session to another provider when you hit a limit or want a second opinion. The new agent starts from a summary of the work, without leaving the workspace."],
   ["100% free and open source", "MIT licensed, with no Xade subscription, account, or paywall. Read it, change it, fork it."],
-  ["Coming soon: OpenCode and local models", "One interface for hosted agents and models running on your own machine. Pick the right brain for each job."],
+  ["Coming soon: local models", "One interface for hosted agents and models running on your own machine. Pick the right brain for each job."],
 ];
 
 const team = [
@@ -123,7 +123,7 @@ export default function App() {
             Run them in separate windows, or let them plan, build and review together. A native Rust app, no Electron, that uses your installed CLIs. Free and open source.
           </p>
           <p className="mt-4 font-mono text-sm text-slate-300">
-            Works with Claude Code, Codex and Antigravity <span className="text-slate-500">· OpenCode and local models coming soon</span>
+            Works with Claude Code, Codex, Antigravity and OpenCode <span className="text-slate-500">· local models coming soon</span>
           </p>
           <div className="mt-8 flex flex-wrap justify-center gap-3">
             <a href="#download" className="rounded-lg bg-jade px-6 py-3 text-sm font-semibold text-ink transition hover:bg-emerald-300">Download Xade</a>
@@ -198,7 +198,7 @@ export default function App() {
         <section id="why" className="scroll-mt-24 pb-24">
           <h2 className="mx-auto max-w-3xl text-center text-3xl font-semibold tracking-tight text-white sm:text-4xl">One place for every agent and model</h2>
           <p className="mx-auto mt-3 max-w-2xl text-center text-slate-400">
-            Today Xade drives Claude Code, Codex and Antigravity, and sessions can be forked between them. It is built to take more providers, so the workspace you learn now is the one you keep.
+            Today Xade drives Claude Code, Codex, Antigravity and OpenCode, and sessions can be forked between them. It is built to take more providers, so the workspace you learn now is the one you keep.
           </p>
           <div className="mt-12 grid gap-px overflow-hidden rounded-2xl border border-edge bg-edge md:grid-cols-2">
             {pillars.map(([t, d]) => (
@@ -233,7 +233,7 @@ export default function App() {
             <Copy text={INSTALL} />
           </div>
           <p className="mt-4 text-sm text-slate-500">
-            Requires git and at least one of these, installed and signed in: Claude Code, Codex (<code className="font-mono">codex</code>) or Antigravity (<code className="font-mono">agy</code>). VS Code with the <code className="font-mono">code</code> command is optional. Linux needs a Vulkan-capable GPU driver.
+            Requires git and at least one of these, installed and signed in: Claude Code, Codex (<code className="font-mono">codex</code>), Antigravity (<code className="font-mono">agy</code>) or OpenCode (<code className="font-mono">opencode</code>). VS Code with the <code className="font-mono">code</code> command is optional. Linux needs a Vulkan-capable GPU driver.
           </p>
         </section>
 
