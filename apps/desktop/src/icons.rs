@@ -17,6 +17,7 @@ pub const DENY: &str = "\u{1F6AB}";
 pub const ACCEPT: &str = "\u{2714}";
 pub const CANCEL: &str = "\u{2716}";
 pub const VSCODE: &str = "\u{2197}";
+pub const EXTERNAL_LINK: &str = VSCODE;
 pub const REVIEW: &str = "\u{1F50D}";
 pub const RETRY: &str = "\u{1F504}";
 pub const PREV: &str = "\u{23F4}";

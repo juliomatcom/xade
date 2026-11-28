@@ -14,4 +14,4 @@ Xade can run sessions on OpenCode (`opencode`) next to Claude Code, Antigravity 
 - With Auto on, the review of an overwritten file shows the whole new content, because OpenCode does not send the old text. Patch reviews show changed lines without real line numbers.
 - Deleting a session started in Xade also deletes the OpenCode session.
 - You can fork between OpenCode and the other providers, and add OpenCode members to a Multi-Session team.
-- Not in this version: importing OpenCode sessions made outside Xade, and a usage quota readout. No cost figure is shown.
+- Not in this version: importing OpenCode sessions made outside Xade, and a live usage quota readout (clicking OpenCode's top-bar meter opens `https://opencode.ai/console` in your browser). No cost figure is shown.

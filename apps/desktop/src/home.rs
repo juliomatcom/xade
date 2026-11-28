@@ -437,15 +437,32 @@ fn quota_groups(app: &App, provider: ProviderId) -> Vec<QuotaGroup> {
     out
 }
 
+/// External web dashboard for providers whose CLI does not report quota windows.
+fn quota_url(provider: ProviderId) -> Option<&'static str> {
+    match provider {
+        ProviderId::OpenCode => Some("https://opencode.ai/console"),
+        ProviderId::Claude | ProviderId::Antigravity | ProviderId::Codex => None,
+    }
+}
+
 /// A provider's quota as a glyph: its symbol, then per model group a 5 px bar for the session
 /// window over a hairline for the weekly one; the numbers are in the tooltip, in the same order.
+/// For providers that only show quota on a web dashboard (OpenCode), the bars stay for visual
+/// consistency with an external-link label over them, and clicking opens the dashboard.
 fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[QuotaGroup]) {
     let now = OffsetDateTime::now_utc();
     let height = ui.available_height();
-    let (rect, resp) = ui.allocate_exact_size(
-        egui::vec2(quota_glyph_width(groups.len()), height),
-        egui::Sense::hover(),
-    );
+    let url = groups.is_empty().then(|| quota_url(provider)).flatten();
+    let sense = if url.is_some() {
+        egui::Sense::click()
+    } else {
+        egui::Sense::hover()
+    };
+    let (rect, mut resp) =
+        ui.allocate_exact_size(egui::vec2(quota_glyph_width(groups.len()), height), sense);
+    if url.is_some() {
+        resp = resp.on_hover_cursor(egui::CursorIcon::PointingHand);
+    }
     let painter = ui.painter();
     let mid = rect.center().y;
     if let Some(tex) = crate::conversation::company_symbol(ui.ctx(), provider) {
@@ -462,8 +479,9 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[Qu
     }
     let pairs = groups.len().max(1);
     let width = quota_pair_width(pairs);
+    let bars_left = rect.left() + QUOTA_SYMBOL + 8.0;
     for i in 0..pairs {
-        let left = rect.left() + QUOTA_SYMBOL + 8.0 + i as f32 * (width + QUOTA_PAIR_GAP);
+        let left = bars_left + i as f32 * (width + QUOTA_PAIR_GAP);
         let bar = |y: f32, h: f32, kind: QuotaKind| {
             let fraction = groups
                 .get(i)
@@ -479,10 +497,36 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[Qu
         bar(mid - 4.0, 5.0, QuotaKind::FiveHour);
         bar(mid + 3.0, 2.0, QuotaKind::SevenDay);
     }
+    if let Some(url) = url {
+        let color = if resp.hovered() {
+            theme::accent()
+        } else {
+            theme::text_muted()
+        };
+        painter.text(
+            egui::pos2(bars_left + width / 2.0, mid - 1.0),
+            egui::Align2::CENTER_CENTER,
+            format!("web {}", icons::EXTERNAL_LINK),
+            egui::FontId::proportional(10.0),
+            color,
+        );
+        if resp.clicked() {
+            ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+        }
+    }
     resp.on_hover_ui(|ui| {
         ui.label(RichText::new(name).strong());
         if groups.is_empty() {
-            ui.label("No usage data yet.");
+            if let Some(url) = url {
+                ui.label("Usage quota is not reported by the CLI.");
+                let host = url.strip_prefix("https://").unwrap_or(url);
+                ui.label(
+                    RichText::new(format!("Click to open {host} {}", icons::EXTERNAL_LINK))
+                        .color(theme::accent()),
+                );
+            } else {
+                ui.label("No usage data yet.");
+            }
         }
         for g in groups {
             if !g.name.is_empty() {
@@ -1385,6 +1429,54 @@ mod tests {
             assert_no_overlaps(width, false);
             assert_no_overlaps(width, true);
         }
+    }
+
+    #[test]
+    fn opencode_quota_glyph_links_to_console_and_opens_on_click() {
+        assert_eq!(
+            quota_url(ProviderId::OpenCode),
+            Some("https://opencode.ai/console")
+        );
+        assert_eq!(quota_url(ProviderId::Claude), None);
+
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let draw = |input: egui::RawInput| {
+            let mut out = ctx.run_ui(input, |ui| {
+                ui.set_height(24.0);
+                quota_group(ui, ProviderId::OpenCode, "OpenCode", &[]);
+            });
+            out.textures_delta.clear();
+            out
+        };
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(200.0, 40.0));
+        // Settle layout, then click the middle of the glyph.
+        draw(egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        });
+        let click = egui::pos2(30.0, 12.0);
+        let press = |pressed: bool| egui::Event::PointerButton {
+            pos: click,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        draw(egui::RawInput {
+            screen_rect: Some(screen),
+            events: vec![egui::Event::PointerMoved(click), press(true)],
+            ..Default::default()
+        });
+        let out = draw(egui::RawInput {
+            screen_rect: Some(screen),
+            events: vec![egui::Event::PointerMoved(click), press(false)],
+            ..Default::default()
+        });
+        let opened = out.platform_output.commands.iter().find_map(|c| match c {
+            egui::OutputCommand::OpenUrl(u) => Some(u.url.as_str()),
+            _ => None,
+        });
+        assert_eq!(opened, Some("https://opencode.ai/console"));
     }
 
     #[test]
