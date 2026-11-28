@@ -657,14 +657,15 @@ const GOOGLE_SYMBOL: &[u8] = include_bytes!("../../../assets/google-symbol.png")
 const CLAUDE_CODE_SYMBOL: &[u8] = include_bytes!("../../../assets/claude-code-symbol.png");
 const ANTIGRAVITY_SYMBOL: &[u8] = include_bytes!("../../../assets/antigravity-symbol.png");
 const OPENAI_SYMBOL: &[u8] = include_bytes!("../../../assets/openai-symbol.png");
+const ANOMALY_SYMBOL: &[u8] = include_bytes!("../../../assets/anomaly-symbol.png");
 const OPENCODE_SYMBOL: &[u8] = include_bytes!("../../../assets/opencode-symbol.png");
 
-/// Tint applied when drawing a provider's symbol: monochrome white-on-transparent PNGs (OpenAI,
-/// OpenCode) tint with `theme::text()` so they stay legible on both dark and light themes.
+/// Tint applied when drawing a provider's symbol: the OpenAI PNG is white-on-transparent so
+/// `theme::text()` keeps it legible on both dark and light themes.
 pub(crate) fn symbol_tint(provider: ProviderId) -> egui::Color32 {
     match provider {
-        ProviderId::Codex | ProviderId::OpenCode => theme::text(),
-        ProviderId::Claude | ProviderId::Antigravity => egui::Color32::WHITE,
+        ProviderId::Codex => theme::text(),
+        ProviderId::Claude | ProviderId::Antigravity | ProviderId::OpenCode => egui::Color32::WHITE,
     }
 }
 
@@ -677,7 +678,7 @@ pub(crate) fn company_symbol(
         ProviderId::Claude => ("anthropic_symbol", ANTHROPIC_SYMBOL),
         ProviderId::Antigravity => ("google_symbol", GOOGLE_SYMBOL),
         ProviderId::Codex => ("openai_symbol", OPENAI_SYMBOL),
-        ProviderId::OpenCode => ("opencode_symbol", OPENCODE_SYMBOL),
+        ProviderId::OpenCode => ("anomaly_symbol", ANOMALY_SYMBOL),
     };
     symbol(ctx, name, png)
 }
@@ -733,11 +734,11 @@ mod symbol_tests {
                 ids.insert(tex.id());
             }
         }
-        // Claude and Antigravity have distinct company + CLI marks; Codex and OpenCode share theirs.
-        assert_eq!(ids.len(), 6);
+        // Claude, Antigravity and OpenCode have distinct company + CLI marks; Codex shares OpenAI's.
+        assert_eq!(ids.len(), 7);
         assert_eq!(
             super::symbol_tint(ProviderId::OpenCode),
-            crate::theme::text()
+            egui::Color32::WHITE
         );
         assert_eq!(super::symbol_tint(ProviderId::Codex), crate::theme::text());
         assert_eq!(super::symbol_tint(ProviderId::Claude), egui::Color32::WHITE);
