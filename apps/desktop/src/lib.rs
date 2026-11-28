@@ -34,6 +34,7 @@ use xade_antigravity::AntigravityProvider;
 use xade_claude::ClaudeProvider;
 use xade_codex::CodexProvider;
 use xade_core::{AgentProvider, ProviderError, ProviderId};
+use xade_opencode::OpenCodeProvider;
 use xade_runtime::SessionManager;
 use xade_store::{StoreReader, StoreWriter};
 
@@ -236,6 +237,7 @@ pub fn backend(
             Arc::new(ClaudeProvider::new()),
             Arc::new(AntigravityProvider::new()),
             Arc::new(CodexProvider::new()),
+            Arc::new(OpenCodeProvider::new()),
         ],
     )
 }

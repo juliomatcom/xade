@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/core", "crates/claude", "crates/antigravity", "crates/codex", "crates/store", "crates/runtime", "apps/desktop"]
+members = ["crates/core", "crates/claude", "crates/antigravity", "crates/codex", "crates/opencode", "crates/store", "crates/runtime", "apps/desktop"]
 
 [workspace.package]
 edition = "2021"

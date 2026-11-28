@@ -29,6 +29,7 @@ fn history(provider: ProviderId) -> &'static str {
         ProviderId::Claude => "Claude Code transcript",
         ProviderId::Antigravity => "Antigravity history",
         ProviderId::Codex => "Codex history",
+        ProviderId::OpenCode => "OpenCode history",
     }
 }
 
@@ -167,5 +168,6 @@ mod tests {
         assert_eq!(history(ProviderId::Claude), "Claude Code transcript");
         assert_eq!(history(ProviderId::Antigravity), "Antigravity history");
         assert_eq!(history(ProviderId::Codex), "Codex history");
+        assert_eq!(history(ProviderId::OpenCode), "OpenCode history");
     }
 }

@@ -28,18 +28,17 @@ impl Jump {
             .id_salt(id_salt)
             .stick_to_bottom(true)
             .auto_shrink([false, false])
+            // Unanimated: egui's scroll-to animation clears `scroll_stuck_to_end` until the target
+            // settles (even with `ScrollAnimation::none()`), so output arriving on the next frame
+            // would leave the chat unstuck.
+            .animated(false)
     }
 
     /// Scrolls to the content's origin (`ui.cursor().min` read before adding any content) if asked.
     pub fn jump_top(self, ui: &mut egui::Ui, content_top: egui::Pos2) {
         if self.top {
             let rect = Rect::from_min_size(content_top, Vec2::splat(1.0));
-            // Unanimated, like the Team feed's jump to the end.
-            ui.scroll_to_rect_animation(
-                rect,
-                Some(egui::Align::TOP),
-                egui::style::ScrollAnimation::none(),
-            );
+            ui.scroll_to_rect(rect, Some(egui::Align::TOP));
         }
     }
 }

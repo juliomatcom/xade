@@ -60,6 +60,8 @@ pub(crate) struct Actor {
     next_seq: i64,
     pending_model: Option<String>,
     pending_effort: Option<Effort>,
+    /// Auto changed on a provider that needs a new process for it.
+    pending_auto: bool,
     last_error: Option<String>,
     /// Transcript of a forked history, prepended to the first prompt only.
     handoff: Option<String>,
@@ -99,6 +101,7 @@ impl Actor {
             next_seq,
             pending_model: None,
             pending_effort: None,
+            pending_auto: false,
             last_error: None,
             handoff: None,
             handoff_sent: None,
@@ -327,8 +330,12 @@ impl Actor {
                 if self.status == SessionStatus::NeedsApproval {
                     self.set_status(SessionStatus::Streaming);
                 }
+                return self.apply_pending().await;
             }
-            ActorCmd::SetAutoMode(on) => self.set_auto(on),
+            ActorCmd::SetAutoMode(on) => {
+                self.set_auto(on);
+                return self.apply_pending().await;
+            }
             ActorCmd::SetModel(m) => {
                 if self.session.multi_session_id.is_some() {
                     return true;
@@ -433,6 +440,9 @@ impl Actor {
     }
 
     fn set_auto(&mut self, on: bool) {
+        if self.session.auto_mode != on && self.provider.respawn_on_auto_change() {
+            self.pending_auto = true;
+        }
         self.session.auto_mode = on;
         self.command(SessionCommand::SetAutoMode(on));
         let mut op = self.update();
@@ -576,14 +586,16 @@ impl Actor {
         true
     }
 
-    /// Respawns with `resume` when a model/effort change is pending and the session is idle.
-    /// Returns false when the new child could not be started.
+    /// Respawns with `resume` when a model, effort or (where the provider needs it) Auto change
+    /// is pending and the session is idle. Returns false when the new child could not be started.
     async fn apply_pending(&mut self) -> bool {
-        if self.status != SessionStatus::Idle
-            || (self.pending_model.is_none() && self.pending_effort.is_none())
-        {
+        let pending =
+            self.pending_model.is_some() || self.pending_effort.is_some() || self.pending_auto;
+        if self.status != SessionStatus::Idle || !pending {
             return true;
         }
+        // The new child takes the Auto mode the session has now.
+        self.pending_auto = false;
         let model_id = self
             .pending_model
             .take()

@@ -1792,7 +1792,10 @@ fn imported_rows(
         .collect();
     let origin = match provider_id {
         ProviderId::Codex => SessionOrigin::Codex,
-        ProviderId::Claude | ProviderId::Antigravity => SessionOrigin::ClaudeCode,
+        // Neither imports; the origin is only ever read for an imported session.
+        ProviderId::Claude | ProviderId::Antigravity | ProviderId::OpenCode => {
+            SessionOrigin::ClaudeCode
+        }
     };
     let session = Session {
         id,

@@ -682,6 +682,35 @@ fn last_model_choice_and_last_provider_are_per_provider() {
     );
 }
 
+/// A provider added later shares the table: it round-trips and keeps to its own choices.
+#[test]
+fn opencode_sessions_round_trip_beside_the_other_providers() {
+    let f = Fixture::new();
+    add_provider_session(&f, ProviderId::Claude, "opus", 30);
+    add_provider_session(&f, ProviderId::Codex, "gpt-6-luna", 20);
+    let id = add_provider_session(&f, ProviderId::OpenCode, "opencode-go/glm-5.3-flash", 10);
+    f.writer.flush().unwrap();
+    let (loaded, _) = block_on(f.reader.load_session(id)).unwrap();
+    assert_eq!(loaded.provider_id, ProviderId::OpenCode);
+    let choice = |p| block_on(f.reader.last_model_choice(p)).unwrap().unwrap().0;
+    assert_eq!(choice(ProviderId::OpenCode), "opencode-go/glm-5.3-flash");
+    assert_eq!(choice(ProviderId::Claude), "opus");
+    assert_eq!(choice(ProviderId::Codex), "gpt-6-luna");
+    assert_eq!(
+        block_on(f.reader.last_provider()).unwrap(),
+        Some(ProviderId::OpenCode)
+    );
+    let stored: String = rusqlite::Connection::open(&f.path)
+        .unwrap()
+        .query_row(
+            "SELECT provider_id FROM sessions WHERE id = ?1",
+            [id.0.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "opencode");
+}
+
 #[test]
 fn cards_and_search_carry_their_provider() {
     let f = Fixture::new();

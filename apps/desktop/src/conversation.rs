@@ -416,7 +416,7 @@ fn with_time<R>(ui: &mut egui::Ui, m: &Message, body: impl FnOnce(&mut egui::Ui)
 /// User messages longer than this many lines show a head and a "Show all" toggle.
 const USER_PREVIEW_LINES: usize = 2;
 
-/// Corner radius of a chat bubble, the one rounded shape in the square UI.
+/// Corner radius of a chat bubble, rounded like the badges in an otherwise square UI.
 const BUBBLE_RADIUS: u8 = 8;
 /// Width and height of the bubble's tail.
 const BUBBLE_TAIL: egui::Vec2 = egui::vec2(8.0, 10.0);
@@ -650,20 +650,32 @@ fn assistant(
     .inner
 }
 
-// 80x80 PNGs (4x the avatar) pre-rendered from the unmodified SVG beside each in `assets/`; the
-// marks are their owners' trademarks (sources: wiki-llm/ui.md).
+// 80x80 PNGs (4x the avatar) pre-rendered from the unmodified SVG beside each in `assets/`
+// (except `anomaly-symbol.png`, fetched directly as an 80x80 PNG); the marks are their owners'
+// trademarks (sources: wiki-llm/ui.md).
 const ANTHROPIC_SYMBOL: &[u8] = include_bytes!("../../../assets/anthropic-symbol.png");
 const GOOGLE_SYMBOL: &[u8] = include_bytes!("../../../assets/google-symbol.png");
 const CLAUDE_CODE_SYMBOL: &[u8] = include_bytes!("../../../assets/claude-code-symbol.png");
 const ANTIGRAVITY_SYMBOL: &[u8] = include_bytes!("../../../assets/antigravity-symbol.png");
 const OPENAI_SYMBOL: &[u8] = include_bytes!("../../../assets/openai-symbol.png");
+const ANOMALY_SYMBOL: &[u8] = include_bytes!("../../../assets/anomaly-symbol.png");
+const OPENCODE_SYMBOL: &[u8] = include_bytes!("../../../assets/opencode-symbol.png");
 
-/// Tint applied when drawing a provider's symbol: the OpenAI PNG is white-on-transparent so
-/// `theme::text()` keeps it legible on both dark and light themes.
+/// Tint applied when drawing a provider's CLI symbol: white-on-transparent PNGs (OpenAI, OpenCode)
+/// tint with `theme::text()` so they stay legible on both dark and light themes.
 pub(crate) fn symbol_tint(provider: ProviderId) -> egui::Color32 {
     match provider {
-        ProviderId::Codex => theme::text(),
+        ProviderId::Codex | ProviderId::OpenCode => theme::text(),
         ProviderId::Claude | ProviderId::Antigravity => egui::Color32::WHITE,
+    }
+}
+
+/// Tint applied when drawing a provider's company symbol: Anomaly's PNG is white on opaque black,
+/// so only OpenAI's white-on-transparent mark is tinted.
+pub(crate) fn company_symbol_tint(provider: ProviderId) -> egui::Color32 {
+    match provider {
+        ProviderId::Codex => theme::text(),
+        ProviderId::Claude | ProviderId::Antigravity | ProviderId::OpenCode => egui::Color32::WHITE,
     }
 }
 
@@ -676,6 +688,7 @@ pub(crate) fn company_symbol(
         ProviderId::Claude => ("anthropic_symbol", ANTHROPIC_SYMBOL),
         ProviderId::Antigravity => ("google_symbol", GOOGLE_SYMBOL),
         ProviderId::Codex => ("openai_symbol", OPENAI_SYMBOL),
+        ProviderId::OpenCode => ("anomaly_symbol", ANOMALY_SYMBOL),
     };
     symbol(ctx, name, png)
 }
@@ -686,6 +699,7 @@ pub(crate) fn cli_symbol(ctx: &egui::Context, provider: ProviderId) -> Option<eg
         ProviderId::Claude => ("claude_code_symbol", CLAUDE_CODE_SYMBOL),
         ProviderId::Antigravity => ("antigravity_symbol", ANTIGRAVITY_SYMBOL),
         ProviderId::Codex => ("openai_symbol", OPENAI_SYMBOL),
+        ProviderId::OpenCode => ("opencode_symbol", OPENCODE_SYMBOL),
     };
     symbol(ctx, name, png)
 }
@@ -720,6 +734,7 @@ mod symbol_tests {
             ProviderId::Claude,
             ProviderId::Antigravity,
             ProviderId::Codex,
+            ProviderId::OpenCode,
         ] {
             for load in [super::company_symbol, super::cli_symbol] {
                 let tex = load(&ctx, p).expect("symbol");
@@ -729,9 +744,21 @@ mod symbol_tests {
                 ids.insert(tex.id());
             }
         }
-        // Claude and Antigravity have distinct company + CLI marks; Codex shares the OpenAI mark.
-        assert_eq!(ids.len(), 5);
+        // Claude, Antigravity and OpenCode have distinct company + CLI marks; Codex shares OpenAI's.
+        assert_eq!(ids.len(), 7);
+        assert_eq!(
+            super::symbol_tint(ProviderId::OpenCode),
+            crate::theme::text()
+        );
+        assert_eq!(
+            super::company_symbol_tint(ProviderId::OpenCode),
+            egui::Color32::WHITE
+        );
         assert_eq!(super::symbol_tint(ProviderId::Codex), crate::theme::text());
+        assert_eq!(
+            super::company_symbol_tint(ProviderId::Codex),
+            crate::theme::text()
+        );
         assert_eq!(super::symbol_tint(ProviderId::Claude), egui::Color32::WHITE);
     }
 }
@@ -1334,6 +1361,83 @@ mod tests {
         assert!(
             visible(y_of(&ctx, &mut v, vec![], "zzreply")),
             "follows again"
+        );
+    }
+
+    #[test]
+    fn streaming_right_after_send_keeps_sticking_to_bottom() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let rows: Vec<_> = (0..40)
+            .map(|i| msg(Role::Assistant, &format!("filler row {i}"), None, None))
+            .collect();
+        let mut v = vm(rows);
+        let mut frame = 0u64;
+        let mut step = |v: &mut SessionVm, events: Vec<egui::Event>, needle: &str| -> Option<f32> {
+            fn find(s: &egui::Shape, needle: &str) -> Option<f32> {
+                match s {
+                    egui::Shape::Text(t) if t.galley.text().contains(needle) => Some(t.pos.y),
+                    egui::Shape::Vec(v) => v.iter().find_map(|c| find(c, needle)),
+                    _ => None,
+                }
+            }
+            frame += 1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                events,
+                // Realistic 60fps interval: would fall mid-animation if ScrollArea animated.
+                time: Some(frame as f64 * 0.016),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                show(ui, v);
+            });
+            let found = out.shapes.iter().find_map(|c| find(&c.shape, needle));
+            out.drop_without_applying_deltas();
+            found
+        };
+        let visible = |y: Option<f32>| y.is_some_and(|y| (0.0..300.0).contains(&y));
+
+        // Settle at the bottom.
+        for _ in 0..3 {
+            step(&mut v, vec![], "filler row 39");
+        }
+        assert!(visible(step(&mut v, vec![], "filler row 39")));
+
+        // Scroll up, then send a prompt; 16ms later streaming output arrives.
+        let wheel = vec![
+            egui::Event::PointerMoved(egui::pos2(200.0, 150.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                source: egui::MouseWheelSource::Wheel,
+                delta: egui::vec2(0.0, 5000.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        step(&mut v, wheel, "filler row 39");
+        // Let egui's wheel smoother finish before the user sends.
+        for _ in 0..30 {
+            step(&mut v, vec![], "filler row 39");
+        }
+        assert!(!visible(step(&mut v, vec![], "filler row 39")));
+
+        v.messages.push(msg(Role::User, "zzsent", None, None));
+        v.scroll_to_end = true;
+        // Single 16ms frame applies the jump; the very next 16ms frame adds streaming lines.
+        step(&mut v, vec![], "zzsent");
+        v.live_text = (0..15)
+            .map(|i| format!("stream line {i}"))
+            .chain(std::iter::once("zzstream_end".to_string()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        step(&mut v, vec![], "zzstream_end");
+        assert!(
+            visible(step(&mut v, vec![], "zzstream_end")),
+            "streaming output arriving 16ms after send must stay stuck to bottom"
         );
     }
 

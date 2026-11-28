@@ -127,8 +127,9 @@ fn entries(data: &str) -> (Vec<Entry>, Vec<Entry>) {
         },
         Entry {
             question: "My terminal sessions don't show up.",
-            answer: "Xade imports Claude Code, Codex and Antigravity sessions at startup. Click \
-                     Refresh sessions at the bottom of the sidebar to import new ones now."
+            answer: "Xade imports Claude Code and Codex sessions at startup (Antigravity and \
+                     OpenCode sessions made outside Xade are not imported). Click Refresh \
+                     sessions at the bottom of the sidebar to import new ones now."
                 .into(),
             actions: &[],
         },

@@ -105,6 +105,7 @@ pub(super) fn subagent_badge(ui: &mut egui::Ui, count: usize, active: bool) -> b
             egui::Color32::TRANSPARENT
         })
         .stroke(egui::Stroke::new(1.0, theme::claude()))
+        .corner_radius(crate::chrome::BADGE_RADIUS)
         .inner_margin(egui::Margin::symmetric(6, 0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {

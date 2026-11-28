@@ -1,6 +1,6 @@
 # Xade
 
-> Xade (X-provider Agentic Development Environment, pronounced "zade") is a native desktop app, written in Rust, for running AI coding agents side by side or as one multi-model team. It drives the agent CLIs you already have installed and logged in: Claude Code, Codex and Antigravity. 100% free and open source (MIT), with no subscription or API keys required. macOS and Linux.
+> Xade (X-provider Agentic Development Environment, pronounced "zade") is a native desktop app, written in Rust, for running AI coding agents side by side or as one multi-model team. It drives the agent CLIs you already have installed and logged in: Claude Code, Codex, Antigravity and OpenCode. 100% free and open source (MIT), with no subscription or API keys required. macOS and Linux.
 
 - Website: https://xade.pro/
 - Source code: https://github.com/juliomatcom/xade
@@ -8,7 +8,7 @@
 - Install: curl -fsSL https://raw.githubusercontent.com/juliomatcom/xade/main/scripts/install.sh | sh
 
 ## Key facts
-- Runs multiple Claude Code, Codex and Antigravity sessions in side-by-side windows; sessions are saved locally (SQLite) and searchable. Existing Claude Code and Codex sessions are imported.
+- Runs multiple Claude Code, Codex, Antigravity and OpenCode sessions in side-by-side windows; sessions are saved locally (SQLite) and searchable. Existing Claude Code and Codex sessions are imported.
 - Multi-Session: a team of models, from one or several providers, in one window and one working folder. The user messages all members or one with `#handle:`. Normal replies are shown only to the user; `<broadcast>` blocks reach the teammates. A Team feed plus a tab per member, Stop All, and a pause after 12 broadcast rounds in a row. Guide: https://github.com/juliomatcom/xade/blob/main/docs/multi-session.md
 - Forks a session to another provider: the source agent writes a short state summary and the new one continues from it.
 - The top bar shows usage quota for providers that report it.
@@ -17,5 +17,5 @@
 - No telemetry; session history is saved locally. The agents still send prompts and code to their model providers.
 - Model and effort picker, context and token meters, git branch and changed-file count in the bottom bar.
 - Native Rust binary rendered on the GPU. No Electron.
-- Coming soon: OpenCode and local models.
+- Coming soon: local models.
 - Platforms: macOS (Apple Silicon), Linux (x86_64, aarch64).

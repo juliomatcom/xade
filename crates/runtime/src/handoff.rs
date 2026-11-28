@@ -104,6 +104,7 @@ fn provider_name(p: ProviderId) -> &'static str {
         ProviderId::Claude => "claude",
         ProviderId::Antigravity => "antigravity",
         ProviderId::Codex => "codex",
+        ProviderId::OpenCode => "opencode",
     }
 }
 
@@ -112,6 +113,7 @@ fn parse_provider(s: &str) -> Option<ProviderId> {
         ProviderId::Claude,
         ProviderId::Antigravity,
         ProviderId::Codex,
+        ProviderId::OpenCode,
     ]
     .into_iter()
     .find(|p| provider_name(*p) == s)

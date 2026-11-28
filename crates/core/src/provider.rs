@@ -25,6 +25,11 @@ pub trait AgentProvider: Send + Sync {
     fn account_label(&self) -> Option<String> {
         None
     }
+    /// Whether a process is built for one Auto mode: the session then respawns it, once idle,
+    /// after a change. `SessionCommand::SetAutoMode` is sent either way.
+    fn respawn_on_auto_change(&self) -> bool {
+        false
+    }
     /// Must be called inside a tokio runtime: starts a task and returns its channels.
     fn spawn(&self, cfg: SpawnConfig) -> Result<SessionHandle, ProviderError>;
     /// Sessions found in the provider's own history. Blocking; callers use `spawn_blocking`.

@@ -7,10 +7,10 @@
 - Really fast: never block a frame, never add startup or interaction latency; a feature that slows the app does not ship.
 
 ## Hard invariants
-- Never read, copy, log or transmit CLI credentials (Claude's, `agy`'s, `codex`'s) or auth output (`claude auth status`, `codex` `account/read`) beyond login state and display-only account label (`email` / `"API key"`): never log (not at debug), persist, or put it in error reports, Copy text or issue bodies.
+- Never read, copy, log or transmit CLI credentials (Claude's, `agy`'s, `codex`'s, `opencode`'s) or auth output (`claude auth status`, `codex` `account/read`) beyond login state and display-only account label (`email` / `"API key"`): never log (not at debug), persist, or put it in error reports, Copy text or issue bodies.
 - Spawn the vendor binary unmodified; never patch, wrap or proxy it, never expose it over the network.
 - No token billing in this app.
-- Dependency rule: xade-core ← xade-claude, xade-antigravity, xade-codex, xade-store ← xade-runtime ← xade. Only xade names concrete providers.
+- Dependency rule: xade-core ← xade-claude, xade-antigravity, xade-codex, xade-opencode, xade-store ← xade-runtime ← xade. Only xade names concrete providers.
 - Only the store writer thread writes SQLite; only the session actor creates message WriteOps.
 - Persist every user prompt, finalized assistant block and tool result when it completes; never persist deltas.
 - Unknown CLI frames or fields are skipped, never fatal.
@@ -27,7 +27,7 @@
 - `tracing` for logs; never log prompt or message text above `debug`.
 - Never swallow an error: log it, or report it to the user (`App::report`); the UI never panics out of a frame.
 - UI colors only from `theme.rs` tokens.
-- UI is square: windows, buttons, frames and painted rects have no corner radius (`CornerRadius::ZERO`, painter rounding `0.0`); never add rounding, except the chat bubble (`conversation::bubble`, shared by single and multi-session chats), rounded with a tail whose side is a parameter (`Tail::Right` for the user, `Tail::Left` for model-to-model).
+- UI is square: windows, buttons, frames and painted rects have no corner radius (`CornerRadius::ZERO`, painter rounding `0.0`); never add rounding, except badges (outlined tags and pills, radius `chrome::BADGE_RADIUS`; prefer `chrome::badge`) and the chat bubble (`conversation::bubble`, shared by single and multi-session chats), rounded with a tail whose side is a parameter (`Tail::Right` for the user, `Tail::Left` for model-to-model).
 
 ## Docs
 - Wiki edits follow AGENTS.md "Wiki Upkeep". Protocol facts in claude-protocol.md must be backed by a fixture.

@@ -14,7 +14,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use xade_core::{
     AgentProvider, Delivery, Effort, Message, ModelOption, MultiSessionId, ProviderError,
     ProviderEvent, ProviderId, QuotaGroup, QuotaKind, QuotaWindow, Role, RunningSession, Session,
-    SessionId, SessionStatus, Workspace, WorkspaceId,
+    SessionId, SessionStatus, TeamMessageKind, Workspace, WorkspaceId,
 };
 use xade_runtime::git::{git_status, GitState};
 use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
@@ -2610,8 +2610,8 @@ impl App {
             (Some(id), AppEventKind::Provider(p)) => self.on_provider_event(id, p),
             (Some(id), AppEventKind::MemberMessage(msg)) => {
                 if let Some(vm) = self.sessions.get_mut(&id) {
-                    // Only a new prompt jumps to the end; replies follow `stick_to_bottom`.
-                    vm.scroll_to_end |= msg.role == Role::User;
+                    // Only a new user prompt jumps to the end; broadcasts and replies follow `stick_to_bottom`.
+                    vm.scroll_to_end |= msg.role == Role::User && msg.sender_handle.is_none();
                     if msg.role == Role::User {
                         mark_sent(vm);
                     }
@@ -2649,6 +2649,8 @@ impl App {
             }
             (_, AppEventKind::MultiTeamMessage { multi_id, message }) => {
                 if let Some(mvm) = self.multi_sessions.get_mut(&multi_id) {
+                    // Only a new user prompt jumps to the end; broadcasts follow `stick_to_bottom`.
+                    mvm.scroll_to_end |= matches!(message.kind, TeamMessageKind::User { .. });
                     mvm.team_messages.push(message);
                 }
                 self.refresh_cards();
@@ -3290,6 +3292,14 @@ impl StubProvider {
 
     pub(crate) fn codex() -> Self {
         Self::new(ProviderId::Codex, "Codex", &["gpt-6-luna"])
+    }
+
+    pub(crate) fn opencode() -> Self {
+        Self::new(
+            ProviderId::OpenCode,
+            "OpenCode",
+            &["opencode-go/glm-5.3-flash"],
+        )
     }
 
     fn new(id: ProviderId, name: &'static str, models: &[&str]) -> Self {
@@ -4548,6 +4558,134 @@ mod tests {
         let (p, model, _, _) = created(&rt, &mut app);
         assert_eq!(p, codex);
         assert_eq!(model, "gpt-6-luna");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn four_providers_hide_and_select_opencode_independently() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        app.providers.push(Arc::new(StubProvider::codex()));
+        app.providers.push(Arc::new(StubProvider::opencode()));
+        let (claude, agy, codex, opencode) = (
+            ProviderId::Claude,
+            ProviderId::Antigravity,
+            ProviderId::Codex,
+            ProviderId::OpenCode,
+        );
+        let all = vec![claude, agy, codex, opencode];
+        assert_eq!(app.visible_providers(), all);
+        assert_eq!(app.selectable_providers(), all);
+
+        fail(&mut app, opencode, ProviderError::NotInstalled);
+        assert_eq!(app.visible_providers(), vec![claude, agy, codex]);
+        assert_eq!(app.selectable_providers(), vec![claude, agy, codex]);
+        app.home.preflight.insert(opencode, Ok(()));
+
+        let ws = WorkspaceId::new();
+        app.home.workspaces = vec![Workspace {
+            id: ws,
+            root_path: dir.clone(),
+            display_name: "w".into(),
+            last_opened_at: OffsetDateTime::now_utc(),
+            is_open: true,
+        }];
+        app.home.scope = Some(ws);
+        app.writer
+            .send(WriteOp::UpsertWorkspace(app.home.workspaces[0].clone()))
+            .unwrap();
+        app.home.provider_pick = Some(opencode);
+        let (p, model, _, _) = created(&rt, &mut app);
+        assert_eq!(p, opencode);
+        assert_eq!(model, "opencode-go/glm-5.3-flash");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn multi_events_only_scroll_to_end_on_user_prompts() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let now = OffsetDateTime::now_utc();
+        let ws = WorkspaceId::new();
+        let multi_id = MultiSessionId::new();
+        let member_id = SessionId::new();
+        let multi = xade_core::MultiSession {
+            id: multi_id,
+            workspace_id: ws,
+            title: "t".into(),
+            preview_snippet: String::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let mut member = crate::composer::test_support::vm(String::new()).session;
+        member.id = member_id;
+        member.workspace_id = ws;
+        member.multi_session_id = Some(multi_id);
+        member.agent_handle = Some("opus-1".into());
+        app.insert_multi_vm(multi, vec![(member, Vec::new())], Vec::new());
+
+        // Broadcast on Team feed leaves `scroll_to_end` off.
+        app.on_app_event(AppEvent {
+            session_id: None,
+            kind: AppEventKind::MultiTeamMessage {
+                multi_id,
+                message: xade_core::TeamMessage {
+                    id: uuid::Uuid::new_v4(),
+                    multi_session_id: multi_id,
+                    seq: 1,
+                    kind: TeamMessageKind::Broadcast {
+                        sender_handle: "opus-1".into(),
+                        sender_provider: ProviderId::Claude,
+                    },
+                    content_text: "status update".into(),
+                    created_at: now,
+                },
+            },
+        });
+        assert!(!app.multi_sessions[&multi_id].scroll_to_end);
+
+        // User prompt (To: All or `#handle:`) arms `scroll_to_end` on Team feed.
+        for target in [None, Some("opus-1".to_string())] {
+            app.multi_sessions.get_mut(&multi_id).unwrap().scroll_to_end = false;
+            app.on_app_event(AppEvent {
+                session_id: None,
+                kind: AppEventKind::MultiTeamMessage {
+                    multi_id,
+                    message: xade_core::TeamMessage {
+                        id: uuid::Uuid::new_v4(),
+                        multi_session_id: multi_id,
+                        seq: 2,
+                        kind: TeamMessageKind::User { target },
+                        content_text: "hi".into(),
+                        created_at: now,
+                    },
+                },
+            });
+            assert!(app.multi_sessions[&multi_id].scroll_to_end);
+        }
+
+        // Model-to-model broadcast delivered to a member does not yank a scrolled-up member tab.
+        let mut bcast = new_message(
+            &app.sessions[&member_id],
+            Role::User,
+            "from peer".into(),
+            None,
+        );
+        bcast.sender_handle = Some("sonnet-1".into());
+        app.on_app_event(AppEvent {
+            session_id: Some(member_id),
+            kind: AppEventKind::MemberMessage(bcast),
+        });
+        assert!(!app.sessions[&member_id].scroll_to_end);
+
+        // Human user prompt delivered to a member arms `scroll_to_end`.
+        let user_msg = new_message(&app.sessions[&member_id], Role::User, "hi".into(), None);
+        app.on_app_event(AppEvent {
+            session_id: Some(member_id),
+            kind: AppEventKind::MemberMessage(user_msg),
+        });
+        assert!(app.sessions[&member_id].scroll_to_end);
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

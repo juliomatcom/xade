@@ -21,11 +21,13 @@ use xade_antigravity::AntigravityProvider;
 use xade_claude::ClaudeProvider;
 use xade_codex::CodexProvider;
 use xade_core::{AgentProvider, Effort, ProviderEvent, ProviderId, Role, SessionId, SessionStatus};
+use xade_opencode::OpenCodeProvider;
 use xade_runtime::{AppEvent, AppEventKind, ManagerCmd};
 
 const CLAUDE: &str = "haiku";
 const AGY: &str = "gemini-3.8-flash";
 const CODEX: &str = "gpt-6-luna";
+const OPENCODE: &str = "opencode-go/glm-5.3-flash";
 const WAIT: u64 = 180;
 const REMEMBER: &str = "Remember the word kiwi. Reply with just: ok";
 /// The prompt the app ships for the snapshot turn.
@@ -64,6 +66,7 @@ impl Cleanup {
                 ProviderId::Claude => self.claude.delete_session(id),
                 ProviderId::Antigravity => self.agy.delete_session(id),
                 ProviderId::Codex => CodexProvider::new().delete_session(id),
+                ProviderId::OpenCode => OpenCodeProvider::new().delete_session(id),
             };
             if let Err(e) = res {
                 eprintln!("could not delete conversation {id}: {e}");
@@ -122,6 +125,7 @@ fn model(p: ProviderId) -> &'static str {
         ProviderId::Claude => CLAUDE,
         ProviderId::Antigravity => AGY,
         ProviderId::Codex => CODEX,
+        ProviderId::OpenCode => OPENCODE,
     }
 }
 
