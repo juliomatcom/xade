@@ -396,7 +396,7 @@ pub fn paint_word(
     } else {
         theme::find_match()
     };
-    painter.rect_filled(rect, 2.0, color);
+    painter.rect_filled(rect, 0.0, color);
     if current && in_chat {
         // Redrawing the whole galley would paint inline code's own background back over the
         // fill, so lay out just the matched text in the font of its first glyph.

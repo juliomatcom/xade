@@ -28,22 +28,13 @@ pub fn header(
         collapsed,
         focused,
     } = state;
-    let (fill, radius) = match (focused, collapsed) {
-        (false, _) => (egui::Color32::TRANSPARENT, egui::CornerRadius::ZERO),
-        (true, true) => (theme::bg_header_focus(), egui::CornerRadius::same(7)),
-        (true, false) => (
-            theme::bg_header_focus(),
-            egui::CornerRadius {
-                nw: 7,
-                ne: 7,
-                sw: 0,
-                se: 0,
-            },
-        ),
+    let fill = if focused {
+        theme::bg_header_focus()
+    } else {
+        egui::Color32::TRANSPARENT
     };
     egui::Frame::new()
         .fill(fill)
-        .corner_radius(radius)
         .inner_margin(egui::Margin::symmetric(10, 6))
         .show(ui, |ui| {
             // The bar's text is chrome, not content: selecting it must not offer Copy / Quote.
@@ -83,7 +74,6 @@ pub fn header(
 pub fn badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, color))
-        .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(6, 0))
         .show(ui, |ui| {
             ui.label(RichText::new(text).small().color(color));

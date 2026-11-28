@@ -94,7 +94,6 @@ fn view_toggle(app: &mut App, ui: &mut egui::Ui, area: egui::Rect) {
     );
     let used = egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, theme::border_strong()))
-        .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(4, 2))
         .show(&mut child, |ui| {
             let to_home = ui
@@ -270,7 +269,6 @@ fn set_scope(app: &mut App, scope: Option<WorkspaceId>) {
 fn session_controls(app: &mut App, ui: &mut egui::Ui) {
     egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, theme::border_strong()))
-        .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(4, 2))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -473,10 +471,10 @@ fn quota_group(ui: &mut egui::Ui, provider: ProviderId, name: &str, groups: &[Qu
                 .map_or(0.0, |q| (quota_pct(q, now) / 100.0).clamp(0.0, 1.0));
             let track =
                 egui::Rect::from_min_size(egui::pos2(left, y - h / 2.0), egui::vec2(width, h));
-            painter.rect_filled(track, h / 2.0, theme::border());
+            painter.rect_filled(track, 0.0, theme::border());
             let mut fill = track;
             fill.set_width(track.width() * fraction);
-            painter.rect_filled(fill, h / 2.0, theme::usage_color(fraction));
+            painter.rect_filled(fill, 0.0, theme::usage_color(fraction));
         };
         bar(mid - 4.0, 5.0, QuotaKind::FiveHour);
         bar(mid + 3.0, 2.0, QuotaKind::SevenDay);
@@ -556,7 +554,12 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.with_layout(Layout::top_down(Align::Min), |ui| {
-                    heading(ui, "Workspaces");
+                    ui.horizontal(|ui| {
+                        heading(ui, "Workspaces");
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            sidebar_toggle(app, ui, icons::PREV, "Hide sidebar");
+                        });
+                    });
                     if ui
                         .selectable_label(app.home.scope.is_none(), "All Workspaces")
                         .clicked()
@@ -625,6 +628,34 @@ pub fn sidebar(app: &mut App, ui: &mut egui::Ui) {
                     }
                 });
             });
+        });
+}
+
+/// The arrow that hides the sidebar, or shows it again from the collapsed strip.
+fn sidebar_toggle(app: &mut App, ui: &mut egui::Ui, arrow: &str, tip: &str) {
+    let tip = format!("{tip} ({})", keymap::shortcut_text(Action::ToggleSidebar));
+    if ui
+        .add(egui::Button::new(arrow).small())
+        .on_hover_text(tip)
+        .clicked()
+    {
+        app.sidebar_visible = !app.sidebar_visible;
+    }
+}
+
+/// The thin strip left of the central area while the sidebar is hidden, holding the arrow
+/// that brings it back.
+pub fn sidebar_collapsed(app: &mut App, ui: &mut egui::Ui) {
+    let frame = egui::Frame::new()
+        .fill(theme::bg_sidebar())
+        .stroke(egui::Stroke::new(1.0, theme::border()))
+        .inner_margin(egui::Margin::same(8));
+    egui::Panel::left("sidebar_collapsed")
+        .frame(frame)
+        .resizable(false)
+        .exact_size(44.0)
+        .show(ui, |ui| {
+            sidebar_toggle(app, ui, icons::NEXT, "Show sidebar")
         });
 }
 
@@ -741,7 +772,6 @@ pub fn grid(app: &mut App, ui: &mut egui::Ui) {
         egui::Frame::new()
             .fill(theme::bg_raised())
             .stroke(egui::Stroke::new(1.0, theme::danger()))
-            .corner_radius(6)
             .inner_margin(egui::Margin::same(12))
             .show(ui, |ui| {
                 ui.label(RichText::new(text).color(theme::danger()));
@@ -918,7 +948,7 @@ fn card_ui(
     };
     ui.painter().rect(
         rect,
-        6,
+        0,
         fill,
         egui::Stroke::new(1.0, theme::border()),
         egui::StrokeKind::Inside,
@@ -1065,7 +1095,6 @@ fn card_ui(
             egui::Frame::new()
                 .fill(theme::bg_app())
                 .stroke(egui::Stroke::new(1.0, theme::accent()))
-                .corner_radius(3)
                 .inner_margin(egui::Margin::symmetric(5, 1))
                 .show(ui, |ui| {
                     ui.label(RichText::new("Multi").small().color(theme::accent()));

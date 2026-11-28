@@ -60,7 +60,7 @@ The `shortcuts` object maps an action name to its keys: `"cmd+t"`, or two keys f
 | `prev_window` | `ctrl+shift+tab` | Previous window |
 | `maximize` | `cmd+k cmd+m` | Maximize / restore the focused window |
 | `retile` | `cmd+r` | Re-tile windows (the top bar's Tile button) |
-| `toggle_sidebar` | `cmd+b` | Toggle the sidebar |
+| `toggle_sidebar` | `cmd+b` | Toggle the sidebar (also the arrow at its top) |
 | `focus_window_1` … `focus_window_9` | `cmd+1` … `cmd+9` | Focus window 1-9 |
 
 **General**

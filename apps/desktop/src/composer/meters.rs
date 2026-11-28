@@ -1,5 +1,6 @@
 //! Context window ring and the token and usage text.
 
+use egui::RichText;
 use xade_core::UsageTotals;
 
 use crate::theme;
@@ -26,8 +27,21 @@ fn arc_points(center: egui::Pos2, radius: f32, fraction: f32) -> Vec<egui::Pos2>
         .collect()
 }
 
+/// The context ring and token totals, right-aligned in the rest of the row; the text is cut with
+/// "…" when narrow (never a second row) and shows in full on hover.
+pub(crate) fn session_stats(ui: &mut egui::Ui, u: &UsageTotals) {
+    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        context_donut(ui, u);
+        let stats = usage_text(u);
+        ui.add(
+            egui::Label::new(RichText::new(&stats).small().color(theme::text_muted())).truncate(),
+        )
+        .on_hover_text(stats);
+    });
+}
+
 /// The context window as a small ring; the numbers show on hover.
-pub(super) fn context_donut(ui: &mut egui::Ui, u: &UsageTotals) {
+fn context_donut(ui: &mut egui::Ui, u: &UsageTotals) {
     let (rect, resp) =
         ui.allocate_exact_size(egui::vec2(DONUT_SIZE, DONUT_SIZE), egui::Sense::hover());
     let center = rect.center();
@@ -70,7 +84,7 @@ fn context_text(u: &UsageTotals) -> String {
     )
 }
 
-pub(super) fn usage_text(u: &UsageTotals) -> String {
+fn usage_text(u: &UsageTotals) -> String {
     format!(
         "in {} · out {} · cache {}",
         fmt_tokens(u.input_tokens),

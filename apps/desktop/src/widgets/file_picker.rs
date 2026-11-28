@@ -245,7 +245,6 @@ fn row(ui: &mut egui::Ui, path: &str, workspace: Option<&str>, selected: bool) -
     };
     egui::Frame::new()
         .fill(fill)
-        .corner_radius(4)
         .inner_margin(egui::Margin::symmetric(8, 5))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

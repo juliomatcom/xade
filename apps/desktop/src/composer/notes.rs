@@ -105,7 +105,6 @@ pub(super) fn subagent_badge(ui: &mut egui::Ui, count: usize, active: bool) -> b
             egui::Color32::TRANSPARENT
         })
         .stroke(egui::Stroke::new(1.0, theme::claude()))
-        .corner_radius(8)
         .inner_margin(egui::Margin::symmetric(6, 0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -138,7 +137,6 @@ pub(super) fn note_frame(ui: &mut egui::Ui, text: &str) {
     egui::Frame::new()
         .fill(theme::bg_raised())
         .stroke(egui::Stroke::new(1.0, theme::warn()))
-        .corner_radius(6)
         .inner_margin(egui::Margin::symmetric(8, 4))
         .show(ui, |ui| {
             ui.add(

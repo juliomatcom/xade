@@ -158,6 +158,7 @@ pub fn show(
             if let MultiTab::Member(sid) = vm.active_tab {
                 if let Some(member) = members.get_mut(&sid) {
                     session_view::banner(ui, member, env);
+                    composer::cost_notes(ui, member, env);
                 }
             }
             unified_composer(ui, vm, &handles, members, any_busy, env);
@@ -361,7 +362,6 @@ fn tab_item(
     body: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let mut prepared = egui::Frame::new()
-        .corner_radius(3)
         .inner_margin(egui::Margin::symmetric(8, 4))
         .begin(ui);
     prepared
@@ -511,24 +511,13 @@ fn member_subbar(ui: &mut egui::Ui, member: &mut SessionVm, env: &Env) {
                 };
                 let pill = egui::Button::new(RichText::new(auto_text).small().color(fg))
                     .fill(fill)
-                    .stroke(egui::Stroke::new(1.0, stroke))
-                    .corner_radius(3);
+                    .stroke(egui::Stroke::new(1.0, stroke));
                 if ui.add(pill).clicked() {
                     member.session.auto_mode = !on;
                     let _ = env.cmd_tx.send(ManagerCmd::SetAutoMode {
                         session_id: member.session.id,
                         on: member.session.auto_mode,
                     });
-                }
-                let u = &member.session.usage;
-                if u.context_window_max > 0 {
-                    let pct = (u.context_tokens_used as f64 / u.context_window_max as f64 * 100.0)
-                        .round() as u64;
-                    ui.label(
-                        RichText::new(format!("ctx {pct}%"))
-                            .small()
-                            .color(theme::text_muted()),
-                    );
                 }
                 if matches!(
                     member.status,
@@ -792,30 +781,19 @@ fn combined_entry_row(
     entry: &CombinedEntry,
 ) -> Option<PathBuf> {
     match &entry.kind {
-        CombinedKind::User { target } => {
-            let indent = ui.available_width() * 0.15;
-            ui.horizontal_top(|ui| {
-                ui.add_space(indent);
-                egui::Frame::new()
-                    .fill(theme::bg_raised())
-                    .stroke(egui::Stroke::new(1.0, theme::border_light()))
-                    .corner_radius(8)
-                    .inner_margin(egui::Margin::same(8))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.vertical(|ui| {
-                            let to = target
-                                .as_deref()
-                                .map_or_else(|| "To: All".to_string(), |h| format!("To: #{h}"));
-                            ui.label(RichText::new(to).small().strong().color(theme::accent()));
-                            links.markdown(ui, cache, cwd, entry.id, &entry.text)
-                        })
-                        .inner
-                    })
-                    .inner
-            })
-            .inner
-        }
+        CombinedKind::User { target } => conversation::bubble(
+            ui,
+            conversation::Tail::Right,
+            theme::bg_raised(),
+            theme::border_light(),
+            |ui| {
+                let to = target
+                    .as_deref()
+                    .map_or_else(|| "To: All".to_string(), |h| format!("To: #{h}"));
+                ui.label(RichText::new(to).small().strong().color(theme::accent()));
+                links.markdown(ui, cache, cwd, entry.id, &entry.text)
+            },
+        ),
         CombinedKind::MemberReply { handle, provider } => {
             ui.horizontal_top(|ui| {
                 let (rect, _) =
@@ -842,50 +820,44 @@ fn combined_entry_row(
             sender_handle,
             sender_provider,
         } => {
-            // Subtle bluish container so model-to-model messages stand out cleanly from regular
-            // assistant replies while blending with the window background.
-            egui::Frame::new()
-                .fill(theme::broadcast_bg())
-                .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
-                .corner_radius(8)
-                .inner_margin(egui::Margin::same(10))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            if let Some(tex) = conversation::cli_symbol(ui.ctx(), *sender_provider)
-                            {
-                                ui.add(
-                                    egui::Image::new(&tex)
-                                        .tint(conversation::symbol_tint(*sender_provider))
-                                        .fit_to_exact_size(egui::vec2(14.0, 14.0)),
-                                );
-                            }
-                            ui.label(
-                                RichText::new(format!("#{sender_handle} \u{2192} Team"))
-                                    .small()
-                                    .strong()
-                                    .color(theme::text()),
+            // Subtle bluish bubble on the left, so model-to-model messages stand out from the
+            // user's (right) while blending with the window background.
+            conversation::bubble(
+                ui,
+                conversation::Tail::Left,
+                theme::broadcast_bg(),
+                theme::broadcast_border(),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        if let Some(tex) = conversation::cli_symbol(ui.ctx(), *sender_provider) {
+                            ui.add(
+                                egui::Image::new(&tex)
+                                    .tint(conversation::symbol_tint(*sender_provider))
+                                    .fit_to_exact_size(egui::vec2(14.0, 14.0)),
                             );
-                            egui::Frame::new()
-                                .fill(theme::bg_app())
-                                .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
-                                .corner_radius(4)
-                                .inner_margin(egui::Margin::symmetric(5, 1))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        RichText::new("Model-to-model")
-                                            .small()
-                                            .color(theme::text_muted()),
-                                    );
-                                });
-                        });
-                        ui.add_space(4.0);
-                        links.markdown(ui, cache, cwd, entry.id, &entry.text)
-                    })
-                    .inner
-                })
-                .inner
+                        }
+                        ui.label(
+                            RichText::new(format!("#{sender_handle} \u{2192} Team"))
+                                .small()
+                                .strong()
+                                .color(theme::text()),
+                        );
+                        egui::Frame::new()
+                            .fill(theme::bg_app())
+                            .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
+                            .inner_margin(egui::Margin::symmetric(5, 1))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new("Model-to-model")
+                                        .small()
+                                        .color(theme::text_muted()),
+                                );
+                            });
+                    });
+                    ui.add_space(4.0);
+                    links.markdown(ui, cache, cwd, entry.id, &entry.text)
+                },
+            )
         }
     }
 }
@@ -976,7 +948,6 @@ fn unified_composer(
             let frame_resp = egui::Frame::new()
                 .fill(theme::bg_raised())
                 .stroke(egui::Stroke::new(1.0, theme::border_strong()))
-                .corner_radius(6)
                 .inner_margin(egui::Margin::symmetric(6, 4))
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -1051,7 +1022,6 @@ fn unified_composer(
     let input_box = egui::Frame::new()
         .fill(theme::bg_hover())
         .stroke(egui::Stroke::new(1.5, theme::border_strong()))
-        .corner_radius(8)
         .inner_margin(egui::Margin::same(6))
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {
@@ -1140,7 +1110,11 @@ fn unified_composer(
         });
 
     // Quick target pills sit directly under the input box (same row position as standalone
-    // composer controls).
+    // composer controls). A member tab adds that session's stats; the Team tab has none.
+    let tab_usage = match vm.active_tab {
+        MultiTab::Team => None,
+        MultiTab::Member(sid) => members.get(&sid).map(|m| &m.session.usage),
+    };
     let box_width = input_box.response.rect.width();
     ui.add_space(4.0);
     composer::controls_row(ui, box_width, |ui| {
@@ -1197,6 +1171,9 @@ fn unified_composer(
                     steer = alt_steer;
                 }
             }
+            if let Some(usage) = tab_usage {
+                composer::session_stats(ui, usage);
+            }
         });
     });
 
@@ -1250,6 +1227,7 @@ fn set_target_prefix(input: &mut String, handles: &[String], handle: &str) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -1268,5 +1246,96 @@ mod tests {
         assert_eq!(input, "#neon-1: plan feature x");
         strip_target_prefix(&mut input, &handles);
         assert_eq!(input, "plan feature x");
+    }
+
+    /// Every text painted by the window on `tab`, with where it landed.
+    fn painted(tab: MultiTab, member: SessionVm) -> Vec<(String, egui::Rect)> {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            fork_targets: &[],
+            vscode: None,
+            maximized: None,
+            send_mode: SendMode::Queue,
+            send_on_enter: false,
+            break_all: true,
+            ide_context: None,
+            focused: false,
+        };
+        let sid = member.session.id;
+        let now = member.session.created_at;
+        let multi = MultiSession {
+            id: xade_core::MultiSessionId::new(),
+            workspace_id: member.session.workspace_id,
+            title: "t".into(),
+            preview_snippet: String::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let mut vm = MultiSessionVm::new(multi, "/tmp".into(), vec![sid], Vec::new());
+        if tab != MultiTab::Team {
+            vm.active_tab = MultiTab::Member(sid);
+        }
+        let mut members = HashMap::from([(sid, member)]);
+        let input = || egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(700.0, 600.0),
+            )),
+            ..Default::default()
+        };
+        for _ in 0..2 {
+            ctx.run_ui(input(), |ui| {
+                show(ui, &mut vm, &mut members, &env, false);
+            })
+            .drop_without_applying_deltas();
+        }
+        let mut out = ctx.run_ui(input(), |ui| {
+            show(ui, &mut vm, &mut members, &env, false);
+        });
+        out.textures_delta.clear();
+        fn walk(s: &egui::Shape, t: &mut Vec<(String, egui::Rect)>) {
+            match s {
+                egui::Shape::Text(x) => {
+                    t.push((x.galley.text().to_string(), s.visual_bounding_rect()))
+                }
+                egui::Shape::Vec(v) => v.iter().for_each(|s| walk(s, t)),
+                _ => {}
+            }
+        }
+        let mut texts = Vec::new();
+        out.shapes.iter().for_each(|c| walk(&c.shape, &mut texts));
+        texts
+    }
+
+    #[test]
+    fn only_a_member_tab_shows_usage_and_the_expired_cache_note() {
+        let member = || {
+            let mut m = crate::composer::test_support::vm(String::new());
+            m.session.agent_handle = Some("opus-1".into());
+            m.session.updated_at -= time::Duration::hours(2);
+            m.session.usage.context_tokens_used = 42_000;
+            m.session.usage.input_tokens = 1_200;
+            m
+        };
+        let find = |texts: &[(String, egui::Rect)], s: &str| {
+            texts.iter().find(|(t, _)| t.contains(s)).map(|(_, r)| *r)
+        };
+
+        let texts = painted(MultiTab::Member(SessionId::new()), member());
+        assert!(find(&texts, "Cache expired").is_some(), "{texts:?}");
+        let stats = find(&texts, "in 1.2k").unwrap();
+        let to = find(&texts, "To:").unwrap();
+        assert!(
+            stats.y_range().intersects(to.y_range()) && stats.left() > to.right(),
+            "stats sit right of the target pills: {stats:?} {to:?}"
+        );
+
+        let texts = painted(MultiTab::Team, member());
+        assert!(find(&texts, "Cache expired").is_none(), "{texts:?}");
+        assert!(find(&texts, "in 1.2k").is_none(), "{texts:?}");
     }
 }

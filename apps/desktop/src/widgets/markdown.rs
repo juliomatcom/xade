@@ -259,7 +259,7 @@ fn table_view(ui: &mut egui::Ui, table: &Table, find: Option<TableFind>) -> usiz
             );
             let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
             if r % 2 == 1 {
-                ui.painter().rect_filled(rect, 2.0, stripe);
+                ui.painter().rect_filled(rect, 0.0, stripe);
             }
             let mut x = rect.min.x + TABLE_PAD_X;
             for (galley, w) in galleys.into_iter().zip(&widths) {
