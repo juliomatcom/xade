@@ -19,7 +19,7 @@ use crate::session_view;
 use crate::theme;
 use crate::widgets::diff_modal::{self, ModalAction};
 
-const GAP: f32 = 8.0;
+const GAP: f32 = 6.0;
 const DEFAULT_SIZE: [f32; 2] = [520.0, 640.0];
 const CASCADE: f32 = 28.0;
 /// Smallest tile `tile_rects` makes while the area allows it.
@@ -615,8 +615,7 @@ fn window<'a>(
         .frame(
             egui::Frame::new()
                 .fill(fill)
-                .stroke(egui::Stroke::new(1.0, theme::border()))
-                .corner_radius(8),
+                .stroke(egui::Stroke::new(1.0, theme::border())),
         );
     match applying {
         Some(r) => win.current_pos(r.min).fixed_size(r.size()),

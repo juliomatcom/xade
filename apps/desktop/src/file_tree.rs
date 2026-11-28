@@ -219,7 +219,7 @@ fn row(
     let (rect, resp) = row_rect(ui, Sense::click());
     if ui.is_rect_visible(rect) {
         if resp.hovered() {
-            ui.painter().rect_filled(rect, 3.0, theme::bg_hover());
+            ui.painter().rect_filled(rect, 0.0, theme::bg_hover());
         }
         let x = rect.left() + INDENT * depth as f32;
         let icon = match (e.kind, open) {

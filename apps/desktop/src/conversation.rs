@@ -155,7 +155,7 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm) -> Option<PathBuf> {
                             if mark.matches.get(mark.current) == Some(&i) {
                                 ui.painter().rect_filled(
                                     rect.expand(3.0),
-                                    4.0,
+                                    0.0,
                                     theme::find_block(),
                                 );
                                 let nth = mark.current - mark.matches.partition_point(|&x| x < i);
@@ -326,7 +326,6 @@ fn error_block(ui: &mut egui::Ui, session_id: SessionId, msg: &str) {
             egui::Frame::new()
                 .fill(theme::bg_terminal())
                 .stroke(egui::Stroke::new(1.0, theme::border()))
-                .corner_radius(6)
                 .inner_margin(egui::Margin::symmetric(8, 6))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -435,7 +434,6 @@ fn user_bubble(
         egui::Frame::new()
             .fill(theme::bg_raised())
             .stroke(egui::Stroke::new(1.0, theme::border_light()))
-            .corner_radius(8)
             .inner_margin(egui::Margin::same(8))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -506,7 +504,6 @@ fn render_multi_assistant(
                 egui::Frame::new()
                     .fill(theme::broadcast_bg())
                     .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
-                    .corner_radius(6)
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());

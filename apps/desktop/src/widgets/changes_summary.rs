@@ -120,7 +120,6 @@ pub fn show(
     egui::Frame::new()
         .fill(theme::bg_raised())
         .stroke(Stroke::new(1.0, theme::border()))
-        .corner_radius(6)
         .inner_margin(egui::Margin::same(8))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());

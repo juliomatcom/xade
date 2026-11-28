@@ -118,7 +118,6 @@ pub fn show(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> ComposerOut {
     let input_box = egui::Frame::new()
         .fill(theme::bg_hover())
         .stroke(egui::Stroke::new(1.5, theme::border_strong()))
-        .corner_radius(8)
         .inner_margin(egui::Margin::same(6))
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {

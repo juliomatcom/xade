@@ -211,7 +211,6 @@ fn card(ui: &mut egui::Ui, row: &Row) {
     egui::Frame::new()
         .fill(theme::bg_raised())
         .stroke(egui::Stroke::new(1.0, theme::border()))
-        .corner_radius(6)
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -255,7 +254,6 @@ fn command(ui: &mut egui::Ui, step: &str, text: &str) {
         );
         egui::Frame::new()
             .fill(theme::bg_terminal())
-            .corner_radius(6)
             .inner_margin(Margin::symmetric(8, 4))
             .show(ui, |ui| {
                 ui.horizontal(|ui| {

@@ -27,7 +27,6 @@ pub fn show(ctx: &egui::Context) -> bool {
                         ui.label(b.title);
                         egui::Frame::new()
                             .fill(theme::bg_hover())
-                            .corner_radius(4)
                             .inner_margin(egui::Margin::symmetric(6, 1))
                             .show(ui, |ui| {
                                 ui.label(RichText::new(km.label(b, mac)).monospace());

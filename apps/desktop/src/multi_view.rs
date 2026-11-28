@@ -362,7 +362,6 @@ fn tab_item(
     body: impl FnOnce(&mut egui::Ui),
 ) -> bool {
     let mut prepared = egui::Frame::new()
-        .corner_radius(3)
         .inner_margin(egui::Margin::symmetric(8, 4))
         .begin(ui);
     prepared
@@ -512,8 +511,7 @@ fn member_subbar(ui: &mut egui::Ui, member: &mut SessionVm, env: &Env) {
                 };
                 let pill = egui::Button::new(RichText::new(auto_text).small().color(fg))
                     .fill(fill)
-                    .stroke(egui::Stroke::new(1.0, stroke))
-                    .corner_radius(3);
+                    .stroke(egui::Stroke::new(1.0, stroke));
                 if ui.add(pill).clicked() {
                     member.session.auto_mode = !on;
                     let _ = env.cmd_tx.send(ManagerCmd::SetAutoMode {
@@ -790,7 +788,6 @@ fn combined_entry_row(
                 egui::Frame::new()
                     .fill(theme::bg_raised())
                     .stroke(egui::Stroke::new(1.0, theme::border_light()))
-                    .corner_radius(8)
                     .inner_margin(egui::Margin::same(8))
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
@@ -838,7 +835,6 @@ fn combined_entry_row(
             egui::Frame::new()
                 .fill(theme::broadcast_bg())
                 .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
-                .corner_radius(8)
                 .inner_margin(egui::Margin::same(10))
                 .show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -861,7 +857,6 @@ fn combined_entry_row(
                             egui::Frame::new()
                                 .fill(theme::bg_app())
                                 .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
-                                .corner_radius(4)
                                 .inner_margin(egui::Margin::symmetric(5, 1))
                                 .show(ui, |ui| {
                                     ui.label(
@@ -967,7 +962,6 @@ fn unified_composer(
             let frame_resp = egui::Frame::new()
                 .fill(theme::bg_raised())
                 .stroke(egui::Stroke::new(1.0, theme::border_strong()))
-                .corner_radius(6)
                 .inner_margin(egui::Margin::symmetric(6, 4))
                 .show(ui, |ui| {
                     ui.horizontal_wrapped(|ui| {
@@ -1042,7 +1036,6 @@ fn unified_composer(
     let input_box = egui::Frame::new()
         .fill(theme::bg_hover())
         .stroke(egui::Stroke::new(1.5, theme::border_strong()))
-        .corner_radius(8)
         .inner_margin(egui::Margin::same(6))
         .show(ui, |ui| {
             ui.horizontal_top(|ui| {

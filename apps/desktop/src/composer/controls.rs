@@ -115,8 +115,7 @@ pub(super) fn controls(ui: &mut egui::Ui, vm: &mut SessionVm, env: &Env) -> bool
         };
         let pill = egui::Button::new(RichText::new(text).small().color(fg))
             .fill(fill)
-            .stroke(egui::Stroke::new(1.0, stroke))
-            .corner_radius(3);
+            .stroke(egui::Stroke::new(1.0, stroke));
         if ui.add(pill).clicked() {
             vm.session.auto_mode = !on;
             let _ = env.cmd_tx.send(ManagerCmd::SetAutoMode {

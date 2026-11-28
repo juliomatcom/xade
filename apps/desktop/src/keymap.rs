@@ -853,6 +853,7 @@ mod tests {
         assert_eq!(label(Action::NewSession, true), "\u{2318}T");
         assert_eq!(label(Action::Shortcuts, true), "\u{2318}K \u{2318}S");
         assert_eq!(label(Action::NextWindow, true), "Ctrl+Tab");
+        assert_eq!(label(Action::ToggleSidebar, true), "\u{2318}B");
         assert_eq!(label(Action::ToggleView, true), "Shift+\u{2318}H");
         assert_eq!(label(Action::Shortcuts, false), "Ctrl+K Ctrl+S");
         assert_eq!(
