@@ -84,16 +84,21 @@ All facts below were verified live against `opencode v2.4.2` (`opencode-go/glm-5
 - Observed tool shapes:
   - `shell`: `rawInput: {"command": "...", "cwd": "..."}`, `rawOutput.metadata: {"status":"completed","truncated":false,"exit":0}`.
   - `read`: `rawInput: {"path": "..."}`.
-  - `write`: `rawInput: {"path": "...", "content": "..."}`; completed `content` may include a `diff` block `{type:"diff", path, oldText: null|string, newText}`.
+  - `write`: `rawInput: {"path": "...", "content": "..."}`; completed `content` is text only (`"Created file successfully: …"` / `"Wrote file successfully: …"`), **never a diff block** (fixtures `edit`, `edit_auto`).
+  - The diff preview of `write`/`edit`/`patch` (`oldText: null|string`) is in the permission request's `toolCall.content`, so under Auto ON a `write`'s old text is never available.
+  - `rawInput.path` may be relative or absolute; `locations[0].path` is absolute. Pending `rawInput` is `{}` for `write`/`read`/`edit`/`patch` and `{cwd}` for `shell`.
   - `edit`: `rawInput: {"path": "...", "oldString": "...", "newString": "..."}`; completed `content` includes `{type:"diff", path, oldText, newText}`.
   - `patch` (used by `opencode-go/gpt-6-luna`): `rawInput: {"patchText": "*** Begin Patch\n...\n*** End Patch"}`; completed `content` includes diff blocks `{type:"diff", path, oldText: null|string, newText}`.
   - `question` tool: fails cleanly under ACP (no special handling needed).
 - **Child / subagent updates (`_meta["opencode/child-session"]`):**
   - Child session updates arrive under **our** `sessionId`, distinguished by `update._meta["opencode/child-session"]`.
   - Skip child `agent_message_chunk`, `agent_thought_chunk`, and `usage_update` (so subagent text/thinking/context never corrupts the parent's reply or context meter). Map child `tool_call`/`tool_call_update` normally.
-  - Child permission requests arrive under our `sessionId` with no `_meta` and are handled normally.
+  - Child `toolCallId`s are namespaced `<childSessionId>:<callId>`, in updates and permission requests alike.
+  - Child permission requests arrive under our `sessionId` with the marker in `params.toolCall._meta` (none on `params`) and are handled normally.
 - **Background subagents (verified):**
-  - A parent `session/prompt` can resolve with `stopReason: "end_turn"` while a background subagent is still running. Later, permission requests, tool calls, and parent follow-up `agent_thought_chunk`/`agent_message_chunk` arrive with **no active `session/prompt`** and **no end marker**.
+  - A parent `session/prompt` can resolve with `stopReason: "end_turn"` while a background subagent is still running. Later, child permission requests and parent follow-up `agent_thought_chunk`/`agent_message_chunk` arrive with **no active `session/prompt`** and **no end marker**.
+  - Once the parent's prompt resolved, the child's `tool_call`/`tool_call_update` frames are **not forwarded**: a call announced only by such a permission request never gets a `ToolResult` (fixture `background_subagent`).
+  - The parent follow-up lands after the response even when the model was told to wait for the subagent (fixture `subagent`).
   - Handled by a synthetic turn with a quiet timer in `process.rs` (§4).
 
 ### 2.4 Approvals, permissions env, cancel, and steer
@@ -116,7 +121,7 @@ All facts below were verified live against `opencode v2.4.2` (`opencode-go/glm-5
   - Any prompt sent *after* Stop while the cancelled turn unwinds queues in `queued` and starts as a fresh `session/prompt` once the cancelled prompt resolves (never steers a cancelling turn).
 - **Steer:** while a non-interrupted `session/prompt` is active, send `_session/steering {"sessionId", "prompt":[{"type":"text","text":...}]}`:
   - `result.outcome == "injected"` → injected into the running turn; original `session/prompt` ends both with one `TurnComplete`.
-  - `result.outcome == "promptRequired"` or RPC error (and steer was NOT invalidated by `Interrupt`) → if idle, send `session/prompt(text)` now; else push to `queued`.
+  - `result.outcome == "promptRequired"` (`reason: "noRunningTurn"` when idle, fixture `steer_idle`) or RPC error (and steer was NOT invalidated by `Interrupt`) → if idle, send `session/prompt(text)` now; else push to `queued`.
 
 ### 2.5 Preflight (`opencode models --standalone`)
 - `opencode models --standalone` exits 0 in ~0.4 s, printing one model ID per line (`opencode-go/...`, `opencode/...`, etc.).
@@ -155,13 +160,14 @@ All facts below were verified live against `opencode v2.4.2` (`opencode-go/glm-5
 - `shell` → `"Bash"`, `input_json`: `{"command": rawInput.command ?? title ?? "", "description": ""}`
 - `read` → `"Read"`, `input_json`: `{"file_path": rawInput.path ?? locations[0].path ?? ""}`
 - `write` → `"Write"`, `input_json`: `{"file_path": rawInput.path ?? locations[0].path ?? "", "content": rawInput.content ?? ""}`
-  - Terminal `structured_json` (only when `status == "completed"`, else `None`): inspect `content[]` for a `type:"diff"` block — if `oldText` is a string, emit `{"type":"update","structuredPatch":[],"originalFile": oldText}`; else emit `{"type":"create","structuredPatch":[],"originalFile": null}`.
+  - Terminal `structured_json` (only when `status == "completed"`, else `None`): from the first `type:"diff"` block seen for the call (permission preview) — `oldText` string → `{"type":"update","structuredPatch":[],"originalFile": oldText}`, `null` → `create`. No block seen (Auto ON): `originalFile: null`, `type` `create` when the output starts with `"Created"`, else `update` (the modal then shows the whole new content).
 - `edit` → `"Edit"`, `input_json`: `{"file_path": rawInput.path ?? locations[0].path ?? "", "old_string": rawInput.oldString ?? "", "new_string": rawInput.newString ?? ""}`
   - Terminal `structured_json`: `None` (so `diff.rs` uses `old_string`/`new_string`, and failed/denied edits carry no patch).
 - `patch` → parse `rawInput.patchText` (`*** Begin Patch` … `*** End Patch`, supporting `*** Add File:`, `*** Update File:`, `*** Move to:`, `*** Delete File:`):
-  - Single `Add File` entry → `"Write"`, `input_json`: `{"file_path": path, "content": added_lines}` (terminal `structured_json`: create when `completed`, else `None`).
+  - Single `Add File` entry → `"Write"`, `input_json`: `{"file_path": path, "content": added_lines}` (terminal `structured_json`: as for `write`).
   - Otherwise → `"Edit"`, `input_json`: `{"file_path": first_path, "structuredPatch": [hunks...]}` where hunks follow `diff.rs` `{oldStart, newStart, lines}` (keeping ` `/`+`/`-` prefixes; `Delete File` gets a visible marker hunk `oldStart:1, newStart:1, lines:["-<path> (deleted)"]` or deleted lines). Terminal `structured_json`: `None` so `diff.rs` uses the input's `structuredPatch` both during pending approval and after completion; on failure/deny emit `structured_json: None`.
-  - If `patchText` is unparsable/empty → fall back to `"Edit"` with `{"file_path": locations[0].path ?? ""}`.
+  - With several files or a move, a context line names each file (the modal shows one path only).
+  - If `patchText` is unparsable/empty → fall back to `"Edit"` with `{"file_path": locations[0].path ?? ""}`, plus the raw text as one context hunk so the approval is never blind.
 - Any other tool (`glob`, `grep`, `webfetch`, MCP tools, etc.) → original `name` (fallback `title`), `rawInput` (fallback `{}`).
 
 **Tool output extraction (`tool_output`):**
@@ -188,7 +194,8 @@ crates/opencode/
   Cargo.toml            # package xade-opencode, version = "0.6.0", pinned deps matching antigravity
   src/lib.rs            # pub use provider::OpenCodeProvider;
   src/rpc.rs            # JSON-RPC 2.0 line framing (copied from antigravity, adapted comments)
-  src/translate.rs      # pure Translator state machine + Claude-shaped tool & patch mapping + child-frame filtering
+  src/translate.rs      # pure Translator state machine + Claude-shaped tool mapping + child-frame filtering
+  src/patch.rs          # `patchText` parser -> Write content / Edit hunks
   src/models.rs         # run & parse `opencode models --standalone` -> Vec<ModelOption> + default model pick
   src/process.rs        # spawn `opencode acp` (with Auto OFF OPENCODE_CONFIG_CONTENT), version guard, lazy session/new, steer via _session/steering, synthetic background-subagent turn, cancel, shutdown
   src/provider.rs       # OpenCodeProvider: binary lookup, preflight, models, spawn, delete_session
@@ -211,7 +218,7 @@ crates/opencode/
   - If `!self.queued.is_empty() && !self.closing()`: pass `last = false` to `translator.on_prompt_result` (sums usage, flushes text, emits NO `TurnComplete` yet!), reset `interrupted = false`, and immediately send `queued.pop_front()` as the next `session/prompt`. (Prevents `SessionActor` from going `Idle` and triggering `apply_pending` respawn or dropping queued work.)
   - Else (`queued` empty or closing): pass `last = true` to `translator.on_prompt_result` (emits `TurnComplete`), reset `interrupted = false`.
 - **Synthetic turns (background subagents):**
-  - Track `in_flight_tools: HashSet<String>` (added on non-terminal tool update, removed on terminal tool update; cleared on turn end / interrupt) + `synthetic_turn: bool` + `synthetic_deadline: Option<tokio::time::Instant>` (default quiet period `5 s`, overridable for fast unit/fake tests via an internal test helper).
+  - Track `in_flight_tools: HashSet<String>` (added on non-terminal tool update, never from a permission request, whose call may get no update at all; removed on terminal tool update; cleared on turn end / interrupt) + `synthetic_turn: bool` + `synthetic_deadline: Option<tokio::time::Instant>` (default quiet period `5 s`, overridable for fast unit/fake tests via an internal test helper).
   - When a translated event (`TextDelta`, `ThinkingProgress`, `AssistantText`, `ToolUse`, `ToolResult`, `PermissionRequest`) arrives while `active_prompt.is_none()` and `phase == Ready`: enter `synthetic_turn = true`.
   - Whenever `synthetic_turn`: if `permissions.is_empty() && in_flight_tools.is_empty()`, set `synthetic_deadline = Some(now + quiet_timeout)`; else set `synthetic_deadline = None`.
   - When `synthetic_deadline` fires: clear `synthetic_turn`/`synthetic_deadline`/`in_flight_tools`, flush text, emit `TurnComplete` carrying latest context figures (`is_error: false, interrupted: false`).

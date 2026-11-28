@@ -1,0 +1,6 @@
+{"dir": "meta", "frame": {"argv": ["acp"], "scenario": "unknown_method", "auto": true}}
+{"dir": "in", "frame": {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": 1, "clientCapabilities": {"fs": {"readTextFile": false, "writeTextFile": false}, "terminal": false}, "clientInfo": {"name": "xade", "version": "0.6.0"}}}}
+{"dir": "out", "frame": {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": true, "mcpCapabilities": {"http": true, "sse": false}, "promptCapabilities": {"embeddedContext": true, "image": true}, "sessionCapabilities": {"additionalDirectories": {}, "close": {}, "delete": {}, "fork": {}, "list": {}, "resume": {}}, "_meta": {"opencode/child-session-updates": true}}, "authMethods": [{"description": "Run `opencode auth login` in the terminal", "name": "Login with opencode", "id": "opencode-login"}], "_meta": {"steering": {"supported": true}}, "agentInfo": {"name": "OpenCode", "version": "2.4.2"}}}}
+{"dir": "in", "frame": {"jsonrpc": "2.0", "id": 2, "method": "xade/no_such_method", "params": {}}}
+{"dir": "out", "frame": {"jsonrpc": "2.0", "id": 2, "error": {"code": -32601, "message": "\"Method not found\": xade/no_such_method", "data": {"method": "xade/no_such_method"}}}}
+{"dir": "meta", "frame": {"exit_code": 0, "stderr_tail": ""}}
