@@ -4,7 +4,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use egui::RichText;
+use egui::{Color32, RichText};
 use egui_commonmark::CommonMarkCache;
 use xade_core::{Delivery, Message, ProviderId, Role, SessionId, SessionStatus};
 
@@ -416,6 +416,108 @@ fn with_time<R>(ui: &mut egui::Ui, m: &Message, body: impl FnOnce(&mut egui::Ui)
 /// User messages longer than this many lines show a head and a "Show all" toggle.
 const USER_PREVIEW_LINES: usize = 2;
 
+/// Corner radius of a chat bubble, the one rounded shape in the square UI.
+const BUBBLE_RADIUS: u8 = 8;
+/// Width and height of the bubble's tail.
+const BUBBLE_TAIL: egui::Vec2 = egui::vec2(8.0, 10.0);
+/// Share of the width left empty on the side opposite the tail.
+const BUBBLE_INDENT: f32 = 0.15;
+
+/// Which edge of a bubble carries its tail, and so which side of the chat it sits on.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Tail {
+    Left,
+    Right,
+}
+
+/// Draws the wedge that makes a bubble read as speech: from its sharp top corner out to the
+/// side and back down the edge, filled like the bubble with its border on the outer sides.
+fn paint_bubble_tail(
+    ui: &egui::Ui,
+    bubble: egui::Rect,
+    tail: Tail,
+    fill: Color32,
+    border: Color32,
+) {
+    let (edge, out) = match tail {
+        Tail::Right => (bubble.right(), 1.0),
+        Tail::Left => (bubble.left(), -1.0),
+    };
+    let top = bubble.top();
+    let inner = edge - out;
+    let base = egui::pos2(edge, top + BUBBLE_TAIL.y);
+    let tip = egui::pos2(edge + out * BUBBLE_TAIL.x, top + 0.5);
+    let painter = ui.painter();
+    painter.add(egui::Shape::convex_polygon(
+        vec![
+            egui::pos2(inner, top + 0.5),
+            tip,
+            base,
+            egui::pos2(inner, base.y),
+        ],
+        fill,
+        egui::Stroke::NONE,
+    ));
+    // Open the bubble's own border where the tail joins it, then stroke the tail's two sides.
+    painter.rect_filled(
+        egui::Rect::from_two_pos(
+            egui::pos2(inner, top + 1.0),
+            egui::pos2(edge + out * 0.5, base.y - 0.5),
+        ),
+        0.0,
+        fill,
+    );
+    painter.add(egui::Shape::line(
+        vec![egui::pos2(inner, top + 0.5), tip, base],
+        egui::Stroke::new(1.0, border),
+    ));
+}
+
+/// A chat bubble shared by single and multi-session chats: rounded, with a tail on one edge and
+/// an empty margin on the other. `body` draws the content, stacked vertically.
+pub(crate) fn bubble<R>(
+    ui: &mut egui::Ui,
+    tail: Tail,
+    fill: Color32,
+    border: Color32,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> R {
+    let indent = ui.available_width() * BUBBLE_INDENT;
+    // The corner the tail continues from stays sharp.
+    let (nw, ne) = match tail {
+        Tail::Right => (BUBBLE_RADIUS, 0),
+        Tail::Left => (0, BUBBLE_RADIUS),
+    };
+    ui.horizontal_top(|ui| {
+        ui.add_space(match tail {
+            Tail::Right => indent,
+            Tail::Left => BUBBLE_TAIL.x,
+        });
+        let framed = egui::Frame::new()
+            .fill(fill)
+            .stroke(egui::Stroke::new(1.0, border))
+            .corner_radius(egui::CornerRadius {
+                nw,
+                ne,
+                sw: BUBBLE_RADIUS,
+                se: BUBBLE_RADIUS,
+            })
+            .inner_margin(egui::Margin::same(8))
+            .show(ui, |ui| {
+                let room = match tail {
+                    Tail::Right => BUBBLE_TAIL.x,
+                    Tail::Left => indent,
+                };
+                ui.set_width((ui.available_width() - room).max(0.0));
+                // The row is a horizontal layout; the bubble's own content stacks vertically.
+                ui.vertical(body).inner
+            });
+        paint_bubble_tail(ui, framed.response.rect, tail, fill, border);
+        framed.inner
+    })
+    .inner
+}
+
 fn user_bubble(
     ui: &mut egui::Ui,
     cache: &mut CommonMarkCache,
@@ -423,62 +525,55 @@ fn user_bubble(
     cwd: &Path,
     m: &Message,
 ) -> Option<PathBuf> {
-    let mut clicked = None;
-    let indent = ui.available_width() * 0.15;
     let total = m.content_text.lines().count();
     let long = total > USER_PREVIEW_LINES;
     let open_id = egui::Id::unique(("user_expanded", m.id));
     let open = long && ui.data(|d| d.get_temp::<bool>(open_id)).unwrap_or(false);
-    ui.horizontal_top(|ui| {
-        ui.add_space(indent);
-        egui::Frame::new()
-            .fill(theme::bg_raised())
-            .stroke(egui::Stroke::new(1.0, theme::border_light()))
-            .inner_margin(egui::Margin::same(8))
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                // The row is a horizontal layout; the bubble's own content stacks vertically.
-                ui.vertical(|ui| {
-                    if let Some(sender) = &m.sender_handle {
-                        ui.label(
-                            RichText::new(format!("Broadcast from #{sender}"))
-                                .small()
-                                .strong()
-                                .color(theme::accent()),
-                        );
-                    }
-                    if let Some(d) = Delivery::of(m) {
-                        let (label, color) = match d {
-                            Delivery::Queued => ("Queued", theme::text_muted()),
-                            Delivery::Steered => ("Steering", theme::warn()),
-                        };
-                        ui.label(RichText::new(label).small().strong().color(color));
-                    }
-                    let shown = if long && !open {
-                        let cut = m
-                            .content_text
-                            .match_indices('\n')
-                            .nth(USER_PREVIEW_LINES - 1)
-                            .map_or(m.content_text.len(), |(i, _)| i);
-                        &m.content_text[..cut]
-                    } else {
-                        m.content_text.as_str()
-                    };
-                    clicked = links.markdown(ui, cache, cwd, m.id, shown);
-                    if long {
-                        let label = if open {
-                            "Show less".to_string()
-                        } else {
-                            format!("Show all ({total} lines)")
-                        };
-                        if ui.small_button(label).clicked() {
-                            ui.data_mut(|d| d.insert_temp(open_id, !open));
-                        }
-                    }
-                });
-            });
-    });
-    clicked
+    bubble(
+        ui,
+        Tail::Right,
+        theme::bg_raised(),
+        theme::border_light(),
+        |ui| {
+            if let Some(sender) = &m.sender_handle {
+                ui.label(
+                    RichText::new(format!("Broadcast from #{sender}"))
+                        .small()
+                        .strong()
+                        .color(theme::accent()),
+                );
+            }
+            if let Some(d) = Delivery::of(m) {
+                let (label, color) = match d {
+                    Delivery::Queued => ("Queued", theme::text_muted()),
+                    Delivery::Steered => ("Steering", theme::warn()),
+                };
+                ui.label(RichText::new(label).small().strong().color(color));
+            }
+            let shown = if long && !open {
+                let cut = m
+                    .content_text
+                    .match_indices('\n')
+                    .nth(USER_PREVIEW_LINES - 1)
+                    .map_or(m.content_text.len(), |(i, _)| i);
+                &m.content_text[..cut]
+            } else {
+                m.content_text.as_str()
+            };
+            let clicked = links.markdown(ui, cache, cwd, m.id, shown);
+            if long {
+                let label = if open {
+                    "Show less".to_string()
+                } else {
+                    format!("Show all ({total} lines)")
+                };
+                if ui.small_button(label).clicked() {
+                    ui.data_mut(|d| d.insert_temp(open_id, !open));
+                }
+            }
+            clicked
+        },
+    )
 }
 
 /// Renders an assistant message in a multi-session member tab, framing `<broadcast>` segments
@@ -1152,6 +1247,39 @@ mod tests {
             out.drop_without_applying_deltas();
         }
         found
+    }
+
+    #[test]
+    fn a_bubble_and_its_tail_stay_inside_the_width_on_either_side() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        for tail in [Tail::Left, Tail::Right] {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            };
+            let mut seen = None;
+            let out = ctx.run_ui(input, |ui| {
+                let area = ui.max_rect();
+                bubble(ui, tail, Color32::BLACK, Color32::WHITE, |ui| {
+                    ui.label("hello");
+                });
+                seen = Some((area, ui.min_rect()));
+            });
+            out.drop_without_applying_deltas();
+            let (area, used) = seen.expect("ran");
+            assert!(
+                area.contains_rect(used),
+                "{tail:?}: {used:?} outside {area:?}"
+            );
+            if tail == Tail::Left {
+                // The indent sits on the right, empty; on the other side it is counted as used.
+                assert!(area.right() - used.right() > 0.0, "room opposite the tail");
+            }
+        }
     }
 
     #[test]

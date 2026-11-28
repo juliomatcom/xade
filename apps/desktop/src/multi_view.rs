@@ -781,29 +781,19 @@ fn combined_entry_row(
     entry: &CombinedEntry,
 ) -> Option<PathBuf> {
     match &entry.kind {
-        CombinedKind::User { target } => {
-            let indent = ui.available_width() * 0.15;
-            ui.horizontal_top(|ui| {
-                ui.add_space(indent);
-                egui::Frame::new()
-                    .fill(theme::bg_raised())
-                    .stroke(egui::Stroke::new(1.0, theme::border_light()))
-                    .inner_margin(egui::Margin::same(8))
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.vertical(|ui| {
-                            let to = target
-                                .as_deref()
-                                .map_or_else(|| "To: All".to_string(), |h| format!("To: #{h}"));
-                            ui.label(RichText::new(to).small().strong().color(theme::accent()));
-                            links.markdown(ui, cache, cwd, entry.id, &entry.text)
-                        })
-                        .inner
-                    })
-                    .inner
-            })
-            .inner
-        }
+        CombinedKind::User { target } => conversation::bubble(
+            ui,
+            conversation::Tail::Right,
+            theme::bg_raised(),
+            theme::border_light(),
+            |ui| {
+                let to = target
+                    .as_deref()
+                    .map_or_else(|| "To: All".to_string(), |h| format!("To: #{h}"));
+                ui.label(RichText::new(to).small().strong().color(theme::accent()));
+                links.markdown(ui, cache, cwd, entry.id, &entry.text)
+            },
+        ),
         CombinedKind::MemberReply { handle, provider } => {
             ui.horizontal_top(|ui| {
                 let (rect, _) =
@@ -830,48 +820,44 @@ fn combined_entry_row(
             sender_handle,
             sender_provider,
         } => {
-            // Subtle bluish container so model-to-model messages stand out cleanly from regular
-            // assistant replies while blending with the window background.
-            egui::Frame::new()
-                .fill(theme::broadcast_bg())
-                .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
-                .inner_margin(egui::Margin::same(10))
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            if let Some(tex) = conversation::cli_symbol(ui.ctx(), *sender_provider)
-                            {
-                                ui.add(
-                                    egui::Image::new(&tex)
-                                        .tint(conversation::symbol_tint(*sender_provider))
-                                        .fit_to_exact_size(egui::vec2(14.0, 14.0)),
-                                );
-                            }
-                            ui.label(
-                                RichText::new(format!("#{sender_handle} \u{2192} Team"))
-                                    .small()
-                                    .strong()
-                                    .color(theme::text()),
+            // Subtle bluish bubble on the left, so model-to-model messages stand out from the
+            // user's (right) while blending with the window background.
+            conversation::bubble(
+                ui,
+                conversation::Tail::Left,
+                theme::broadcast_bg(),
+                theme::broadcast_border(),
+                |ui| {
+                    ui.horizontal(|ui| {
+                        if let Some(tex) = conversation::cli_symbol(ui.ctx(), *sender_provider) {
+                            ui.add(
+                                egui::Image::new(&tex)
+                                    .tint(conversation::symbol_tint(*sender_provider))
+                                    .fit_to_exact_size(egui::vec2(14.0, 14.0)),
                             );
-                            egui::Frame::new()
-                                .fill(theme::bg_app())
-                                .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
-                                .inner_margin(egui::Margin::symmetric(5, 1))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        RichText::new("Model-to-model")
-                                            .small()
-                                            .color(theme::text_muted()),
-                                    );
-                                });
-                        });
-                        ui.add_space(4.0);
-                        links.markdown(ui, cache, cwd, entry.id, &entry.text)
-                    })
-                    .inner
-                })
-                .inner
+                        }
+                        ui.label(
+                            RichText::new(format!("#{sender_handle} \u{2192} Team"))
+                                .small()
+                                .strong()
+                                .color(theme::text()),
+                        );
+                        egui::Frame::new()
+                            .fill(theme::bg_app())
+                            .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
+                            .inner_margin(egui::Margin::symmetric(5, 1))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    RichText::new("Model-to-model")
+                                        .small()
+                                        .color(theme::text_muted()),
+                                );
+                            });
+                    });
+                    ui.add_space(4.0);
+                    links.markdown(ui, cache, cwd, entry.id, &entry.text)
+                },
+            )
         }
     }
 }

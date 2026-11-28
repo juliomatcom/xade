@@ -27,7 +27,7 @@
 - `tracing` for logs; never log prompt or message text above `debug`.
 - Never swallow an error: log it, or report it to the user (`App::report`); the UI never panics out of a frame.
 - UI colors only from `theme.rs` tokens.
-- UI is square: windows, buttons, frames and painted rects have no corner radius (`CornerRadius::ZERO`, painter rounding `0.0`); never add rounding.
+- UI is square: windows, buttons, frames and painted rects have no corner radius (`CornerRadius::ZERO`, painter rounding `0.0`); never add rounding, except the chat bubble (`conversation::bubble`, shared by single and multi-session chats), rounded with a tail whose side is a parameter (`Tail::Right` for the user, `Tail::Left` for model-to-model).
 
 ## Docs
 - Wiki edits follow AGENTS.md "Wiki Upkeep". Protocol facts in claude-protocol.md must be backed by a fixture.
