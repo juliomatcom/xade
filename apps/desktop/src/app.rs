@@ -894,9 +894,11 @@ impl App {
         self.home.importing = self.cmd_tx.send(ManagerCmd::Import).is_ok();
     }
 
-    /// The Refresh button: imports every provider's history now and re-reads the lists, the
-    /// running sessions included, without waiting for their timers.
+    /// The Refresh button: re-checks the providers that failed (so a fresh login shows without a
+    /// restart), imports every provider's history now and re-reads the lists, the running
+    /// sessions included, without waiting for their timers.
     pub fn refresh_sessions(&mut self) {
+        self.recheck_providers();
         self.start_import();
         self.refresh_workspaces();
         self.refresh_cards();
@@ -4299,6 +4301,28 @@ mod tests {
         // A provider that was already fine does not re-import.
         app.on_msg(UiMsg::Preflight(agy, Ok(())));
         assert!(cmds.try_recv().is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn refresh_sessions_rechecks_failed_providers_before_importing() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (mut app, dir) = two_provider_app(&rt);
+        let (tx, mut cmds) = tokio::sync::mpsc::unbounded_channel();
+        app.cmd_tx = tx;
+        let (claude, agy) = (ProviderId::Claude, ProviderId::Antigravity);
+        fail(&mut app, agy, ProviderError::NotLoggedIn);
+        app.refresh_sessions();
+        assert!(app.home.pending.contains(&agy), "the failed one re-checks");
+        assert!(!app.home.pending.contains(&claude), "a passing one is left");
+        assert!(matches!(cmds.try_recv(), Ok(ManagerCmd::Import)));
+        let msg = app.events_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let UiMsg::Preflight(id, result) = msg else {
+            panic!("not a Preflight");
+        };
+        assert_eq!(id, agy);
+        app.on_msg(UiMsg::Preflight(id, result));
+        assert!(app.available(agy), "the new login shows without a restart");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
