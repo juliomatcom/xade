@@ -224,7 +224,9 @@ fn card(ui: &mut egui::Ui, row: &Row) {
                 }
                 ui.label(RichText::new(setup.name).strong());
                 ui.label(RichText::new(status).small().color(color));
-                ui.hyperlink_to(RichText::new("Docs").small(), setup.docs);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    ui.hyperlink_to(RichText::new("Docs").small(), setup.docs);
+                });
             });
             match &row.state {
                 State::Checking | State::Ready => {}
