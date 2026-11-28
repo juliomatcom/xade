@@ -416,7 +416,7 @@ fn with_time<R>(ui: &mut egui::Ui, m: &Message, body: impl FnOnce(&mut egui::Ui)
 /// User messages longer than this many lines show a head and a "Show all" toggle.
 const USER_PREVIEW_LINES: usize = 2;
 
-/// Corner radius of a chat bubble, the one rounded shape in the square UI.
+/// Corner radius of a chat bubble, rounded like the badges in an otherwise square UI.
 const BUBBLE_RADIUS: u8 = 8;
 /// Width and height of the bubble's tail.
 const BUBBLE_TAIL: egui::Vec2 = egui::vec2(8.0, 10.0);
@@ -1361,6 +1361,79 @@ mod tests {
         assert!(
             visible(y_of(&ctx, &mut v, vec![], "zzreply")),
             "follows again"
+        );
+    }
+
+    #[test]
+    fn streaming_right_after_send_keeps_sticking_to_bottom() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let rows: Vec<_> = (0..40)
+            .map(|i| msg(Role::Assistant, &format!("filler row {i}"), None, None))
+            .collect();
+        let mut v = vm(rows);
+        let mut frame = 0u64;
+        let mut step = |v: &mut SessionVm, events: Vec<egui::Event>, needle: &str| -> Option<f32> {
+            fn find(s: &egui::Shape, needle: &str) -> Option<f32> {
+                match s {
+                    egui::Shape::Text(t) if t.galley.text().contains(needle) => Some(t.pos.y),
+                    egui::Shape::Vec(v) => v.iter().find_map(|c| find(c, needle)),
+                    _ => None,
+                }
+            }
+            frame += 1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                events,
+                // Realistic 60fps interval: would fall mid-animation if ScrollArea animated.
+                time: Some(frame as f64 * 0.016),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                show(ui, v);
+            });
+            let found = out.shapes.iter().find_map(|c| find(&c.shape, needle));
+            out.drop_without_applying_deltas();
+            found
+        };
+        let visible = |y: Option<f32>| y.is_some_and(|y| (0.0..300.0).contains(&y));
+
+        // Settle at the bottom.
+        for _ in 0..3 {
+            step(&mut v, vec![], "filler row 39");
+        }
+        assert!(visible(step(&mut v, vec![], "filler row 39")));
+
+        // Scroll up, then send a prompt; 16ms later streaming output arrives.
+        let wheel = vec![
+            egui::Event::PointerMoved(egui::pos2(200.0, 150.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                source: egui::MouseWheelSource::Wheel,
+                delta: egui::vec2(0.0, 5000.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        step(&mut v, wheel, "filler row 39");
+        assert!(!visible(step(&mut v, vec![], "filler row 39")));
+
+        v.messages.push(msg(Role::User, "zzsent", None, None));
+        v.scroll_to_end = true;
+        // Single 16ms frame applies the jump; the very next 16ms frame adds streaming lines.
+        step(&mut v, vec![], "zzsent");
+        v.live_text = (0..15)
+            .map(|i| format!("stream line {i}"))
+            .chain(std::iter::once("zzstream_end".to_string()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        step(&mut v, vec![], "zzstream_end");
+        assert!(
+            visible(step(&mut v, vec![], "zzstream_end")),
+            "streaming output arriving 16ms after send must stay stuck to bottom"
         );
     }
 

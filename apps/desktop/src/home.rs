@@ -1139,6 +1139,7 @@ fn card_ui(
             egui::Frame::new()
                 .fill(theme::bg_app())
                 .stroke(egui::Stroke::new(1.0, theme::accent()))
+                .corner_radius(crate::chrome::BADGE_RADIUS)
                 .inner_margin(egui::Margin::symmetric(5, 1))
                 .show(ui, |ui| {
                     ui.label(RichText::new("Multi").small().color(theme::accent()));

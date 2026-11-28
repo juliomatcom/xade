@@ -70,10 +70,14 @@ pub fn header(
         });
 }
 
+/// Corner radius of every badge: the square UI keeps them as pills.
+pub const BADGE_RADIUS: u8 = 8;
+
 /// A small outlined pill, like the session origin badge.
 pub fn badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
     egui::Frame::new()
         .stroke(egui::Stroke::new(1.0, color))
+        .corner_radius(BADGE_RADIUS)
         .inner_margin(egui::Margin::symmetric(6, 0))
         .show(ui, |ui| {
             ui.label(RichText::new(text).small().color(color));

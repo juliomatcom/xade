@@ -762,11 +762,7 @@ fn team_feed(
                 });
             nav.jump_top(ui, content_top);
             if std::mem::take(&mut vm.scroll_to_end) || nav.bottom {
-                // Unanimated: output arriving mid-animation would end `stick_to_bottom`.
-                ui.scroll_to_cursor_animation(
-                    Some(egui::Align::BOTTOM),
-                    egui::style::ScrollAnimation::none(),
-                );
+                ui.scroll_to_cursor(Some(egui::Align::BOTTOM));
             }
         });
     scroll_nav::show(ui, &out, nav_id);
@@ -845,6 +841,7 @@ fn combined_entry_row(
                         egui::Frame::new()
                             .fill(theme::bg_app())
                             .stroke(egui::Stroke::new(1.0, theme::broadcast_border()))
+                            .corner_radius(crate::chrome::BADGE_RADIUS)
                             .inner_margin(egui::Margin::symmetric(5, 1))
                             .show(ui, |ui| {
                                 ui.label(
@@ -866,7 +863,7 @@ fn unified_composer(
     ui: &mut egui::Ui,
     vm: &mut MultiSessionVm,
     handles: &[String],
-    members: &HashMap<SessionId, SessionVm>,
+    members: &mut HashMap<SessionId, SessionVm>,
     any_busy: bool,
     env: &Env,
 ) {
@@ -1178,11 +1175,22 @@ fn unified_composer(
     });
 
     if do_send && target_alive {
-        let (_, body) = parse_user_target(&vm.input, handles);
+        let (target, body) = parse_user_target(&vm.input, handles);
         if !body.is_empty() {
             let text = std::mem::take(&mut vm.input);
             vm.handle_popup_dismissed = false;
-            vm.scroll_to_end = true;
+            // Team feed scrolls when `MultiTeamMessage` arrives; if the user is on a targeted
+            // member tab whose turn is queued, scroll it now too instead of waiting for drain.
+            if let MultiTab::Member(sid) = vm.active_tab {
+                if let Some(member) = members.get_mut(&sid) {
+                    let targeted = target
+                        .as_deref()
+                        .is_none_or(|t| member.session.agent_handle.as_deref() == Some(t));
+                    if targeted {
+                        member.scroll_to_end = true;
+                    }
+                }
+            }
             let _ = env.cmd_tx.send(ManagerCmd::SendMulti {
                 multi_id: vm.multi.id,
                 text,
@@ -1337,5 +1345,193 @@ mod tests {
         let texts = painted(MultiTab::Team, member());
         assert!(find(&texts, "Cache expired").is_none(), "{texts:?}");
         assert!(find(&texts, "in 1.2k").is_none(), "{texts:?}");
+    }
+
+    #[test]
+    fn team_feed_autoscrolls_after_send_for_all_and_individual_targets() {
+        let ctx = egui::Context::default();
+        crate::theme::apply(&ctx);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let env = Env {
+            cmd_tx: &tx,
+            providers: &[],
+            fork_targets: &[],
+            vscode: None,
+            maximized: None,
+            send_mode: SendMode::Queue,
+            send_on_enter: true,
+            break_all: true,
+            ide_context: None,
+            focused: true,
+        };
+        let mut opus = crate::composer::test_support::vm(String::new());
+        opus.session.agent_handle = Some("opus-1".into());
+        let mut sonnet = crate::composer::test_support::vm(String::new());
+        sonnet.session.agent_handle = Some("sonnet-1".into());
+        let opus_id = opus.session.id;
+        let sonnet_id = sonnet.session.id;
+        let now = opus.session.created_at;
+        let multi = MultiSession {
+            id: xade_core::MultiSessionId::new(),
+            workspace_id: opus.session.workspace_id,
+            title: "t".into(),
+            preview_snippet: String::new(),
+            created_at: now,
+            updated_at: now,
+        };
+        let team_msg = |seq: i64, kind: TeamMessageKind, text: &str| TeamMessage {
+            id: uuid::Uuid::new_v4(),
+            multi_session_id: multi.id,
+            seq,
+            kind,
+            content_text: text.into(),
+            created_at: now + time::Duration::seconds(seq),
+        };
+        let initial: Vec<_> = (0..30)
+            .map(|i| {
+                team_msg(
+                    i,
+                    TeamMessageKind::User { target: None },
+                    &format!("filler team prompt {i}"),
+                )
+            })
+            .collect();
+        let mut vm = MultiSessionVm::new(multi, "/tmp".into(), vec![opus_id, sonnet_id], initial);
+        let mut members = HashMap::from([(opus_id, opus), (sonnet_id, sonnet)]);
+
+        let mut frame = 0u64;
+        let mut step = |vm: &mut MultiSessionVm,
+                        members: &mut HashMap<SessionId, SessionVm>,
+                        events: Vec<egui::Event>,
+                        needle: &str|
+         -> Option<f32> {
+            fn find(s: &egui::Shape, needle: &str) -> Option<f32> {
+                match s {
+                    egui::Shape::Text(t) if t.galley.text().contains(needle) => Some(t.pos.y),
+                    egui::Shape::Vec(v) => v.iter().find_map(|c| find(c, needle)),
+                    _ => None,
+                }
+            }
+            frame += 1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(700.0, 400.0),
+                )),
+                events,
+                time: Some(frame as f64 * 0.016),
+                ..Default::default()
+            };
+            let out = ctx.run_ui(input, |ui| {
+                show(ui, vm, members, &env, false);
+            });
+            let found = out.shapes.iter().find_map(|c| find(&c.shape, needle));
+            out.drop_without_applying_deltas();
+            found
+        };
+        let visible = |y: Option<f32>| y.is_some_and(|y| (0.0..400.0).contains(&y));
+
+        // Settle at the bottom.
+        for _ in 0..3 {
+            step(&mut vm, &mut members, vec![], "filler team prompt 29");
+        }
+        assert!(visible(step(
+            &mut vm,
+            &mut members,
+            vec![],
+            "filler team prompt 29"
+        )));
+
+        // 1. Send to All while already at the bottom: MultiTeamMessage arrives on the next frame,
+        //    followed 16ms later by live streaming text.
+        vm.team_messages.push(team_msg(
+            30,
+            TeamMessageKind::User { target: None },
+            "zzall_prompt",
+        ));
+        vm.scroll_to_end = true;
+        step(&mut vm, &mut members, vec![], "zzall_prompt");
+        assert!(
+            visible(step(&mut vm, &mut members, vec![], "zzall_prompt")),
+            "To: All prompt is visible at bottom"
+        );
+        members.get_mut(&opus_id).unwrap().live_text = (0..12)
+            .map(|i| format!("opus live line {i}"))
+            .chain(std::iter::once("zzall_stream_end".to_string()))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        step(&mut vm, &mut members, vec![], "zzall_stream_end");
+        assert!(
+            visible(step(&mut vm, &mut members, vec![], "zzall_stream_end")),
+            "streaming output after To: All send stays stuck to bottom"
+        );
+        members.get_mut(&opus_id).unwrap().live_text.clear();
+
+        // 2. Scroll up: a model-to-model broadcast must NOT pull the reader down.
+        let wheel = vec![
+            egui::Event::PointerMoved(egui::pos2(300.0, 150.0)),
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                source: egui::MouseWheelSource::Wheel,
+                delta: egui::vec2(0.0, 5000.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ];
+        step(&mut vm, &mut members, wheel, "zzall_prompt");
+        assert!(!visible(step(&mut vm, &mut members, vec![], "zzall_prompt")));
+        vm.team_messages.push(team_msg(
+            31,
+            TeamMessageKind::Broadcast {
+                sender_handle: "opus-1".into(),
+                sender_provider: ProviderId::Claude,
+            },
+            "zzbroadcast_ignore",
+        ));
+        step(&mut vm, &mut members, vec![], "zzbroadcast_ignore");
+        assert!(
+            !visible(step(&mut vm, &mut members, vec![], "zzbroadcast_ignore")),
+            "broadcast must not pull a scrolled-up reader down"
+        );
+
+        // 3. Individual `#opus-1:` prompt while scrolled up jumps to the bottom and re-arms
+        //    `stick_to_bottom` for the reply arriving 16ms later.
+        vm.team_messages.push(team_msg(
+            32,
+            TeamMessageKind::User {
+                target: Some("opus-1".into()),
+            },
+            "zzindiv_prompt",
+        ));
+        vm.scroll_to_end = true;
+        step(&mut vm, &mut members, vec![], "zzindiv_prompt");
+        assert!(
+            visible(step(&mut vm, &mut members, vec![], "zzindiv_prompt")),
+            "individual #handle prompt jumps to bottom"
+        );
+        members
+            .get_mut(&opus_id)
+            .unwrap()
+            .messages
+            .push(xade_core::Message {
+                id: uuid::Uuid::new_v4(),
+                session_id: opus_id,
+                seq: 1,
+                role: Role::Assistant,
+                content_text: "zzindiv_reply".into(),
+                thinking_text: None,
+                tool_name: None,
+                tool_use_id: None,
+                tool_payload_json: None,
+                is_error: false,
+                provider_id: Some(ProviderId::Claude),
+                sender_handle: None,
+                created_at: now + time::Duration::seconds(33),
+            });
+        step(&mut vm, &mut members, vec![], "zzindiv_reply");
+        assert!(
+            visible(step(&mut vm, &mut members, vec![], "zzindiv_reply")),
+            "reply to individual prompt stays stuck to bottom"
+        );
     }
 }
