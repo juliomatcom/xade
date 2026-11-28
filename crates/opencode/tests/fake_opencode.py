@@ -31,7 +31,13 @@ fixture = open(os.path.join(here, "fixture")).read().strip()
 acp = sys.argv[1:] == ["acp"]
 idmap = {}
 
-with open(os.path.join(here, "runs.log"), "a") as f:
+runs_path = os.path.join(here, "runs.log")
+run_index = 0
+if os.path.exists(runs_path):
+    with open(runs_path) as f:
+        run_index = sum(1 for l in f if l.strip())
+
+with open(runs_path, "a") as f:
     f.write(json.dumps({"argv": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
 if acp:
     with open(os.path.join(here, "env.json"), "w") as f:
@@ -76,10 +82,18 @@ def meta(frame):
             time.sleep(1)
 
 
+segments = [[]]
 for raw in open(fixture):
     if not raw.strip():
         continue
     entry = json.loads(raw)
+    if entry["dir"] == "meta" and entry["frame"].get("restart"):
+        segments.append([])
+    else:
+        segments[-1].append(entry)
+
+entries = segments[run_index] if run_index < len(segments) else segments[-1]
+for entry in entries:
     d, frame = entry["dir"], entry["frame"]
     if d == "meta":
         meta(frame)

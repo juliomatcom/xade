@@ -594,6 +594,60 @@ async fn a_background_subagents_report_is_a_turn_that_ends() {
     c.shutdown(&mut h).await;
 }
 
+/// Stop during a subagent turn kills the child process group so background work cannot finish.
+#[tokio::test]
+#[ignore = "spends quota; set XADE_E2E_OPENCODE=1"]
+async fn stop_kills_a_background_subagent_before_it_runs() {
+    e2e!();
+    let c = Ctx::new().await;
+    let marker = c.path("should_not_exist");
+    let mut h = c.spawn(MODEL, true, None);
+    prompt(
+        &h,
+        &format!(
+            "First start a subagent (agent 'general') in the background whose task is to run the \
+             exact shell command `sleep 15 && touch {}`. Right after launching it, without waiting \
+             for it, write a 60-line numbered story about mountains so your turn keeps streaming.",
+            marker.display()
+        ),
+    );
+    // Wait until the subagent's shell command is actually running in the OS process table.
+    c.until(&mut h, |e| {
+        matches!(e, ProviderEvent::ToolUse { input_json, .. } if input_json.contains("sleep 15"))
+    })
+    .await;
+    let sleeping = || -> Vec<(u32, String)> {
+        descendants()
+            .into_iter()
+            .filter(|(_, cmd)| cmd.contains("sleep 15"))
+            .collect()
+    };
+    let start = Instant::now();
+    while sleeping().is_empty() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "subagent sleep never started"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let bg_procs = sleeping();
+    send(&h, SessionCommand::Interrupt);
+    let evs = c.until(&mut h, is_turn).await;
+    assert_eq!(turns(&evs), [(false, true)], "{evs:?}");
+    // The recycled child killed the old group, so the subagent's shell is gone immediately.
+    gone(&bg_procs);
+    assert!(
+        !marker.exists(),
+        "background subagent survived Stop and created {}",
+        marker.display()
+    );
+    // Confirm the next prompt resumes cleanly on the recycled child.
+    let next = c.turn(&mut h, "Reply with exactly: recycled ok").await;
+    assert!(said(&next).contains("recycled ok"), "{next:?}");
+    assert!(!marker.exists());
+    c.shutdown(&mut h).await;
+}
+
 #[tokio::test]
 #[ignore = "spends quota; set XADE_E2E_OPENCODE=1"]
 async fn shutdown_leaves_none_of_our_processes() {

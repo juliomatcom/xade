@@ -637,6 +637,37 @@ async fn a_refused_change_to_build_ends_the_session_rather_than_run_ungated() {
 }
 
 #[tokio::test]
+async fn auto_off_fails_when_build_mode_is_not_offered() {
+    let mut s = initialize("2.4.2");
+    s.extend([
+        request("session/new", "new"),
+        answer(
+            "new",
+            json!({
+                "sessionId": SID,
+                "configOptions": [
+                    {"id": "model", "currentValue": "m", "options": [{"value": "m"}]},
+                    {"id": "effort", "currentValue": "default", "options": [{"value": "default"}]},
+                    {"id": "mode", "currentValue": "custom", "options": [{"value": "custom"}, {"value": "plan"}]}
+                ]
+            }),
+        ),
+    ]);
+    let f = scripted(s);
+    let mut h = f.start(false);
+    prompt(&h, "x");
+    let evs = until(&mut h, is_exit).await;
+    assert!(
+        errors(&evs)
+            .iter()
+            .any(|e| e.contains("did not offer `build` mode")),
+        "{evs:?}"
+    );
+    assert_eq!(turns(&evs), [(true, false)]);
+    assert!(f.texts("session/prompt").is_empty());
+}
+
+#[tokio::test]
 async fn only_auto_off_adds_permission_rules_to_the_environment() {
     let inherited = std::env::var("OPENCODE_CONFIG_CONTENT").ok();
     for auto in [true, false] {
@@ -727,7 +758,9 @@ async fn auto_mode_answers_permissions_without_an_event() {
 }
 
 #[tokio::test]
-async fn turning_auto_on_answers_the_pending_request_and_the_later_ones() {
+async fn turning_auto_on_never_auto_allows_in_an_auto_off_process() {
+    // A process spawned with Auto OFF turned user `deny` rules into `ask`: toggling Auto ON must
+    // keep asking until the actor's idle respawn starts a clean process.
     let mut s = ready();
     s.extend([
         request("session/prompt", "p"),
@@ -739,6 +772,38 @@ async fn turning_auto_on_answers_the_pending_request_and_the_later_ones() {
     ]);
     let f = scripted(s);
     let mut h = f.start(false);
+    prompt(&h, "run it");
+    until(&mut h, is_permission).await;
+    send(&h, SessionCommand::SetAutoMode(true));
+    assert!(during(&mut h, Duration::from_millis(200)).await.is_empty());
+    respond(&h, "r1", true);
+    let evs = until(&mut h, is_permission).await;
+    assert!(evs.iter().any(is_permission));
+    respond(&h, "r2", true);
+    let evs = until(&mut h, is_turn).await;
+    assert_eq!(turns(&evs), [(false, false)]);
+    shutdown(&mut h).await;
+    for id in ["r1", "r2"] {
+        assert_eq!(f.reply(json!(id))["result"]["outcome"]["optionId"], "once");
+    }
+}
+
+#[tokio::test]
+async fn turning_auto_back_on_in_an_auto_on_process_answers_pending_and_later_requests() {
+    // In a process spawned with Auto ON (clean env, user `deny` untouched), toggling OFF then ON
+    // safely auto-allows pending and subsequent `ask` requests.
+    let mut s = ready();
+    s.extend([
+        request("session/prompt", "p"),
+        asks("r1", "c1"),
+        line(),
+        asks("r2", "c2"),
+        line(),
+        ends("p", "end_turn", 1),
+    ]);
+    let f = scripted(s);
+    let mut h = f.start(true);
+    send(&h, SessionCommand::SetAutoMode(false));
     prompt(&h, "run it");
     until(&mut h, is_permission).await;
     send(&h, SessionCommand::SetAutoMode(true));
@@ -1010,6 +1075,39 @@ async fn stop_drops_a_prompt_that_was_waiting_for_the_running_one() {
 }
 
 #[tokio::test]
+async fn refused_steers_run_ahead_of_prompts_queued_after_them() {
+    let mut s = ready();
+    s.extend([
+        request("session/prompt", "a"),
+        says("one"),
+        request("_session/steering", "s"),
+        ends("a", "end_turn", 1),
+        pause(0.3),
+        answer("s", refused()),
+        request("session/prompt", "b"),
+        says("two"),
+        ends("b", "end_turn", 1),
+        request("session/prompt", "c"),
+        says("three"),
+        ends("c", "end_turn", 1),
+    ]);
+    let f = scripted(s);
+    let mut h = f.start(false);
+    prompt(&h, "first");
+    until(&mut h, is_delta).await;
+    prompt(&h, "steer-A");
+    f.wait_for("_session/steering").await;
+    // Arrives after the prompt already answered (held waiting for steer-A): must run after A.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    prompt(&h, "queued-B");
+    let evs = until(&mut h, is_turn).await;
+    assert_eq!(turns(&evs), [(false, false)]);
+    assert_eq!(texts(&evs), ["one", "two", "three"]);
+    assert_eq!(f.texts("session/prompt"), ["first", "steer-A", "queued-B"]);
+    shutdown(&mut h).await;
+}
+
+#[tokio::test]
 async fn stop_while_only_a_steer_answer_is_missing_ends_the_turn() {
     let mut s = ready();
     s.extend([
@@ -1117,36 +1215,96 @@ async fn a_trailing_tool_update_does_not_hold_a_later_turn_open() {
 
 #[tokio::test]
 async fn stop_ends_a_turn_with_no_prompt() {
+    // Stop on a synthetic turn kills the old child (and any background subagent in its group)
+    // and recycles into a fresh `acp` child that resumes the same session on the next prompt.
     let mut s = ready();
     s.extend([
         request("session/prompt", "p"),
+        meta(json!({"spawn_bg": true})),
         ends("p", "end_turn", 1),
         pause(0.2),
         says("still going"),
         asks("r", "ses_child:c"),
-        line(), // the cancelled reply
-        line(), // session/cancel
-        asks("late", "ses_child:d"),
-        line(),
+        meta(json!({"hang": true})),
+        meta(json!({"restart": true})),
+    ]);
+    s.extend(initialize("2.4.2"));
+    s.extend([
+        request("session/resume", "res"),
+        answer(
+            "res",
+            json!({"configOptions": options("m", "default", &["default"], "build")}),
+        ),
+        request("session/prompt", "q"),
+        says("resumed"),
+        ends("q", "end_turn", 1),
     ]);
     let f = scripted(s);
     let mut h = f.start(false);
     prompt(&h, "x");
     until(&mut h, is_turn).await;
-    until(&mut h, is_permission).await;
+    let bg = background_pid(&f).await;
+    let pre = until(&mut h, is_permission).await;
+    assert_eq!(texts(&pre), ["still going"]);
     send(&h, SessionCommand::Interrupt);
     let mut evs = until(&mut h, is_turn).await;
     assert_eq!(turns(&evs), [(false, true)]);
+    assert_reaped_soon(bg).await;
     evs.extend(during(&mut h, QUIET * 2).await);
     assert!(!evs.iter().any(is_permission), "{evs:?}");
+
+    prompt(&h, "after");
+    let next = until(&mut h, is_turn).await;
+    assert_eq!(turns(&next), [(false, false)]);
+    assert_eq!(texts(&next), ["resumed"]);
     shutdown(&mut h).await;
-    for id in ["r", "late"] {
-        assert_eq!(
-            f.reply(json!(id))["result"]["outcome"]["outcome"],
-            "cancelled"
-        );
-    }
-    assert!(f.methods().contains(&"session/cancel".to_string()));
+    assert_eq!(f.read("runs.log").len(), 2, "recycled into a second child");
+    assert!(f.methods().contains(&"session/resume".to_string()));
+}
+
+#[tokio::test]
+async fn stop_during_prompt_after_subagent_recycles_child_and_kills_bg() {
+    let mut s = ready();
+    s.extend([
+        request("session/prompt", "p"),
+        meta(json!({"spawn_bg": true})),
+        update(json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "sub1",
+            "name": "subagent",
+            "status": "in_progress",
+            "rawInput": {"prompt": "bg"}
+        })),
+        meta(json!({"hang": true})),
+        meta(json!({"restart": true})),
+    ]);
+    s.extend(initialize("2.4.2"));
+    s.extend([
+        request("session/resume", "res"),
+        answer(
+            "res",
+            json!({"configOptions": options("m", "default", &["default"], "build")}),
+        ),
+        request("session/prompt", "q"),
+        says("clean"),
+        ends("q", "end_turn", 1),
+    ]);
+    let f = scripted(s);
+    let mut h = f.start(true);
+    prompt(&h, "start bg");
+    until(&mut h, is_tool_use).await;
+    let bg = background_pid(&f).await;
+    send(&h, SessionCommand::Interrupt);
+    let evs = until(&mut h, is_turn).await;
+    assert_eq!(turns(&evs), [(false, true)]);
+    assert_reaped_soon(bg).await;
+
+    prompt(&h, "next");
+    let next = until(&mut h, is_turn).await;
+    assert_eq!(turns(&next), [(false, false)]);
+    assert_eq!(texts(&next), ["clean"]);
+    shutdown(&mut h).await;
+    assert_eq!(f.read("runs.log").len(), 2);
 }
 
 #[tokio::test]

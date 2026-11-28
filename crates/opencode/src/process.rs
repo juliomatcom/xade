@@ -6,7 +6,7 @@
 //! that: such a "synthetic" turn is ended after a quiet period.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
@@ -27,6 +27,8 @@ use crate::translate::Translator;
 const STDERR_LINES: usize = 50;
 const STDIN_CLOSE_WAIT: Duration = Duration::from_secs(3);
 const SIGTERM_WAIT: Duration = Duration::from_secs(2);
+/// Shorter grace when Stop recycles the child to kill a background subagent.
+const RECYCLE_WAIT: Duration = Duration::from_millis(500);
 /// How long a turn with no prompt behind it must stay silent to count as over.
 pub(crate) const QUIET_PERIOD: Duration = Duration::from_secs(5);
 
@@ -57,30 +59,32 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Spawns the child and its tasks. Must be called inside a tokio runtime. Nothing is sent to
-/// OpenCode but `initialize` until the first prompt: the session is created lazily.
-///
-/// With Auto OFF the child also gets permission rules in `OPENCODE_CONFIG_CONTENT`; with Auto ON
-/// its environment is left as it is, so the user's own rules (a `deny` above all) apply.
-pub fn spawn_session(
+struct Spawned {
+    child: Child,
+    pid: Option<u32>,
+    stdin: ChildStdin,
+    line_rx: UnboundedReceiver<String>,
+    stderr_tail: StderrTail,
+    reader: tokio::task::JoinHandle<()>,
+    err_reader: tokio::task::JoinHandle<()>,
+}
+
+fn spawn_child(
     binary: &Path,
-    cfg: SpawnConfig,
-    quiet: Duration,
-) -> Result<SessionHandle, ProviderError> {
+    cwd: &Path,
+    auto_off_env: Option<&str>,
+) -> Result<Spawned, ProviderError> {
     let mut command = Command::new(binary);
     command
         .arg("acp")
-        .current_dir(&cfg.cwd)
+        .current_dir(cwd)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .process_group(0);
-    if !cfg.auto_mode {
-        let existing = std::env::var_os(CONFIG_ENV)
-            .map(|v| v.into_string().map_err(|_| bad_config("it is not UTF-8")))
-            .transpose()?;
-        command.env(CONFIG_ENV, auto_off_config(existing.as_deref())?);
+    if let Some(config) = auto_off_env {
+        command.env(CONFIG_ENV, config);
     }
     let mut child = command
         .spawn()
@@ -91,24 +95,55 @@ pub fn spawn_session(
         return Err(ProviderError::Spawn("child stdio unavailable".into()));
     };
     let pid = child.id();
+    let (line_tx, line_rx) = mpsc::unbounded_channel();
+    let stderr_tail: StderrTail = Arc::default();
+    let reader = tokio::spawn(read_stdout(stdout, line_tx));
+    let err_reader = tokio::spawn(read_stderr(stderr, stderr_tail.clone()));
+    Ok(Spawned {
+        child,
+        pid,
+        stdin,
+        line_rx,
+        stderr_tail,
+        reader,
+        err_reader,
+    })
+}
+
+/// Spawns the child and its tasks. Must be called inside a tokio runtime. Nothing is sent to
+/// OpenCode but `initialize` until the first prompt: the session is created lazily.
+///
+/// With Auto OFF the child also gets permission rules in `OPENCODE_CONFIG_CONTENT`; with Auto ON
+/// its environment is left as it is, so the user's own rules (a `deny` above all) apply.
+pub fn spawn_session(
+    binary: &Path,
+    cfg: SpawnConfig,
+    quiet: Duration,
+) -> Result<SessionHandle, ProviderError> {
+    let auto_off_env = if !cfg.auto_mode {
+        let existing = std::env::var_os(CONFIG_ENV)
+            .map(|v| v.into_string().map_err(|_| bad_config("it is not UTF-8")))
+            .transpose()?;
+        Some(auto_off_config(existing.as_deref())?)
+    } else {
+        None
+    };
+    let spawned = spawn_child(binary, &cfg.cwd, auto_off_env.as_deref())?;
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (ev_tx, ev_rx) = mpsc::unbounded_channel();
-    let (line_tx, line_rx) = mpsc::unbounded_channel();
-    let stderr_tail: StderrTail = Arc::default();
-
-    let reader = tokio::spawn(read_stdout(stdout, line_tx));
-    let err_reader = tokio::spawn(read_stderr(stderr, stderr_tail.clone()));
     tokio::spawn(run(
-        Agent::new(cfg, quiet, stdin, ev_tx),
+        Agent::new(cfg, quiet, spawned.stdin, ev_tx),
         Process {
-            child,
-            pid,
+            binary: binary.to_path_buf(),
+            auto_off_env,
+            child: spawned.child,
+            pid: spawned.pid,
             cmd_rx,
-            line_rx,
-            stderr_tail,
-            reader,
-            err_reader,
+            line_rx: spawned.line_rx,
+            stderr_tail: spawned.stderr_tail,
+            reader: spawned.reader,
+            err_reader: spawned.err_reader,
         },
     ));
     Ok(SessionHandle {
@@ -172,8 +207,11 @@ fn bad_config(why: &str) -> ProviderError {
 
 /// `existing` (the user's own `OPENCODE_CONFIG_CONTENT`) with an `ask` rule appended for every
 /// guarded action, at the top level and for each built-in agent. The inline config is merged last
-/// and the last matching rule wins, so only `ask` is ever added: an `allow` would override a
-/// user's `deny`. Anything that cannot be extended safely is an error, never silently dropped.
+/// and the last matching rule wins, so only `ask` is ever added (never `allow`). With Auto OFF a
+/// user's `deny` rule for a guarded action therefore becomes an `ask` prompt rather than a silent
+/// block, and this gated process never auto-allows requests even if Auto is toggled on mid-turn
+/// (the idle respawn starts a clean process where user `deny` rules apply again). Anything that
+/// cannot be extended safely is an error, never silently dropped.
 fn auto_off_config(existing: Option<&str>) -> Result<String, ProviderError> {
     let mut config: Value = match existing.map(str::trim).filter(|s| !s.is_empty()) {
         Some(text) => serde_json::from_str(text).map_err(|_| bad_config("it is not valid JSON"))?,
@@ -367,6 +405,8 @@ struct Agent {
     steers: usize,
     /// Bumped by Stop, so a steer answered later never starts anything.
     steer_epoch: u64,
+    /// Refused steers waiting to run ahead of any later-queued prompts, in their own order.
+    refused_steers: VecDeque<String>,
     /// Prompts waiting: for the session, or for the running prompt to end.
     queued: VecDeque<String>,
     /// Stop was asked of the running prompt.
@@ -379,6 +419,12 @@ struct Agent {
 
     /// A turn with no prompt behind it is in progress.
     synthetic: bool,
+    /// Whether this child process has seen a subagent call or child-session frame: `session/cancel`
+    /// cannot stop background subagents, so Stop kills and recycles the child when set.
+    saw_subagent: bool,
+    /// Set by Stop when the child must be killed and replaced with a fresh `acp` child resuming the
+    /// same session.
+    needs_recycle: bool,
     /// Tool calls that updates reported as unfinished. A permission request adds none: its call
     /// may never get an update.
     running: HashSet<String>,
@@ -405,15 +451,53 @@ impl Agent {
             answer: None,
             steers: 0,
             steer_epoch: 0,
+            refused_steers: VecDeque::new(),
             queued: VecDeque::new(),
             interrupted: false,
             stopped: false,
             permissions: HashMap::new(),
             synthetic: false,
+            saw_subagent: false,
+            needs_recycle: false,
             running: HashSet::new(),
             quiet,
             deadline: None,
         }
+    }
+
+    fn reset_for_recycle(&mut self, resume_id: Option<String>, stdin: ChildStdin) {
+        self.cfg.resume = resume_id;
+        self.stdin = Some(stdin);
+        self.next_id = 1;
+        self.pending.clear();
+        self.phase = Phase::Handshaking;
+        self.session_id = None;
+        self.options = Value::Null;
+        self.stages.clear();
+        self.prompt = None;
+        self.answer = None;
+        self.steers = 0;
+        self.steer_epoch += 1;
+        self.interrupted = false;
+        self.stopped = false;
+        self.permissions.clear();
+        self.end_synthetic();
+        self.saw_subagent = false;
+    }
+
+    fn has_queued(&self) -> bool {
+        !self.refused_steers.is_empty() || !self.queued.is_empty()
+    }
+
+    fn pop_queued(&mut self) -> Option<String> {
+        self.refused_steers
+            .pop_front()
+            .or_else(|| self.queued.pop_front())
+    }
+
+    fn clear_queued(&mut self) {
+        self.refused_steers.clear();
+        self.queued.clear();
     }
 
     fn emit(&self, ev: ProviderEvent) {
@@ -432,7 +516,7 @@ impl Agent {
 
     /// Whether the UI is waiting for a `TurnComplete`.
     fn mid_turn(&self) -> bool {
-        self.prompt.is_some() || self.synthetic || !self.queued.is_empty()
+        self.prompt.is_some() || self.synthetic || self.has_queued()
     }
 
     async fn write(&mut self, line: String) {
@@ -475,7 +559,7 @@ impl Agent {
     fn fail(&mut self, msg: String) {
         self.emit(ProviderEvent::Error(msg));
         if self.mid_turn() {
-            self.queued.clear();
+            self.clear_queued();
             self.prompt = None;
             self.synthetic = false;
             self.emit(ProviderEvent::TurnComplete {
@@ -510,6 +594,12 @@ impl Agent {
                 }
             }
             SessionCommand::SetAutoMode(on) => {
+                // A process spawned with Auto OFF carries injected `ask` rules that turned user
+                // `deny` rules into prompts: never auto-allow in it. The actor's idle respawn
+                // brings a clean environment where user `deny` rules apply again.
+                if !self.cfg.auto_mode {
+                    return;
+                }
                 self.auto = on;
                 if on {
                     let pending: Vec<_> = self.permissions.drain().collect();
@@ -527,7 +617,7 @@ impl Agent {
     async fn send(&mut self, text: String) {
         if self.prompt.is_none() {
             self.start_prompt(text).await;
-        } else if self.interrupted || self.answer.is_some() || !self.queued.is_empty() {
+        } else if self.interrupted || self.answer.is_some() || self.has_queued() {
             self.queued.push_back(text);
         } else {
             let Some(sid) = self.session_id.clone() else {
@@ -572,9 +662,9 @@ impl Agent {
 
     async fn interrupt(&mut self) {
         if self.phase != Phase::Ready {
-            if !self.queued.is_empty() {
+            if self.has_queued() {
                 // Nothing was sent yet; without this the UI would stay "Streaming".
-                self.queued.clear();
+                self.clear_queued();
                 self.emit(ProviderEvent::TurnComplete {
                     usage: UsageTotals::default(),
                     is_error: false,
@@ -586,10 +676,25 @@ impl Agent {
         if self.prompt.is_none() && !self.synthetic {
             return;
         }
-        self.queued.clear();
+        self.clear_queued();
         self.steer_epoch += 1;
         self.steers = 0;
         self.stopped = true;
+        // `session/cancel` only cancels the active ACP prompt fiber: it cannot stop a background
+        // subagent or a no-prompt follow-up. Kill and recycle the child instead, keeping this
+        // `SessionHandle` alive and resuming the same session on the next prompt.
+        if self.synthetic || self.saw_subagent {
+            self.permissions.clear();
+            self.prompt = None;
+            self.answer = None;
+            self.interrupted = false;
+            self.end_synthetic();
+            self.saw_subagent = false;
+            let evs = self.translator.finish_turn(true);
+            self.emit_all(evs);
+            self.needs_recycle = true;
+            return;
+        }
         // ACP: the client answers every pending request when it cancels.
         self.cancel_permissions().await;
         if let Some(sid) = self.session_id.clone() {
@@ -599,16 +704,10 @@ impl Agent {
             ))
             .await;
         }
-        if self.prompt.is_some() {
-            self.interrupted = true;
-            // The prompt had already answered and was only waiting for a steer.
-            if let Some(answer) = self.answer.take() {
-                self.finish_prompt(answer).await;
-            }
-        } else {
-            self.end_synthetic();
-            let evs = self.translator.finish_turn(true);
-            self.emit_all(evs);
+        self.interrupted = true;
+        // The prompt had already answered and was only waiting for a steer.
+        if let Some(answer) = self.answer.take() {
+            self.finish_prompt(answer).await;
         }
     }
 
@@ -623,7 +722,7 @@ impl Agent {
                     None | Some("end_turn")
                 )
             });
-        let chain = !self.queued.is_empty() && !self.closing();
+        let chain = self.has_queued() && !self.closing();
         // After a clean end only a background subagent can still be waiting for an answer;
         // otherwise OpenCode has given up on whatever it asked.
         if !clean {
@@ -638,7 +737,7 @@ impl Agent {
         self.running.clear();
         self.emit_all(evs);
         if chain {
-            if let Some(next) = self.queued.pop_front() {
+            if let Some(next) = self.pop_queued() {
                 self.start_prompt(next).await;
             }
         } else if waiting {
@@ -740,6 +839,9 @@ impl Agent {
                     return;
                 };
                 if let Some(update) = rpc::update_for(&params, sid) {
+                    if is_subagent_update(update) {
+                        self.saw_subagent = true;
+                    }
                     let evs = self.translator.on_update(update);
                     self.emit_turn(evs);
                     // After `emit_turn`, which may open a turn. An update trailing one is not
@@ -767,6 +869,13 @@ impl Agent {
         }
         let options = parse_options(params);
         let ours = params.get("sessionId").and_then(Value::as_str) == self.session_id.as_deref();
+        if ours
+            && params
+                .pointer("/toolCall/_meta/opencode~1child-session")
+                .is_some()
+        {
+            self.saw_subagent = true;
+        }
         let after_stop = if self.prompt.is_some() {
             self.interrupted
         } else {
@@ -792,7 +901,7 @@ impl Agent {
                     Some(why) => self.fail(why.into()),
                     None => {
                         self.phase = Phase::NeedSession;
-                        if !self.queued.is_empty() {
+                        if self.has_queued() {
                             self.begin_session().await;
                         }
                     }
@@ -845,7 +954,9 @@ impl Agent {
                 if !injected {
                     debug!("steering refused; sending it as the next prompt");
                     if self.prompt.is_some() {
-                        self.queued.push_back(text);
+                        // Keep refused steers ahead of any prompts queued after them, preserving
+                        // their own arrival order.
+                        self.refused_steers.push_back(text);
                     } else {
                         self.start_prompt(text).await;
                     }
@@ -902,6 +1013,12 @@ impl Agent {
             let Some(want) = want else { continue };
             let (current, values) = config_option(&self.options, stage);
             let known = stage == "model" || values.contains(&want);
+            if stage == "mode" && current != Some(want) && !known {
+                self.fail(format!(
+                    "OpenCode did not offer `{want}` mode; refusing to run ungated with Auto OFF"
+                ));
+                return;
+            }
             if current == Some(want) || !known {
                 continue;
             }
@@ -918,15 +1035,30 @@ impl Agent {
             return;
         }
         self.phase = Phase::Ready;
-        if let Some(first) = self.queued.pop_front() {
+        if let Some(first) = self.pop_queued() {
             self.start_prompt(first).await;
         }
     }
 }
 
+fn is_subagent_update(update: &Value) -> bool {
+    if update.pointer("/_meta/opencode~1child-session").is_some() {
+        return true;
+    }
+    matches!(
+        update.get("sessionUpdate").and_then(Value::as_str),
+        Some("tool_call" | "tool_call_update")
+    ) && matches!(
+        update.get("name").and_then(Value::as_str),
+        Some("subagent" | "task")
+    )
+}
+
 // ---- task ---------------------------------------------------------------------------------
 
 struct Process {
+    binary: PathBuf,
+    auto_off_env: Option<String>,
     child: Child,
     pid: Option<u32>,
     cmd_rx: UnboundedReceiver<SessionCommand>,
@@ -945,6 +1077,44 @@ async fn run(mut agent: Agent, mut p: Process) {
         if agent.closing() {
             requested = true;
             break shutdown(&mut p.child, &mut agent.stdin, p.pid).await;
+        }
+        if agent.needs_recycle {
+            agent.needs_recycle = false;
+            shutdown_with(
+                &mut p.child,
+                &mut agent.stdin,
+                p.pid,
+                RECYCLE_WAIT,
+                RECYCLE_WAIT,
+            )
+            .await;
+            killpg(p.pid, libc::SIGKILL);
+            p.reader.abort();
+            p.err_reader.abort();
+            let resume_id = agent
+                .session_id
+                .clone()
+                .or_else(|| agent.cfg.resume.clone());
+            match spawn_child(&p.binary, &agent.cfg.cwd, p.auto_off_env.as_deref()) {
+                Ok(next) => {
+                    p.child = next.child;
+                    p.pid = next.pid;
+                    p.line_rx = next.line_rx;
+                    p.stderr_tail = next.stderr_tail;
+                    p.reader = next.reader;
+                    p.err_reader = next.err_reader;
+                    stdout_open = true;
+                    agent.reset_for_recycle(resume_id, next.stdin);
+                    agent.initialize().await;
+                }
+                Err(e) => {
+                    agent.emit(ProviderEvent::Error(format!(
+                        "OpenCode could not restart after stop: {e}"
+                    )));
+                    agent.emit(ProviderEvent::Exited { code: None });
+                    return;
+                }
+            }
         }
         let deadline = agent.deadline;
         tokio::select! {
@@ -1016,12 +1186,22 @@ async fn shutdown(
     stdin: &mut Option<ChildStdin>,
     pid: Option<u32>,
 ) -> Option<ExitStatus> {
+    shutdown_with(child, stdin, pid, STDIN_CLOSE_WAIT, SIGTERM_WAIT).await
+}
+
+async fn shutdown_with(
+    child: &mut Child,
+    stdin: &mut Option<ChildStdin>,
+    pid: Option<u32>,
+    close_wait: Duration,
+    term_wait: Duration,
+) -> Option<ExitStatus> {
     stdin.take();
-    if let Ok(st) = timeout(STDIN_CLOSE_WAIT, child.wait()).await {
+    if let Ok(st) = timeout(close_wait, child.wait()).await {
         return st.ok();
     }
     killpg(pid, libc::SIGTERM);
-    if let Ok(st) = timeout(SIGTERM_WAIT, child.wait()).await {
+    if let Ok(st) = timeout(term_wait, child.wait()).await {
         return st.ok();
     }
     killpg(pid, libc::SIGKILL);

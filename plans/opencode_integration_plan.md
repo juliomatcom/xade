@@ -17,7 +17,7 @@ Spirit: pragmatic and simple. Mirror `crates/antigravity` (ACP over JSON-RPC 2.0
 | D4 | Create the ACP session **lazily** on the first prompt; spawn `opencode acp` and run `initialize` eagerly. | Opening a window without prompting must not litter OpenCode's session history. |
 | D5 | Map core OpenCode tools to Claude-shaped names (`shell` → `Bash`, `read` → `Read`, `write` → `Write`, `edit` → `Edit`, `patch` → `Write`/`Edit` with `structuredPatch`) in `translate.rs`; **never** emit `ToolUse` from `status:"pending"` (wait for `in_progress`, terminal, or permission request). | OpenCode emits `tool_call` (`status:"pending"`, empty or `{cwd}`-only `rawInput`), then `tool_call_update` (`status:"in_progress"`, real `rawInput`, omitting `name`). `gpt-6-luna` edits exclusively via `patch`. Caching metadata + Claude-shaped mapping makes tool cards, syntax highlighting, diff modal, and changes summary work with zero UI changes and satisfies the "no inline diffs" invariant. |
 | D6 | Mid-turn steer uses **`_session/steering`** (not a second `session/prompt`). On `outcome:"promptRequired"` or RPC error, fall back to a fresh `session/prompt` once idle. | A second `session/prompt` while active fails with `-32603 "Session already has an active ACP prompt"`. `_session/steering` injects into the running turn (`outcome:"injected"`) and resolves with one `session/prompt` response. |
-| D7 | **Auto OFF** sets `OPENCODE_CONFIG_CONTENT` with **only `ask` rules** for `shell`, `edit`, `write`, `patch`, `webfetch`, `websearch`, `execute`, `generate_image` (resource `*`) in both top-level `permissions` and `agents.{build,explore,general}.permissions` (appending to any user-set `OPENCODE_CONFIG_CONTENT`; invalid JSON fails the spawn). **Auto ON** leaves the env untouched and auto-answers `session/request_permission` with `allow_once`. | OpenCode defaults to `* * allow` (only `.env` reads ask), so leaving env untouched on Auto OFF gates nothing. Rules are last-match-wins (built-in → global → project → `OPENCODE_CONFIG_CONTENT`), and project agent-level rules otherwise override top-level rules. Leaving env untouched on Auto ON preserves any user `deny` rules instead of turning them into `ask` and auto-allowing them. Leaving `read` and `external_directory` out of the injected `ask` list keeps read-only ops and fork snapshots (which read `/tmp/xade-forks-<uid>`) working cleanly. |
+| D7 | **Auto OFF** sets `OPENCODE_CONFIG_CONTENT` with **only `ask` rules** for `shell`, `edit`, `write`, `patch`, `webfetch`, `websearch`, `execute`, `generate_image` (resource `*`) in both top-level `permissions` and `agents.{build,explore,general}.permissions` (appending to any user-set `OPENCODE_CONFIG_CONTENT`; invalid JSON fails the spawn). **Auto ON** leaves the env untouched and auto-answers `session/request_permission` with `allow_once`. | OpenCode defaults to `* * allow` (only `.env` reads ask), so leaving env untouched on Auto OFF gates nothing. Rules are last-match-wins (built-in → global → project → `OPENCODE_CONFIG_CONTENT`), and project agent-level rules otherwise override top-level rules. Because `OPENCODE_CONFIG_CONTENT` lands last, with Auto OFF any user `deny` rule for a guarded action becomes an `ask` prompt instead of a silent block; therefore a process spawned with Auto OFF never auto-allows on `SetAutoMode(true)` (toggling Auto ON takes effect after the idle respawn starts a clean process where user `deny` rules apply again). Leaving `read` and `external_directory` out of the injected `ask` list keeps read-only ops and fork snapshots (which read `/tmp/xade-forks-<uid>`) working cleanly. |
 | D8 | `preflight()` runs `opencode models --standalone` (15 s timeout, ~0.4 s live). `delete_session(id)` runs `opencode session delete --standalone <id>` (10 s timeout, ~0.2 s live). | Without `--standalone`, both commands try to contact/start the managed background daemon (verified: hangs 20 s then fails in isolated HOME, or leaves a daemon outliving Xade). With `--standalone`, both are fast, isolated, and leave no daemon. |
 | D9 | Defer history import, running-sessions polling, quota bar, and custom logo asset out of v1 (`company_symbol`/`cli_symbol` return `None`). | Keeps v1 small and focused; every UI call site already handles `Option<TextureHandle>` (`None`). |
 
@@ -103,10 +103,12 @@ All facts below were verified live against `opencode v2.4.2` (`opencode-go/glm-5
 
 ### 2.4 Approvals, permissions env, cancel, and steer
 - **Auto OFF permission config (`OPENCODE_CONFIG_CONTENT`):**
-  - Rules are last-match-wins: built-in/agent defaults → global → project → `OPENCODE_CONFIG_CONTENT`.
-  - Injected rules (ONLY `ask`, never `allow`, so user `deny` is never weakened):
+  - Rules are last-match-wins (`findLast`): built-in/agent defaults → global → project → `OPENCODE_CONFIG_CONTENT`.
+  - Injected rules (ONLY `ask`, never `allow`):
     - Actions: `shell`, `edit`, `write`, `patch`, `webfetch`, `websearch`, `execute`, `generate_image`; resource `"*"`; effect `"ask"`.
     - Placed in BOTH top-level `permissions` AND `agents.build.permissions`, `agents.explore.permissions`, `agents.general.permissions` (otherwise a project agent-level `allow` lands after the top-level rule).
+  - Because our `ask` rules land last, with Auto OFF any user `deny` rule for a guarded action becomes an `ask` prompt (never silently allowed). A process spawned with Auto OFF ignores `SetAutoMode(true)` so denied actions are never auto-allowed mid-turn; switching to Auto ON takes effect after the idle respawn brings a clean environment where user `deny` rules apply again.
+  - Auto OFF also switches session `mode` to `"build"` (and fails the session if `"build"` is not offered or rejected).
   - If `OPENCODE_CONFIG_CONTENT` is already set in the environment: parse as JSON object and append our rules to each array (creating arrays/objects as needed). If it is not valid JSON (or not an object), fail the spawn cleanly with a clear `ProviderError::Protocol` error rather than silently dropping gating.
   - Auto ON spawns leave `OPENCODE_CONFIG_CONTENT` untouched so user `deny` rules stay `deny`.
 - **Permission request** (OpenCode → Xade JSON-RPC request; numeric `id` starting at `0`):
@@ -356,7 +358,7 @@ Workflow per phase:
 **Tasks:**
 1. Write `wiki-llm/opencode-protocol.md` mirroring `antigravity-protocol.md` / `codex-protocol.md` (facts only, every protocol fact naming its fixture).
 2. Update `wiki-llm/index.md` (add `opencode-protocol.md` row and add it to "Adding a provider"), `wiki-llm/architecture.md` (crate list + dependency rule + `respawn_on_auto_change`), `wiki-llm/conventions.md` (dependency rule + credentials line mentions `opencode`), `wiki-llm/testing.md` (recorder + `XADE_E2E_OPENCODE` line).
-3. Add `docs/opencode.md` (short user doc mirroring `docs/codex.md`: install/sign-in, OpenCode >= 2.0 requirement, free models vs Go/connected providers, Auto OFF gating & MCP-tool caveat, Auto ON preserving user `deny`, background subagent close/respawn note, delete, fork & Multi-Session, no import/quota in v1).
+3. Add `docs/opencode.md` (short user doc mirroring `docs/codex.md`: install/sign-in, OpenCode >= 2.0 requirement, free models vs Go/connected providers, Auto OFF gating — including that user `deny` rules prompt instead of silent block under Auto OFF and MCP tools stay ungated — Auto ON preserving user `deny`, background subagent Stop/close/respawn note including silent-child residual, delete, fork & Multi-Session, no import/quota in v1).
 4. Update `docs/provider-protocols.md` (add OpenCode column) and `README.md` (mention OpenCode next to Claude Code, Antigravity, and Codex, linking `docs/opencode.md`).
 **Acceptance:**
 - All links resolve; no doc restates code/types/copy.
@@ -382,7 +384,7 @@ Workflow per phase:
 - [ ] Late permission after Stop → answered `cancelled` immediately, never shown, never auto-allowed.
 - [ ] Prompt sent after Stop while turn unwinds → queued until cancelled turn finishes, never steers it, chains without premature `TurnComplete`.
 - [ ] Mid-turn prompt → `_session/steering`; `outcome:"injected"` yields single `TurnComplete`; `outcome:"promptRequired"` or RPC error (when not invalidated by Stop) falls back to `session/prompt`.
-- [ ] `SetAutoMode(true)` while permissions pending → auto-allows them immediately; `SessionActor` respawns on idle when Auto changes (`respawn_on_auto_change() == true`).
+- [ ] `SetAutoMode(true)` in an Auto-OFF-spawned process does NOT auto-allow (protects user `deny` rules until idle respawn); `SessionActor` respawns on idle when Auto changes (`respawn_on_auto_change() == true`).
 - [ ] Unknown server request → answered `-32601` immediately.
 - [ ] Model change updates valid `effort` values; resume with `Effort::Default` sends `"default"` when current differs; unsupported effort is skipped; bad model is non-fatal `Error`.
 - [ ] `session/resume` of unknown id → `Error`, failed turn, clean shutdown.
@@ -410,5 +412,5 @@ Workflow per phase:
 - Live model/effort change without respawning the ACP process.
 - Exposing OpenCode's `plan` mode (v1 stays on `build`).
 - Gating MCP tools (`<server>_<tool>`) under Auto OFF (using `*_*` would also match `external_directory` and break fork snapshots reading `/tmp/xade-forks-<uid>`).
-- Keeping background subagents alive across session close or Auto/model/effort respawn (documented).
+- Keeping background subagents alive across session close or Auto/model/effort respawn (documented); also note that while a background child works silently with no active turn, there is no Stop button and only closing the session kills it.
 - Gating custom **subagents** whose own rules `allow` guarded actions: their names are unknown at spawn.
