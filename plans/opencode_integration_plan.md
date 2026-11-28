@@ -49,7 +49,7 @@ All facts below were verified live against `opencode v2.4.2` (`opencode-go/glm-5
 ### 2.2 Handshake and config options
 - `initialize` params: `{"protocolVersion":1,"clientCapabilities":{"fs":{"readTextFile":false,"writeTextFile":false},"terminal":false},"clientInfo":{"name":"xade","version":<pkg>}}`.
   - Result: `protocolVersion: 1`, `agentInfo: {name:"OpenCode", version:"2.4.2"}`, `agentCapabilities: {loadSession:true, promptCapabilities:{embeddedContext:true,image:true}, sessionCapabilities:{additionalDirectories,close,delete,fork,list,resume}, _meta:{"opencode/child-session-updates":true}}`, `_meta: {steering:{supported:true}}`, `authMethods: [{id:"opencode-login", name:"Login with opencode", description:"Run `opencode auth login` in the terminal"}]`.
-  - Version guard: if `agentInfo.version` parses a major version `< 2`, fail the spawn with `"OpenCode 2.0 or newer is required; please update OpenCode."` (v1 uses key `permission` instead of `permissions`).
+  - Version guard: unless `agentInfo.version` parses a major version `>= 2` (missing or unparsable included), fail the spawn with `"OpenCode 2.0 or newer is required; please update OpenCode."` (v1 uses key `permission` instead of `permissions`).
 - `session/new` params: `{"cwd":<abs path>,"mcpServers":[]}`.
   - Result: `{"sessionId":"ses_...", "configOptions":[...]}` (no top-level `models`/`modes`) followed by `available_commands_update` (ignore and strip from fixtures).
   - `configOptions` has three entries:
@@ -214,12 +214,14 @@ crates/opencode/
 - `steer_epoch: u64`: incremented on `Interrupt`. `Pending::Steer { text, epoch }` ignores its response if `epoch != self.steer_epoch` (a late `promptRequired`/error after Stop never starts a turn).
 - `queued: VecDeque<String>`: prompts received before `Ready`, prompts sent *after* Stop while the cancelled turn unwinds, or prompts deferred from a non-invalidated steer fallback.
 - **Draining `queued` on `Pending::Prompt` resolution:**
-  - Clear `active_prompt`, clear `permissions`.
+  - While steers of the current epoch are unanswered, hold the prompt's answer (`active_prompt` stays set) and process it after the last steer answer, so a refused steer chains instead of following a `TurnComplete`. Stop processes a held answer at once.
+  - Clear `active_prompt`; unless the prompt ended cleanly (`end_turn`, not interrupted), answer pending permissions `cancelled`.
+  - A clean end with a permission still pending (a subagent's) and nothing queued: no `TurnComplete`; the turn continues as a synthetic one, so the request stays on screen. OpenCode sends one permission request at a time (verified with two parallel shell calls).
   - If `!self.queued.is_empty() && !self.closing()`: pass `last = false` to `translator.on_prompt_result` (sums usage, flushes text, emits NO `TurnComplete` yet!), reset `interrupted = false`, and immediately send `queued.pop_front()` as the next `session/prompt`. (Prevents `SessionActor` from going `Idle` and triggering `apply_pending` respawn or dropping queued work.)
   - Else (`queued` empty or closing): pass `last = true` to `translator.on_prompt_result` (emits `TurnComplete`), reset `interrupted = false`.
 - **Synthetic turns (background subagents):**
-  - Track `in_flight_tools: HashSet<String>` (added on non-terminal tool update, never from a permission request, whose call may get no update at all; removed on terminal tool update; cleared on turn end / interrupt) + `synthetic_turn: bool` + `synthetic_deadline: Option<tokio::time::Instant>` (default quiet period `5 s`, overridable for fast unit/fake tests via an internal test helper).
-  - When a translated event (`TextDelta`, `ThinkingProgress`, `AssistantText`, `ToolUse`, `ToolResult`, `PermissionRequest`) arrives while `active_prompt.is_none()` and `phase == Ready`: enter `synthetic_turn = true`.
+  - Track `in_flight_tools: HashSet<String>` (added on non-terminal tool update while a turn is in progress, never from an update trailing a turn nor from a permission request, whose call may get no update at all; removed on terminal tool update; cleared on turn end / interrupt) + `synthetic_turn: bool` + `synthetic_deadline: Option<tokio::time::Instant>` (default quiet period `5 s`, overridable for fast unit/fake tests via an internal test helper).
+  - When a translated event (`TextDelta`, `ThinkingProgress`, `AssistantText`, `ToolUse`, `PermissionRequest`; a lone `ToolResult` opens nothing, as in the actor) arrives while `active_prompt.is_none()` and `phase == Ready`: enter `synthetic_turn = true`.
   - Whenever `synthetic_turn`: if `permissions.is_empty() && in_flight_tools.is_empty()`, set `synthetic_deadline = Some(now + quiet_timeout)`; else set `synthetic_deadline = None`.
   - When `synthetic_deadline` fires: clear `synthetic_turn`/`synthetic_deadline`/`in_flight_tools`, flush text, emit `TurnComplete` carrying latest context figures (`is_error: false, interrupted: false`).
   - On `Interrupt` while `synthetic_turn`: cancel pending permissions, send `session/cancel`, clear `synthetic_turn`/`synthetic_deadline`/`in_flight_tools`/`queued`, flush text, emit `TurnComplete { is_error: false, interrupted: true }`.
@@ -227,6 +229,8 @@ crates/opencode/
 - **Auto mode env (`OPENCODE_CONFIG_CONTENT`):**
   - On `spawn_session` with `!cfg.auto_mode`: build the `ask` rules object (top-level `permissions` + `agents.{build,explore,general}.permissions`), merge/append onto existing `std::env::var("OPENCODE_CONFIG_CONTENT")` if present (returning `Err(ProviderError::Protocol(...))` if existing value is invalid JSON or not an object), and pass via `cmd.env("OPENCODE_CONFIG_CONTENT", merged)`.
   - On `spawn_session` with `cfg.auto_mode`: do NOT touch `OPENCODE_CONFIG_CONTENT`.
+  - Auto OFF also sets `configId: "mode"` to `build` when the session is in another agent: a custom default agent's own `allow` rules would run tools unasked (verified). A refused change ends the session.
+  - Stop stays in force for permission requests arriving with no prompt running until the next prompt is sent.
 - **Unexpected child exit:** if mid-turn (`active_prompt.is_some()` || `synthetic_turn` || `!queued.is_empty()`), flush text, emit `Error` with stderr tail, emit `TurnComplete { is_error: true, interrupted: false }`, then `Exited { code }`.
 - **Shutdown:** close stdin, wait 3 s, SIGTERM process group, wait 2 s, SIGKILL; post-reap SIGKILL on process group (never kill `opencode` by name).
 
@@ -407,3 +411,4 @@ Workflow per phase:
 - Exposing OpenCode's `plan` mode (v1 stays on `build`).
 - Gating MCP tools (`<server>_<tool>`) under Auto OFF (using `*_*` would also match `external_directory` and break fork snapshots reading `/tmp/xade-forks-<uid>`).
 - Keeping background subagents alive across session close or Auto/model/effort respawn (documented).
+- Gating custom **subagents** whose own rules `allow` guarded actions: their names are unknown at spawn.
